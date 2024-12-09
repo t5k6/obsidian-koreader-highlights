@@ -1,0 +1,10 @@
+{
+	"id": "koreader-highlights-importer",
+	"name": "KoReader Highlight Importer",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "Imports KoReader highlights into Obsidian.",
+	"author": "Tahsin Kocaman",
+	"authorUrl": "https://github.com/t5k6",
+	"isDesktopOnly": true
+}

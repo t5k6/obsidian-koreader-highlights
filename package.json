@@ -1,0 +1,33 @@
+{
+	"name": "koreader-highlights-importer",
+	"version": "1.0.0",
+	"description": "Imports highlights and metadata from KoReader into Obsidian notes (https://obsidian.md)",
+	"main": "main.js",
+	"type": "module",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+	},
+	"keywords": [
+		"obsidian",
+		"plugin",
+		"koreader",
+		"highlights",
+		"ebook"
+	],
+	"author": "Tahsin Kocaman",
+	"license": "MIT",
+	"devDependencies": {
+		"@types/luaparse": "^0.2.12",
+		"@types/node": "^22.10.1",
+		"biome": "^0.3.3",
+		"builtin-modules": "4.0.0",
+		"esbuild": "0.24.0",
+		"obsidian": "latest",
+		"tslib": "2.4.0",
+		"typescript": "5.7.2"
+	},
+	"dependencies": {
+		"luaparse": "^0.3.1"
+	}
+}

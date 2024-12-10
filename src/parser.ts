@@ -2,6 +2,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { join as node_join } from "node:path";
 import type { App } from "obsidian";
 import type { Annotation, DocProps, Field, LuaMetadata } from "./types";
+import { TableConstructorExpression } from "luaparse/lib/ast";
 const luaparser = require("luaparse");
 
 export async function findSDRFiles(
@@ -125,10 +126,10 @@ function extractDocProps(field: Field): DocProps {
         series: "",
         language: "en",
     };
+    const TableValue = field.value as TableConstructorExpression;
+    if (TableValue.type !== "TableConstructorExpression") return docProps;
 
-    if (field.value.type !== "TableConstructorExpression") return docProps;
-
-    for (const subField of field.value.fields) {
+    for (const subField of TableValue.fields) {
         if (
             subField.type !== "TableKey" ||
             subField.key.type !== "StringLiteral"
@@ -322,7 +323,7 @@ function extractAnnotations(
 }
 
 function extractModernAnnotation(entry: Field): Annotation | null {
-    if (entry.value.type !== "TableConstructorExpression") return null;
+    if (entry.value?.type !== "TableConstructorExpression") return null;
 
     const annotation: Annotation = {
         chapter: "",

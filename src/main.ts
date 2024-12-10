@@ -151,7 +151,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 	async saveHighlights(
 		highlights: Annotation[],
 		LuaMetadata: LuaMetadata,
-	) {
+	): Promise<void> {
 		if (highlights.length === 0) {
 			console.warn(
 				"No highlights to save for:",
@@ -181,7 +181,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 		}
 	}
 
-	async scanHighlightsDirectory() {
+	async scanHighlightsDirectory(): Promise<void> {
 		const cacheKey = this.getCacheKey(
 			this.settings.koboMountPoint,
 			this.settings.excludedFolders,
@@ -214,7 +214,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 		}
 	}
 
-	async createOrUpdateNote(sdrFiles: string[]) {
+	async createOrUpdateNote(sdrFiles: string[]): Promise<void> {
 		const vault = this.app.vault;
 		const filePath = "KoReader SDR Files.md";
 		const content = `# KoReader SDR Files\n\n${
@@ -228,7 +228,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 		vault: Vault,
 		filePath: string,
 		content: string,
-	) {
+	): Promise<void> {
 		const dirPath = dirname(filePath);
 		const dirExists = await vault.adapter.exists(dirPath);
 
@@ -333,9 +333,9 @@ export default class KoReaderHighlightImporter extends Plugin {
 	}
 
 	sanitizeHTML(html: string): string {
-		const div = document.createElement("div");
-		div.innerHTML = html;
-		return div.textContent || div.innerText || "";
+		const parser = new DOMParser();
+		const doc = parser.parseFromString(html, "text/html");
+		return doc.body.textContent || "";
 	}
 
 	escapeYAMLString(str: string): string {

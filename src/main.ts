@@ -86,28 +86,8 @@ export default class KoReaderHighlightImporter extends Plugin {
 	}
 
 	async importHighlights() {
-		const cacheKey = this.getCacheKey(
-			this.settings.koboMountPoint,
-			this.settings.excludedFolders,
-			this.settings.allowedFileTypes,
-		);
-
-		let sdrFiles = sdrFilesCache.get(cacheKey);
-		if (!sdrFiles) {
-			sdrFiles = await findSDRFiles(
-				this.settings.koboMountPoint,
-				this.settings.excludedFolders,
-				this.settings.allowedFileTypes,
-			);
-			sdrFilesCache.set(cacheKey, sdrFiles);
-		}
-
-		if (sdrFiles.length === 0) {
-			new Notice(
-				"No .sdr directories found at the specified mount point.",
-			);
-			return;
-		}
+		const sdrFiles = await this.ensureMountPointAndSDRFiles();
+		if (!sdrFiles) return;
 
 		for (const file of sdrFiles) {
 			try {
@@ -139,10 +119,25 @@ export default class KoReaderHighlightImporter extends Plugin {
 
 				await this.saveHighlights(highlights, luaMetadata);
 			} catch (error) {
-				console.error(`Error processing file ${file}:`, error);
-				new Notice(
-					`Error processing file ${file}. Check the console for details.`,
-				);
+				if (
+					error instanceof Error && error.name === "FileNotFoundError"
+				) {
+					console.error(`File not found: ${file}`);
+					new Notice(`File not found: ${file}`);
+				} else if (
+					error instanceof Error &&
+					error.name === "MetadataParseError"
+				) {
+					console.error(`Error parsing metadata in ${file}:`, error);
+					new Notice(
+						`Error parsing metadata in ${file}. Check the console for details.`,
+					);
+				} else {
+					console.error(`Error processing file ${file}:`, error);
+					new Notice(
+						`Error processing file ${file}. Check the console for details.`,
+					);
+				}
 			}
 		}
 
@@ -182,26 +177,8 @@ export default class KoReaderHighlightImporter extends Plugin {
 	}
 
 	async scanHighlightsDirectory(): Promise<void> {
-		const cacheKey = this.getCacheKey(
-			this.settings.koboMountPoint,
-			this.settings.excludedFolders,
-			this.settings.allowedFileTypes,
-		);
-
-		let sdrFiles = sdrFilesCache.get(cacheKey);
-		if (!sdrFiles) {
-			sdrFiles = await findSDRFiles(
-				this.settings.koboMountPoint,
-				this.settings.excludedFolders,
-				this.settings.allowedFileTypes,
-			);
-			sdrFilesCache.set(cacheKey, sdrFiles);
-		}
-
-		if (sdrFiles.length === 0) {
-			new Notice("No .sdr directories found.");
-			return;
-		}
+		const sdrFiles = await this.ensureMountPointAndSDRFiles();
+		if (!sdrFiles) return;
 
 		try {
 			await this.createOrUpdateNote(sdrFiles);
@@ -258,6 +235,20 @@ export default class KoReaderHighlightImporter extends Plugin {
 			DEFAULT_SETTINGS,
 			await this.loadData(),
 		);
+		if (!this.settings.koboMountPoint) {
+			new Notice(
+				"Please specify your KoReader mount point in the plugin settings.",
+			);
+		}
+
+		if (!Array.isArray(this.settings.excludedFolders)) {
+			new Notice("Excluded folders setting should be an array.");
+			this.settings.excludedFolders = []; // Set a default value
+		}
+		if (!Array.isArray(this.settings.allowedFileTypes)) {
+			new Notice("Allowed file types setting should be an array");
+			this.settings.allowedFileTypes = [];
+		}
 	}
 
 	async saveSettings() {
@@ -277,6 +268,37 @@ export default class KoReaderHighlightImporter extends Plugin {
 	}
 
 	// Helper functions for file name, frontmatter, and content generation
+	async ensureMountPointAndSDRFiles() {
+		if (!this.settings.koboMountPoint) {
+			new Notice(
+				"Please specify your KoReader mount point in the plugin settings.",
+			);
+			return null;
+		}
+
+		const cacheKey = this.getCacheKey(
+			this.settings.koboMountPoint,
+			this.settings.excludedFolders,
+			this.settings.allowedFileTypes,
+		);
+
+		let sdrFiles = sdrFilesCache.get(cacheKey);
+		if (!sdrFiles) {
+			sdrFiles = await findSDRFiles(
+				this.settings.koboMountPoint,
+				this.settings.excludedFolders,
+				this.settings.allowedFileTypes,
+			);
+			sdrFilesCache.set(cacheKey, sdrFiles);
+		}
+
+		if (sdrFiles.length === 0) {
+			new Notice("No .sdr directories found.");
+			return null;
+		}
+
+		return sdrFiles;
+	}
 
 	generateFileName(docProps: DocProps): string {
 		const normalizedAuthors = this.normalizeFileName(docProps.authors);
@@ -320,6 +342,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 	}
 
 	generateHighlightsContent(highlights: Annotation[]): string {
+		highlights.sort((a, b) => a.pageno - b.pageno);
 		return highlights
 			.map(
 				(highlight) =>

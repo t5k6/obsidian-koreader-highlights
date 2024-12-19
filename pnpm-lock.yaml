@@ -16,8 +16,8 @@ importers:
         specifier: ^0.2.12
         version: 0.2.12
       '@types/node':
-        specifier: ^22.10.1
-        version: 22.10.1
+        specifier: ^22.10.2
+        version: 22.10.2
       biome:
         specifier: ^0.3.3
         version: 0.3.3
@@ -31,8 +31,8 @@ importers:
         specifier: latest
         version: 1.7.2(@codemirror/state@6.4.1)(@codemirror/view@6.35.0)
       tslib:
-        specifier: 2.4.0
-        version: 2.4.0
+        specifier: 2.8.1
+        version: 2.8.1
       typescript:
         specifier: 5.7.2
         version: 5.7.2
@@ -198,8 +198,8 @@ packages:
   '@types/luaparse@0.2.12':
     resolution: {integrity: sha512-liSE0OFeTsKejYrWVZHNA+WOPHj+kGjjZwE+xcojPM9SE2k8sdLDXZB4CObQ+uUkVtKKNOC8+m0wg1F7Nlmt8w==}
 
-  '@types/node@22.10.1':
-    resolution: {integrity: sha512-qKgsUwfHZV2WCWLAnVP1JqnpE6Im6h3Y0+fYgMTasNQ7V++CBX5OT1as0g0f+OyubbFqhf6XVNIsmN4IIhEgGQ==}
+  '@types/node@22.10.2':
+    resolution: {integrity: sha512-Xxr6BBRCAOQixvonOye19wnzyDiUtTeqldOOmj3CkeblonbccA12PFwlufvRdrpjXxqnmUaeiU5EOA+7s5diUQ==}
 
   '@types/tern@0.23.9':
     resolution: {integrity: sha512-ypzHFE/wBzh+BlH6rrBgS5I/Z7RD21pGhZ2rltb/+ZrVM1awdZwjx7hE5XfuYgHWk9uvV5HLZN3SloevCAp3Bw==}
@@ -579,8 +579,8 @@ packages:
     resolution: {integrity: sha512-nlLsUzgm1kfLXSXfRZMc1KLAugd4hqJHDTvc2hDIwS3mZAfMEuMbc03SujMF+GEcpaX/qboeycw6iO8JwVv2+g==}
     engines: {node: '>=0.8'}
 
-  tslib@2.4.0:
-    resolution: {integrity: sha512-d6xOpEDfsi2CZVlPQzGeux8XMwLT9hssAsaPYExaQMuYskwb+x1x7J371tWlbBdWHroy99KnVB6qIkUbs5X3UQ==}
+  tslib@2.8.1:
+    resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
 
   tunnel-agent@0.6.0:
     resolution: {integrity: sha512-McnNiV1l8RYeY8tBgEpuodCC1mLUdbSN+CYBL7kJsJNInOP8UjDDEwdk6Mw60vdLLrr5NHKZhMAOSrR2NZuQ+w==}
@@ -712,7 +712,7 @@ snapshots:
 
   '@types/luaparse@0.2.12': {}
 
-  '@types/node@22.10.1':
+  '@types/node@22.10.2':
     dependencies:
       undici-types: 6.20.0
 
@@ -1144,7 +1144,7 @@ snapshots:
       psl: 1.15.0
       punycode: 2.3.1
 
-  tslib@2.4.0: {}
+  tslib@2.8.1: {}
 
   tunnel-agent@0.6.0:
     dependencies:

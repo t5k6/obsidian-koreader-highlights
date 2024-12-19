@@ -1,9 +1,16 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join as node_join } from "node:path";
-import type { App } from "obsidian";
-import type { Annotation, DocProps, Field, LuaMetadata } from "./types";
-import { TableConstructorExpression } from "luaparse/lib/ast";
+import type { Dirent } from "node:fs";
+import type { TableConstructorExpression } from "luaparse/lib/ast";
+import type {
+    Annotation,
+    DocProps,
+    Field,
+    LuaMetadata,
+    LuaValue,
+} from "./types";
 const luaparser = require("luaparse");
+import { devError, devLog, devWarn } from "./utils";
 
 export async function findSDRFiles(
     rootDir: string,
@@ -11,26 +18,26 @@ export async function findSDRFiles(
     allowedFileTypes: string[],
 ): Promise<string[]> {
     const sdrFiles: string[] = [];
-    console.log("findSDRFiles called with rootDir:", rootDir);
+    devLog("Starting findSDRFiles:", rootDir);
 
     async function traverseDir(directory: string) {
-        let entries;
+        let entries: Dirent[];
         try {
             entries = await readdir(directory, { withFileTypes: true });
         } catch (readDirError) {
             const error = readDirError as NodeJS.ErrnoException;
             if (error.code === "ENOENT") {
-                console.error(
+                devError(
                     `Directory not found: ${directory}`,
                 );
             } else if (error.code === "EPERM") {
-                console.error(
+                devError(
                     `Permission denied for directory: ${directory}`,
                 );
             } else {
-                console.error(
+                devError(
                     `Error reading directory ${directory}:`,
-                    error,
+                    error instanceof Error ? error.message : String(error),
                 );
             }
             return;
@@ -44,10 +51,12 @@ export async function findSDRFiles(
             if (entry.isDirectory() && entry.name.endsWith(".sdr")) {
                 if (await hasAllowedMetadataFile(fullPath, allowedFileTypes)) {
                     sdrFiles.push(fullPath);
-                    console.log("Found SDR directory:", fullPath);
+                    devLog("Found .sdr directory:", fullPath);
                 } else if (allowedFileTypes.length > 0) {
-                    console.warn(
-                        `No matching metadata file found in ${fullPath}. Allowed file types were ${allowedFileTypes}.`,
+                    devWarn(
+                        `No matching metadata file found in ${fullPath}. Allowed file types were ${
+                            allowedFileTypes.join(", ")
+                        }.`,
                     );
                 }
                 continue;
@@ -60,10 +69,8 @@ export async function findSDRFiles(
     }
 
     await traverseDir(rootDir);
-    console.log("All found sdrFiles:", sdrFiles);
     return sdrFiles;
 }
-
 async function hasAllowedMetadataFile(
     directory: string,
     allowedFileTypes: string[],
@@ -75,8 +82,7 @@ async function hasAllowedMetadataFile(
         try {
             const files = await readdir(directory);
             for (const file of files) {
-                // Corrected regular expression:
-                const match = file.match(/^metadata\.\w+\.lua$/); // Match "metadata." followed by one or more characters, then ".lua"
+                const match = file.match(/^metadata\.\w+\.lua$/);
                 if (match) {
                     const metadataPath = node_join(directory, file);
                     if ((await stat(metadataPath)).isFile()) return true;
@@ -85,11 +91,14 @@ async function hasAllowedMetadataFile(
             // No metadata file found
             return false;
         } catch (error) {
-            console.error(`Error reading directory ${directory}:`, error);
+            devError(
+                `Error reading directory ${directory}:`,
+                error instanceof Error ? error.message : String(error),
+            );
             return false;
         }
     } else {
-        // Check for specific file types (no changes needed here)
+        // Check for specific file types
         for (const fileType of allowedFileTypes) {
             const metadataPath = node_join(
                 directory,
@@ -100,15 +109,15 @@ async function hasAllowedMetadataFile(
             } catch (metadataError) {
                 const error = metadataError as NodeJS.ErrnoException;
                 if (error.code === "ENOENT") {
-                    console.warn(`Metadata file not found: ${metadataPath}`);
+                    devWarn(`Metadata file not found: ${metadataPath}`);
                 } else if (error.code === "EPERM") {
-                    console.error(
+                    devError(
                         `Permission denied for file: ${metadataPath}`,
                     );
                 } else {
-                    console.error(
+                    devError(
                         `Error checking metadata in ${directory}:`,
-                        error,
+                        error instanceof Error ? error.message : String(error),
                     );
                 }
             }
@@ -116,7 +125,6 @@ async function hasAllowedMetadataFile(
         return false;
     }
 }
-
 function extractDocProps(field: Field): DocProps {
     const docProps: DocProps = {
         authors: "",
@@ -152,14 +160,14 @@ function extractDocProps(field: Field): DocProps {
             } else if (subField.value.type === "NilLiteral") {
                 value = "";
             } else {
-                console.warn(
+                devWarn(
                     `Unhandled value type for doc_prop '${subKey}': ${subField.value.type}`,
                 );
             }
 
-            (docProps as any)[subKey] = value;
+            docProps[subKey as keyof DocProps] = value;
         } else {
-            console.warn(`Unknown doc_prop key: ${subKey}`);
+            devWarn(`Unknown doc_prop key: ${subKey}`);
         }
     }
     return docProps;
@@ -183,13 +191,13 @@ export function parseHighlights(text: string): LuaMetadata {
         //console.log("Parsed AST:", JSON.stringify(ast, null, 2));
 
         if (!ast.body?.[0] || ast.body[0].type !== "ReturnStatement") {
-            console.error("Invalid Lua structure: No return statement found");
+            devError("Invalid Lua structure: No return statement found");
             return defaultResult;
         }
 
         const returnValue = ast.body[0].arguments?.[0];
         if (!returnValue) {
-            console.error("Invalid Lua structure: No return value found");
+            devError("Invalid Lua structure: No return value found");
             return defaultResult;
         }
 
@@ -199,7 +207,7 @@ export function parseHighlights(text: string): LuaMetadata {
         if (returnValue.type === "TableConstructorExpression") {
             for (const field of returnValue.fields) {
                 if (field.type !== "TableKey") {
-                    console.warn(`Skipping non-table key field: ${field.type}`);
+                    devWarn(`Skipping non-table key field: ${field.type}`);
                     continue;
                 }
 
@@ -231,75 +239,77 @@ export function parseHighlights(text: string): LuaMetadata {
                         break;
                     }
                     default:
-                        //console.log(`Unhandled key: ${key}`);
-                        continue;
+                        devLog(`Unhandled key: ${key}`);
                 }
             }
         }
-        console.log("Parsed result:", result);
         return result;
     } catch (error) {
         const e = error as Error;
-        console.error("Error parsing Lua:", e.message);
+        devError("Error parsing Lua:", e.message);
         return defaultResult;
     }
 }
 
-function extractKeyFromField(field: any): string | null {
+function extractKeyFromField(field: Field): string | number | null {
     if (!field.key) return null;
 
     if (field.key.type === "StringLiteral") {
         return field.key.raw.replace(/^"(.*)"$/, "$1");
-    } else if (field.key.type === "Identifier") {
+    }
+    if (field.key.type === "NumericLiteral") {
+        return field.key.value ?? 0;
+    }
+    if (field.key.type === "Identifier") {
         return field.key.name;
     }
 
-    console.warn(`Unexpected key type: ${field.key.type}`);
+    devWarn(`Unexpected key type: ${field.key.type}`);
     return null;
 }
 
-function extractVersionNumber(value: any): number | null {
+function extractVersionNumber(value: LuaValue): number | null {
     if (value.type === "NumericLiteral") {
-        return value.value;
+        return value.value ?? null;
     }
     if (value.type === "StringLiteral") {
-        return Number.parseInt(value.value, 10);
+        return value.value ? Number.parseInt(value.value, 10) : null;
     }
     return null;
 }
 
-function extractValue(value: any): any {
-    if (!value) return null;
+function extractValue(
+    value: LuaValue,
+): string | number | boolean | Record<string, unknown> | null {
+    if (!value || typeof value !== "object") return null;
 
     switch (value.type) {
         case "StringLiteral":
             return value.raw.replace(/^"(.*)"$/, "$1").replace(/\\n/g, "\n");
         case "NumericLiteral":
-            return value.value;
+            return value.value ?? 0;
         case "BooleanLiteral":
-            return value.value;
+            return value.value ?? false;
         case "TableConstructorExpression":
-            return value.fields.reduce((acc: any, field: any) => {
-                const key = extractKeyFromField(field);
-                if (key) {
-                    acc[key] = extractValue(field.value);
-                }
-                return acc;
-            }, {});
+            return value.fields.reduce<Record<string, unknown>>(
+                (acc, field: Field) => {
+                    const key = extractKeyFromField(field);
+                    if (key) {
+                        acc[key] = extractValue(field.value);
+                    }
+                    return acc;
+                },
+                {},
+            );
         default:
-            console.warn(`Unhandled value type: ${value.type}`);
             return null;
     }
 }
-
 function extractAnnotations(
-    field: any,
+    field: Field,
     creDomVersion: number | null,
 ): Annotation[] {
-    console.log(`Extracting annotations for version ${creDomVersion}`);
-
     if (field.value.type !== "TableConstructorExpression") {
-        console.warn("Invalid annotations table structure");
         return [];
     }
 
@@ -339,26 +349,25 @@ function extractModernAnnotation(entry: Field): Annotation | null {
         const value = extractValue(field.value);
         switch (key) {
             case "chapter":
-                annotation.chapter = value || "";
+                annotation.chapter = typeof value === "string" ? value : "";
                 break;
             case "datetime":
-                annotation.datetime = value || "";
+                annotation.datetime = typeof value === "string" ? value : "";
                 break;
             case "pageno":
                 annotation.pageno = typeof value === "number" ? value : 0;
                 break;
             case "text":
-                annotation.text = value || "";
+                annotation.text = typeof value === "string" ? value : "";
                 break;
         }
     }
 
     return annotation;
 }
-
-function extractLegacyAnnotations(pageField: any): Annotation[] {
+function extractLegacyAnnotations(pageField: Field): Annotation[] {
     const annotations: Annotation[] = [];
-    const pageNumber = extractValue(pageField.key);
+    const pageNumber = extractValue(pageField.key as LuaValue);
 
     if (pageField.value.type !== "TableConstructorExpression") {
         return annotations;
@@ -383,13 +392,18 @@ function extractLegacyAnnotations(pageField: any): Annotation[] {
             const value = extractValue(field.value);
             switch (key) {
                 case "chapter":
-                    annotation.chapter = value || "";
+                    annotation.chapter = typeof value === "string" ? value : "";
                     break;
                 case "datetime":
-                    annotation.datetime = value || "";
+                    annotation.datetime = typeof value === "string"
+                        ? value
+                        : "";
+                    break;
+                case "page":
+                    annotation.pageno = typeof value === "number" ? value : 0;
                     break;
                 case "text":
-                    annotation.text = value || "";
+                    annotation.text = typeof value === "string" ? value : "";
                     break;
             }
         }
@@ -399,11 +413,9 @@ function extractLegacyAnnotations(pageField: any): Annotation[] {
 
     return annotations;
 }
-
 export async function readSDRFileContent(
     filePath: string,
     allowedFileTypes: string[] = [],
-    app: App,
 ): Promise<LuaMetadata> {
     const isFileTypeFilterEmpty = allowedFileTypes.length === 0 ||
         (allowedFileTypes.length === 1 && allowedFileTypes[0] === "");
@@ -417,10 +429,10 @@ export async function readSDRFileContent(
                     const luaFilePath = node_join(filePath, file);
                     const stats = await stat(luaFilePath);
                     if (!stats.isFile()) {
-                        console.warn(`Skipping non-file: ${luaFilePath}`);
+                        devWarn(`Skipping non-file: ${luaFilePath}`);
                         continue;
                     }
-                    console.log(`File found: ${luaFilePath}`);
+                    devLog(`File found: ${luaFilePath}`);
                     const content = await readFile(luaFilePath, "utf-8");
                     return parseHighlights(content);
                 }
@@ -428,11 +440,11 @@ export async function readSDRFileContent(
         } catch (error) {
             const e = error as NodeJS.ErrnoException;
             if (e.code === "ENOENT") {
-                console.warn(`Directory not found: ${filePath}`);
+                devWarn(`Directory not found: ${filePath}`);
             } else if (e.code === "EPERM") {
-                console.error(`Permission denied for directory: ${filePath}`);
+                devError(`Permission denied for directory: ${filePath}`);
             } else {
-                console.error(
+                devError(
                     `Error reading directory ${filePath}:`,
                     e.message,
                 );
@@ -444,20 +456,20 @@ export async function readSDRFileContent(
             try {
                 const stats = await stat(luaFilePath);
                 if (!stats.isFile()) {
-                    console.warn(`Skipping non-file: ${luaFilePath}`);
+                    devWarn(`Skipping non-file: ${luaFilePath}`);
                     continue;
                 }
-                console.log(`File found: ${luaFilePath}`);
+                devLog(`File found: ${luaFilePath}`);
                 const content = await readFile(luaFilePath, "utf-8");
                 return parseHighlights(content);
             } catch (error) {
                 const e = error as NodeJS.ErrnoException;
                 if (e.code === "ENOENT") {
-                    console.warn(`File not found: ${luaFilePath}`);
+                    devWarn(`File not found: ${luaFilePath}`);
                 } else if (e.code === "EPERM") {
-                    console.error(`Permission denied for file: ${luaFilePath}`);
+                    devError(`Permission denied for file: ${luaFilePath}`);
                 } else {
-                    console.error(
+                    devError(
                         `Error reading file ${luaFilePath}:`,
                         e.message,
                     );
@@ -466,7 +478,7 @@ export async function readSDRFileContent(
         }
     }
 
-    console.error(
+    devError(
         `No valid metadata file found in ${filePath}. Returning default metadata.`,
     );
     return {

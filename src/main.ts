@@ -1,4 +1,5 @@
-import { Notice, Plugin, TFile, type Vault } from "obsidian";
+import { normalizePath, Notice, Plugin, TFile, type Vault } from "obsidian";
+import { sep } from "node:path";
 import {
 	type Annotation,
 	DEFAULT_SETTINGS,
@@ -8,7 +9,7 @@ import {
 } from "./types";
 import { KoReaderSettingTab } from "./settings";
 import { findSDRFiles, readSDRFileContent } from "./parser";
-import { dirname, join as node_join, sep } from "node:path";
+import { devError, devLog, devWarn, setDebugMode } from "./utils";
 
 // Cache for findSDRFiles results
 const sdrFilesCache: Map<string, string[]> = new Map();
@@ -19,18 +20,29 @@ const parsedMetadataCache: Map<string, LuaMetadata> = new Map();
 export default class KoReaderHighlightImporter extends Plugin {
 	settings: KoReaderHighlightImporterSettings = DEFAULT_SETTINGS;
 
+	private checkMountPoint(): boolean {
+		if (!this.settings.koboMountPoint) {
+			new Notice(
+				"KOReader Importer: Please specify your KoReader mount point in the plugin settings.",
+			);
+			return false;
+		}
+		return true;
+	}
+
 	async onload() {
 		await this.loadSettings();
+		setDebugMode(this.settings.debugMode);
 
 		this.addCommand({
 			id: "import-koreader-highlights",
-			name: "Import KoReader Highlights",
+			name: "Import KoReader highlights",
 			callback: () => this.handleImportHighlights(),
 		});
 
 		this.addCommand({
 			id: "scan-koreader-highlights",
-			name: "Scan KoReader Highlights",
+			name: "Scan KoReader highlights",
 			callback: () => this.handleScanHighlightsDirectory(),
 		});
 
@@ -46,41 +58,36 @@ export default class KoReaderHighlightImporter extends Plugin {
 	async clearCaches() {
 		sdrFilesCache.clear();
 		parsedMetadataCache.clear();
-		console.log("Caches cleared.");
+		devLog("Caches cleared.");
 	}
 
 	async handleImportHighlights() {
-		if (!this.settings.koboMountPoint) {
-			new Notice(
-				"Please specify your KoReader mount point in the plugin settings.",
-			);
-			return;
-		}
+		if (!this.checkMountPoint()) return;
 
 		try {
 			await this.importHighlights();
 		} catch (error) {
-			console.error("Error importing highlights:", error);
+			devError(
+				"Error importing highlights:",
+				error instanceof Error ? error.message : String(error),
+			);
 			new Notice(
-				"Error importing highlights. Check the console for details.",
+				"KOReader Importer: Error importing highlights. Check the console for details.",
 			);
 		}
 	}
-
 	async handleScanHighlightsDirectory() {
-		if (!this.settings.koboMountPoint) {
-			new Notice(
-				"Please specify your KoReader mount point in the plugin settings.",
-			);
-			return;
-		}
+		if (!this.checkMountPoint()) return;
 
 		try {
 			await this.scanHighlightsDirectory();
 		} catch (error) {
-			console.error("Error scanning for highlights:", error);
+			devError(
+				"Error scanning for highlights:",
+				error instanceof Error ? error.message : String(error),
+			);
 			new Notice(
-				"Error scanning for highlights. Check the console for details.",
+				"KOReader Importer: Error scanning for highlights. Check the console for details.",
 			);
 		}
 	}
@@ -105,13 +112,12 @@ export default class KoReaderHighlightImporter extends Plugin {
 						isFileTypeFilterEmpty
 							? []
 							: this.settings.allowedFileTypes,
-						this.app,
 					);
 					parsedMetadataCache.set(file, luaMetadata);
 				}
 
 				if (!luaMetadata) {
-					console.error(`No metadata found for file ${file}`);
+					devError(`No metadata found for file ${file}`);
 					continue;
 				}
 
@@ -122,78 +128,88 @@ export default class KoReaderHighlightImporter extends Plugin {
 				if (
 					error instanceof Error && error.name === "FileNotFoundError"
 				) {
-					console.error(`File not found: ${file}`);
-					new Notice(`File not found: ${file}`);
+					devError(`File not found: ${file}`);
+					new Notice(`KOReader Importer: File not found: ${file}`);
 				} else if (
 					error instanceof Error &&
 					error.name === "MetadataParseError"
 				) {
-					console.error(`Error parsing metadata in ${file}:`, error);
+					devError(
+						`Error parsing metadata in ${file}:`,
+						error.message,
+					);
 					new Notice(
-						`Error parsing metadata in ${file}. Check the console for details.`,
+						`KOReader Importer: Error parsing metadata in ${file}. Check the console for details.`,
 					);
 				} else {
-					console.error(`Error processing file ${file}:`, error);
+					devError(
+						`Error processing file ${file}:`,
+						error instanceof Error ? error.message : String(error),
+					);
 					new Notice(
-						`Error processing file ${file}. Check the console for details.`,
+						`KOReader Importer: Error processing file ${file}. Check the console for details.`,
 					);
 				}
 			}
 		}
 
-		new Notice("Highlights imported successfully!");
+		new Notice("KOReader Importer: Highlights imported successfully!");
 	}
+
 	async saveHighlights(
 		highlights: Annotation[],
-		LuaMetadata: LuaMetadata,
+		luaMetadata: LuaMetadata,
 	): Promise<void> {
 		if (highlights.length === 0) {
-			console.warn(
+			devWarn(
 				"No highlights to save for:",
-				LuaMetadata.docProps.title,
+				luaMetadata.docProps.title,
 			);
 			return;
 		}
 
 		const { vault } = this.app;
-		const fileName = this.generateFileName(LuaMetadata.docProps);
-		const filePath = node_join(this.settings.highlightsFolder, fileName);
+		const fileName = this.generateFileName(luaMetadata.docProps);
+		const filePath = normalizePath(
+			`${this.settings.highlightsFolder}/${fileName}`,
+		);
 
-		const frontmatter = this.generateFrontmatter(LuaMetadata);
+		const frontmatter = this.generateFrontmatter(luaMetadata);
 		const content = frontmatter +
 			this.generateHighlightsContent(highlights);
 
 		try {
 			await this.createOrUpdateFile(vault, filePath, content);
 		} catch (error) {
-			console.error(
-				`Error saving highlights for ${LuaMetadata.docProps.title}:`,
-				error,
+			devError(
+				`Error saving highlights for ${luaMetadata.docProps.title}:`,
+				error instanceof Error ? error.message : String(error),
 			);
 			new Notice(
-				`Error saving highlights for ${LuaMetadata.docProps.title}. See console for details.`,
+				`KOReader Importer: Error saving highlights for ${luaMetadata.docProps.title}. See console for details.`,
 			);
 		}
 	}
-
 	async scanHighlightsDirectory(): Promise<void> {
 		const sdrFiles = await this.ensureMountPointAndSDRFiles();
-		if (!sdrFiles) return;
+		if (!sdrFiles || !Array.isArray(sdrFiles)) return;
 
 		try {
 			await this.createOrUpdateNote(sdrFiles);
 			new Notice("SDR directories listed in KoReader SDR Files.md");
 		} catch (error) {
-			console.error("Error updating SDR directories note:", error);
+			devError(
+				"Error updating SDR directories note:",
+				error instanceof Error ? error.message : String(error),
+			);
 			new Notice(
-				"Error updating SDR directories note. Check the console for details.",
+				"KOReader Importer: Error updating SDR directories note. Check the console for details.",
 			);
 		}
 	}
-
 	async createOrUpdateNote(sdrFiles: string[]): Promise<void> {
 		const vault = this.app.vault;
-		const filePath = "KoReader SDR Files.md";
+		const filePath = normalizePath("KoReader SDR Files.md");
 		const content = `# KoReader SDR Files\n\n${
 			sdrFiles.map((file) => `- ${file}`).join("\n")
 		}`;
@@ -206,16 +222,21 @@ export default class KoReaderHighlightImporter extends Plugin {
 		filePath: string,
 		content: string,
 	): Promise<void> {
-		const dirPath = dirname(filePath);
-		const dirExists = await vault.adapter.exists(dirPath);
+		const dirPath = normalizePath(
+			filePath.substring(0, filePath.lastIndexOf("/")),
+		);
+		const dirExists = vault.getFolderByPath(dirPath);
 
 		if (!dirExists) {
 			try {
-				await vault.adapter.mkdir(dirPath);
+				await vault.createFolder(dirPath);
 			} catch (error) {
-				console.error(`Error creating directory ${dirPath}:`, error);
+				devError(
+					`Error creating folder ${dirPath}:`,
+					error instanceof Error ? error.message : String(error),
+				);
 				new Notice(
-					`Error creating directory ${dirPath}. Check console for details.`,
+					`KOReader Importer: Error creating directory ${dirPath}. Check console for details.`,
 				);
 				return;
 			}
@@ -237,16 +258,20 @@ export default class KoReaderHighlightImporter extends Plugin {
 		);
 		if (!this.settings.koboMountPoint) {
 			new Notice(
-				"Please specify your KoReader mount point in the plugin settings.",
+				"KOReader Importer: Please specify your KoReader mount point in the plugin settings.",
 			);
 		}
 
 		if (!Array.isArray(this.settings.excludedFolders)) {
-			new Notice("Excluded folders setting should be an array.");
-			this.settings.excludedFolders = []; // Set a default value
+			new Notice(
+				"KOReader Importer: Excluded folders setting should be an array.",
+			);
+			this.settings.excludedFolders = [];
 		}
 		if (!Array.isArray(this.settings.allowedFileTypes)) {
-			new Notice("Allowed file types setting should be an array");
+			new Notice(
+				"KOReader Importer: Allowed file types setting should be an array",
+			);
 			this.settings.allowedFileTypes = [];
 		}
 	}
@@ -269,12 +294,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 
 	// Helper functions for file name, frontmatter, and content generation
 	async ensureMountPointAndSDRFiles() {
-		if (!this.settings.koboMountPoint) {
-			new Notice(
-				"Please specify your KoReader mount point in the plugin settings.",
-			);
-			return null;
-		}
+		if (!this.checkMountPoint()) return;
 
 		const cacheKey = this.getCacheKey(
 			this.settings.koboMountPoint,
@@ -316,9 +336,9 @@ export default class KoReaderHighlightImporter extends Plugin {
 			: fileName;
 	}
 
-	generateFrontmatter(LuaMetadata: LuaMetadata): string {
+	generateFrontmatter(luaMetadata: LuaMetadata): string {
 		let frontmatter = "---\n";
-		const docProps = LuaMetadata.docProps;
+		const docProps = luaMetadata.docProps;
 		for (const key in docProps) {
 			if (
 				Object.prototype.hasOwnProperty.call(docProps, key) &&
@@ -336,7 +356,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 				}"\n`;
 			}
 		}
-		frontmatter += `pages: ${LuaMetadata.pages}\n`;
+		frontmatter += `pages: ${luaMetadata.pages}\n`;
 		frontmatter += "---\n\n";
 		return frontmatter;
 	}

@@ -3,6 +3,7 @@ export interface KoReaderHighlightImporterSettings {
     excludedFolders: string[];
     allowedFileTypes: string[];
     highlightsFolder: string;
+    debugMode: boolean;
 }
 
 export const DEFAULT_SETTINGS: KoReaderHighlightImporterSettings = {
@@ -10,6 +11,7 @@ export const DEFAULT_SETTINGS: KoReaderHighlightImporterSettings = {
     excludedFolders: [".adds", ".kobo"],
     allowedFileTypes: ["epub", "pdf", "mobi"],
     highlightsFolder: "KoReader Highlights",
+    debugMode: false,
 };
 
 export interface Annotation {
@@ -21,6 +23,21 @@ export interface Annotation {
 
 export interface AnnotationTable {
     fields: TableConstructorExpression[];
+}
+
+export interface DocProps {
+    authors: string;
+    title: string;
+    description: string;
+    keywords: string;
+    series: string;
+    language: string;
+}
+
+export interface LuaMetadata {
+    docProps: DocProps;
+    pages?: number | null;
+    annotations: Annotation[];
 }
 
 export interface StringLiteral {
@@ -44,13 +61,14 @@ export interface BooleanLiteral {
 export interface Identifier {
     type: "Identifier";
     name: string;
+    raw: string;
 }
 
 export type LuaKey =
-    | StringLiteral
-    | NumericLiteral
-    | BooleanLiteral
-    | Identifier;
+    | { type: "StringLiteral"; value?: string; raw: string }
+    | { type: "NumericLiteral"; value?: number; raw: string }
+    | { type: "BooleanLiteral"; value?: boolean; raw: string }
+    | { type: "Identifier"; name: string; raw: string };
 
 interface TableConstructorExpression {
     type: "TableConstructorExpression";
@@ -58,29 +76,13 @@ interface TableConstructorExpression {
 }
 
 export type LuaValue =
-    | StringLiteral
-    | NumericLiteral
-    | BooleanLiteral
-    | TableConstructorExpression
-    | null;
+    | { type: "StringLiteral"; value?: string; raw: string }
+    | { type: "NumericLiteral"; value?: number; raw: string }
+    | { type: "BooleanLiteral"; value?: boolean; raw: string }
+    | TableConstructorExpression;
 
 export interface Field {
     type: "TableKey" | "TableValue" | "TableKeyString";
     key: LuaKey;
     value: LuaValue;
-}
-
-export interface DocProps {
-    authors: string;
-    title: string;
-    description: string;
-    keywords: string;
-    series: string;
-    language: string;
-}
-
-export interface LuaMetadata {
-    docProps: DocProps;
-    pages?: number | null;
-    annotations: Annotation[];
 }

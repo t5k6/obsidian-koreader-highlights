@@ -1,74 +1,45 @@
 import {
+    AbstractInputSuggest,
     type App,
     normalizePath,
     Notice,
     PluginSettingTab,
     Setting,
-    SuggestModal,
     TFolder,
 } from "obsidian";
 import type KoReaderHighlightImporter from "./main";
 import { setDebugMode } from "./utils";
 
-// Helper function to get all folders
-function getAllFolders(app: App): string[] {
-    const folders: string[] = [];
-    const rootFolder = app.vault.getRoot();
-
-    function traverseFolder(folder: TFolder) {
-        folders.push(folder.path);
-        for (const child of folder.children) {
-            if (child instanceof TFolder) {
-                traverseFolder(child);
-            }
-        }
-    }
-
-    traverseFolder(rootFolder);
-    return folders;
-}
-
-// Suggest Modal for selecting folders
-class FolderSuggestModal extends SuggestModal<string> {
-    onSubmit: (result: string) => void;
-
-    constructor(app: App, onSubmit: (result: string) => void) {
-        super(app);
-        this.onSubmit = onSubmit;
+class FolderInputSuggest extends AbstractInputSuggest<string> {
+    constructor(
+        app: App,
+        private inputEl: HTMLInputElement,
+        private onSubmit: (result: string) => void,
+    ) {
+        super(app, inputEl);
     }
 
     getSuggestions(query: string): string[] {
-        const folders = getAllFolders(this.app);
+        const folders = this.app.vault.getAllFolders();
         const lowerCaseQuery = query.toLowerCase();
-        return folders.filter((folder) =>
-            folder.toLowerCase().includes(lowerCaseQuery)
-        );
+        return folders
+            .map((folder) => folder.path)
+            .filter((folderPath) =>
+                folderPath.toLowerCase().includes(lowerCaseQuery)
+            );
     }
 
-    renderSuggestion(value: string, el: HTMLElement) {
-        el.createEl("div", { text: value });
+    renderSuggestion(folderPath: string, el: HTMLElement) {
+        el.createEl("div", { text: folderPath });
     }
 
-    onChooseSuggestion(item: string, evt: MouseEvent | KeyboardEvent) {
+    async onChooseSuggestion(
+        item: string,
+        evt: MouseEvent | KeyboardEvent,
+    ): Promise<void> {
+        this.inputEl.value = item;
         this.onSubmit(item);
-    }
-
-    onNoSuggestion() {
-        // Display the current input value as a suggestion to create a new folder
-        const query = this.inputEl.value;
-        if (query) {
-            this.resultContainerEl.empty();
-            const suggestionEl = this.resultContainerEl.createEl("div", {
-                cls: "suggestion-item",
-            });
-            suggestionEl.createEl("div", {
-                text: `Create new folder: "${query}"`,
-            });
-            suggestionEl.addEventListener("click", () => {
-                this.onSubmit(query);
-                this.close();
-            });
-        }
+        this.close();
     }
 }
 
@@ -86,10 +57,10 @@ export class KoReaderSettingTab extends PluginSettingTab {
         containerEl.empty();
 
         // --- Core Settings ---
-        containerEl.createEl("h3", { text: "Core Settings" });
+        new Setting(containerEl).setName("Core Settings").setHeading();
 
         new Setting(containerEl)
-            .setName("KoReader Mount Point")
+            .setName("KoReader mount point")
             .setDesc(
                 "Specify the directory where your KoReader device is mounted (e.g., /media/user/KOBOeReader).",
             )
@@ -106,7 +77,7 @@ export class KoReaderSettingTab extends PluginSettingTab {
             );
 
         new Setting(containerEl)
-            .setName("Highlights Folder")
+            .setName("Highlights folder")
             .setDesc(
                 "Specify the directory where you would like to save your highlights.",
             )
@@ -114,38 +85,43 @@ export class KoReaderSettingTab extends PluginSettingTab {
                 text
                     .setPlaceholder("/KoReader Highlights/")
                     .setValue(this.plugin.settings.highlightsFolder)
-                    .onChange(() => {
-                        new FolderSuggestModal(this.app, async (result) => {
-                            try {
-                                const normalizedResult = normalizePath(result);
-                                // Create the folder if it doesn't exist
-                                if (
-                                    !(this.app.vault.getAbstractFileByPath(
-                                        normalizedResult,
-                                    ) instanceof TFolder)
-                                ) {
-                                    await this.app.vault.createFolder(
-                                        normalizedResult,
-                                    );
-                                }
-                                text.setValue(normalizedResult);
-                                this.plugin.settings.highlightsFolder =
-                                    normalizedResult;
-                                await this.plugin.saveSettings();
-                            } catch (error) {
-                                new Notice(
-                                    `KOReader Importer: Failed to create folder: ${result}`,
+                    .onChange(async (value) => {
+                        try {
+                            const normalizedResult = normalizePath(value);
+
+                            // Create the folder if it doesn't exist
+                            const folder = this.app.vault.getAbstractFileByPath(
+                                normalizedResult,
+                            );
+                            if (!folder || !(folder instanceof TFolder)) {
+                                await this.app.vault.createFolder(
+                                    normalizedResult,
                                 );
                             }
-                        }).open();
+                            this.plugin.settings.highlightsFolder =
+                                normalizedResult;
+                            await this.plugin.saveSettings();
+                        } catch (error) {
+                            new Notice(
+                                `KOReader Importer: Failed to create folder: ${value}`,
+                            );
+                        }
                     });
+                new FolderInputSuggest(
+                    this.app,
+                    text.inputEl,
+                    (result) => {
+                        text.setValue(result);
+                    },
+                );
             });
 
         // --- Filtering/Exclusion Settings ---
-        containerEl.createEl("h3", { text: "Filtering/Exclusion Settings" });
+        new Setting(containerEl).setName("Filtering/Exclusion Settings")
+            .setHeading();
 
         new Setting(containerEl)
-            .setName("Excluded Folders")
+            .setName("Excluded folders")
             .setDesc(
                 "Comma-separated list of folders to exclude (e.g., folder1,folder2).",
             )
@@ -161,7 +137,7 @@ export class KoReaderSettingTab extends PluginSettingTab {
             );
 
         new Setting(containerEl)
-            .setName("Allowed File Types")
+            .setName("Allowed file types")
             .setDesc(
                 "Comma-separated list of file types to include (e.g., epub,pdf).",
             )
@@ -178,10 +154,10 @@ export class KoReaderSettingTab extends PluginSettingTab {
             );
 
         // --- Actions ---
-        containerEl.createEl("h3", { text: "Actions" });
+        new Setting(containerEl).setName("Actions").setHeading();
 
         new Setting(containerEl)
-            .setName("Scan for SDR Files")
+            .setName("Scan for SDR files")
             .setDesc(
                 "Click to scan the KoReader mount point for highlight files.",
             )
@@ -192,7 +168,7 @@ export class KoReaderSettingTab extends PluginSettingTab {
             );
 
         new Setting(containerEl)
-            .setName("Import Highlights")
+            .setName("Import highlights")
             .setDesc(
                 "Click to import highlights from the KoReader mount point.",
             )
@@ -203,10 +179,25 @@ export class KoReaderSettingTab extends PluginSettingTab {
             );
 
         // --- Advanced/Troubleshooting ---
-        containerEl.createEl("h3", { text: "Advanced/Troubleshooting" });
+        new Setting(containerEl).setName("Advanced/Troubleshooting")
+            .setHeading();
 
         new Setting(containerEl)
-            .setName("Debug Mode")
+            .setName("Enable full vault duplicate check")
+            .setDesc(
+                "When enabled, the plugin will check the entire vault for duplicates. When disabled, the plugin will only check duplicates inside the highlights folder.",
+            )
+            .addToggle((toggle) =>
+                toggle
+                    .setValue(this.plugin.settings.enableFullDuplicateCheck)
+                    .onChange(async (value) => {
+                        this.plugin.settings.enableFullDuplicateCheck = value;
+                        await this.plugin.saveSettings();
+                    })
+            );
+
+        new Setting(containerEl)
+            .setName("Debug mode")
             .setDesc("Enable debug logging for troubleshooting.")
             .addToggle((toggle) =>
                 toggle

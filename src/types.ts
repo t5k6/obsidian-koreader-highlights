@@ -1,9 +1,22 @@
+import type {
+    BooleanLiteral,
+    Expression,
+    Identifier,
+    NumericLiteral,
+    StringLiteral,
+    TableConstructorExpression,
+    TableKey,
+    TableKeyString,
+    TableValue,
+} from "luaparse";
+
 export interface KoReaderHighlightImporterSettings {
     koboMountPoint: string;
     excludedFolders: string[];
     allowedFileTypes: string[];
     highlightsFolder: string;
     debugMode: boolean;
+    enableFullDuplicateCheck: boolean;
 }
 
 export const DEFAULT_SETTINGS: KoReaderHighlightImporterSettings = {
@@ -12,6 +25,7 @@ export const DEFAULT_SETTINGS: KoReaderHighlightImporterSettings = {
     allowedFileTypes: ["epub", "pdf", "mobi"],
     highlightsFolder: "KoReader Highlights",
     debugMode: false,
+    enableFullDuplicateCheck: false,
 };
 
 export interface Annotation {
@@ -19,10 +33,6 @@ export interface Annotation {
     datetime: string;
     pageno: number;
     text: string;
-}
-
-export interface AnnotationTable {
-    fields: TableConstructorExpression[];
 }
 
 export interface DocProps {
@@ -40,49 +50,22 @@ export interface LuaMetadata {
     annotations: Annotation[];
 }
 
-export interface StringLiteral {
-    type: "StringLiteral";
-    value?: string;
-    raw: string;
-}
+type LuaKey = Extract<
+    Expression,
+    Identifier | StringLiteral | NumericLiteral | BooleanLiteral
+>;
+export type LuaValue = Extract<
+    Expression,
+    StringLiteral | NumericLiteral | BooleanLiteral | TableConstructorExpression
+>;
 
-export interface NumericLiteral {
-    type: "NumericLiteral";
-    value?: number;
-    raw: string;
-}
+export type Field = TableKey | TableKeyString | TableValue;
 
-export interface BooleanLiteral {
-    type: "BooleanLiteral";
-    value?: boolean;
-    raw: string;
-}
+export type DuplicateChoice = "replace" | "merge" | "keep-both" | "skip";
 
-export interface Identifier {
-    type: "Identifier";
-    name: string;
-    raw: string;
-}
-
-export type LuaKey =
-    | { type: "StringLiteral"; value?: string; raw: string }
-    | { type: "NumericLiteral"; value?: number; raw: string }
-    | { type: "BooleanLiteral"; value?: boolean; raw: string }
-    | { type: "Identifier"; name: string; raw: string };
-
-interface TableConstructorExpression {
-    type: "TableConstructorExpression";
-    fields: Field[];
-}
-
-export type LuaValue =
-    | { type: "StringLiteral"; value?: string; raw: string }
-    | { type: "NumericLiteral"; value?: number; raw: string }
-    | { type: "BooleanLiteral"; value?: boolean; raw: string }
-    | TableConstructorExpression;
-
-export interface Field {
-    type: "TableKey" | "TableValue" | "TableKeyString";
-    key: LuaKey;
-    value: LuaValue;
+export interface IDuplicateHandlingModal {
+    openAndGetChoice(): Promise<{
+        choice: DuplicateChoice;
+        applyToAll: boolean;
+    }>;
 }

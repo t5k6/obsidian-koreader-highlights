@@ -1,15 +1,33 @@
-import { normalizePath, Notice, Plugin, TFile, type Vault } from "obsidian";
+import {
+	normalizePath,
+	Notice,
+	Plugin,
+	sanitizeHTMLToDom,
+	TFile,
+	type Vault,
+} from "obsidian";
 import { sep } from "node:path";
 import {
 	type Annotation,
 	DEFAULT_SETTINGS,
 	type DocProps,
+	type DuplicateChoice,
 	type KoReaderHighlightImporterSettings,
 	type LuaMetadata,
 } from "./types";
 import { KoReaderSettingTab } from "./settings";
 import { findSDRFiles, readSDRFileContent } from "./parser";
-import { devError, devLog, devWarn, setDebugMode } from "./utils";
+import {
+	devError,
+	devLog,
+	getFileNameWithoutExt,
+	handleDirectoryError,
+	initLogging,
+	setDebugMode,
+} from "./utils";
+import { DuplicateHandler } from "./duplicateHandler";
+import { DuplicateHandlingModal } from "./duplicateModal";
+import { stat } from "node:fs/promises";
 
 // Cache for findSDRFiles results
 const sdrFilesCache: Map<string, string[]> = new Map();
@@ -19,15 +37,36 @@ const parsedMetadataCache: Map<string, LuaMetadata> = new Map();
 
 export default class KoReaderHighlightImporter extends Plugin {
 	settings: KoReaderHighlightImporterSettings = DEFAULT_SETTINGS;
+	duplicateHandler!: DuplicateHandler;
 
-	private checkMountPoint(): boolean {
+	private async checkMountPoint(): Promise<boolean> {
 		if (!this.settings.koboMountPoint) {
 			new Notice(
 				"KOReader Importer: Please specify your KoReader mount point in the plugin settings.",
 			);
 			return false;
 		}
-		return true;
+		try {
+			const stats = await stat(this.settings.koboMountPoint);
+			if (!stats.isDirectory()) {
+				new Notice(
+					"KOReader Importer: The specified mount point is not a directory.",
+				);
+				return false;
+			}
+			devLog(
+				"Kobo mount point is accessible:",
+				this.settings.koboMountPoint,
+			);
+			return true;
+		} catch (error) {
+			const e = error as NodeJS.ErrnoException;
+			handleDirectoryError(this.settings.koboMountPoint, e);
+			new Notice(
+				"KOReader Importer: Please check the mount point in the plugin settings.",
+			);
+			return false;
+		}
 	}
 
 	async onload() {
@@ -36,21 +75,38 @@ export default class KoReaderHighlightImporter extends Plugin {
 
 		this.addCommand({
 			id: "import-koreader-highlights",
-			name: "Import KoReader highlights",
+			name: "Import",
 			callback: () => this.handleImportHighlights(),
 		});
 
 		this.addCommand({
 			id: "scan-koreader-highlights",
-			name: "Scan KoReader highlights",
+			name: "Scan",
 			callback: () => this.handleScanHighlightsDirectory(),
 		});
 
 		this.addSettingTab(new KoReaderSettingTab(this.app, this));
+		this.duplicateHandler = new DuplicateHandler(
+			this.app.vault,
+			this.app,
+			(app, match, message) =>
+				new DuplicateHandlingModal(app, match, message),
+			this.settings,
+		);
+		if (this.settings.debugMode) {
+			try {
+				const logFilePath = await initLogging(
+					this.app.vault,
+					"Koreader_Importer_Logs",
+				);
+				console.log("Log file initialized at:", logFilePath);
+			} catch (error) {
+				console.error("Failed to initialize logging:", error);
+			}
+		}
 	}
 
 	onunload() {
-		// Clear caches on unload
 		sdrFilesCache.clear();
 		parsedMetadataCache.clear();
 	}
@@ -62,14 +118,14 @@ export default class KoReaderHighlightImporter extends Plugin {
 	}
 
 	async handleImportHighlights() {
-		if (!this.checkMountPoint()) return;
+		if (!await this.checkMountPoint()) return;
 
 		try {
 			await this.importHighlights();
 		} catch (error) {
 			devError(
 				"Error importing highlights:",
-				error instanceof Error ? error.message : String(error),
+				error,
 			);
 			new Notice(
 				"KOReader Importer: Error importing highlights. Check the console for details.",
@@ -77,14 +133,14 @@ export default class KoReaderHighlightImporter extends Plugin {
 		}
 	}
 	async handleScanHighlightsDirectory() {
-		if (!this.checkMountPoint()) return;
+		if (!await this.checkMountPoint()) return;
 
 		try {
 			await this.scanHighlightsDirectory();
 		} catch (error) {
 			devError(
 				"Error scanning for highlights:",
-				error instanceof Error ? error.message : String(error),
+				error,
 			);
 			new Notice(
 				"KOReader Importer: Error scanning for highlights. Check the console for details.",
@@ -93,6 +149,9 @@ export default class KoReaderHighlightImporter extends Plugin {
 	}
 
 	async importHighlights() {
+		if (!await this.checkMountPoint()) {
+			return;
+		}
 		const sdrFiles = await this.ensureMountPointAndSDRFiles();
 		if (!sdrFiles) return;
 
@@ -103,10 +162,14 @@ export default class KoReaderHighlightImporter extends Plugin {
 				if (!luaMetadata) {
 					// If no allowed file types are specified, pass an empty array to readSDRFileContent
 					// to indicate that any metadata file should be considered.
-					const isFileTypeFilterEmpty =
-						this.settings.allowedFileTypes.length === 0 ||
-						(this.settings.allowedFileTypes.length === 1 &&
-							this.settings.allowedFileTypes[0] === "");
+					console.log(
+						"allowedFileTypes",
+						this.settings.allowedFileTypes,
+						this.settings.allowedFileTypes.length,
+					);
+					const isFileTypeFilterEmpty = this.settings.allowedFileTypes
+						.every((type) => type.trim() === "");
+
 					luaMetadata = await readSDRFileContent(
 						file,
 						isFileTypeFilterEmpty
@@ -114,15 +177,21 @@ export default class KoReaderHighlightImporter extends Plugin {
 							: this.settings.allowedFileTypes,
 					);
 					parsedMetadataCache.set(file, luaMetadata);
-				}
-
-				if (!luaMetadata) {
-					devError(`No metadata found for file ${file}`);
-					continue;
+					devLog(`No metadata found for file ${file}`);
 				}
 
 				const highlights = luaMetadata.annotations || [];
 
+				// Use file name as title if both author and title are missing
+				if (
+					luaMetadata.docProps.authors === "" &&
+					luaMetadata.docProps.title === ""
+				) {
+					luaMetadata.docProps.authors = getFileNameWithoutExt(file);
+				}
+				devLog(
+					`Highlights imported successfully!, for ${luaMetadata.docProps.title} from ${luaMetadata.docProps.authors}`,
+				);
 				await this.saveHighlights(highlights, luaMetadata);
 			} catch (error) {
 				if (
@@ -144,7 +213,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 				} else {
 					devError(
 						`Error processing file ${file}:`,
-						error instanceof Error ? error.message : String(error),
+						error,
 					);
 					new Notice(
 						`KOReader Importer: Error processing file ${file}. Check the console for details.`,
@@ -152,19 +221,13 @@ export default class KoReaderHighlightImporter extends Plugin {
 				}
 			}
 		}
-
 		new Notice("KOReader Importer: Highlights imported successfully!");
 	}
-
 	async saveHighlights(
 		highlights: Annotation[],
 		luaMetadata: LuaMetadata,
 	): Promise<void> {
 		if (highlights.length === 0) {
-			devWarn(
-				"No highlights to save for:",
-				luaMetadata.docProps.title,
-			);
 			return;
 		}
 
@@ -179,11 +242,74 @@ export default class KoReaderHighlightImporter extends Plugin {
 			this.generateHighlightsContent(highlights);
 
 		try {
-			await this.createOrUpdateFile(vault, filePath, content);
+			let fileCreated = false;
+			if (this.settings.enableFullDuplicateCheck) {
+				// Check for potential duplicates
+				const potentialDuplicates = await this.duplicateHandler
+					.findPotentialDuplicates(
+						luaMetadata.docProps,
+					);
+				if (potentialDuplicates.length > 0) {
+					// Step 1: Analyze all duplicates in parallel
+					const analysisPromises = potentialDuplicates.map(
+						async (duplicate) => {
+							return await this.duplicateHandler.analyzeDuplicate(
+								duplicate,
+								highlights,
+								luaMetadata,
+							);
+						},
+					);
+					const analyses = await Promise.all(analysisPromises);
+
+					// Step 2: Handle duplicates sequentially
+					let applyToAll = false;
+					let applyToAllChoice: DuplicateChoice | null = null;
+
+					for (const analysis of analyses) {
+						if (applyToAll && applyToAllChoice !== null) {
+							// Apply the previously chosen action to all remaining duplicates
+							const { choice } = await this.duplicateHandler
+								.handleDuplicate(
+									analysis,
+									content,
+								);
+							if (choice !== "skip") fileCreated = true;
+							continue;
+						}
+
+						// Prompt the user for a choice
+						this.duplicateHandler.currentMatch = analysis;
+						const { choice, applyToAll: userChoseApplyToAll } =
+							await this.duplicateHandler.handleDuplicate(
+								analysis,
+								content,
+							);
+
+						if (choice !== "skip") fileCreated = true;
+
+						if (userChoseApplyToAll) {
+							applyToAll = true;
+							applyToAllChoice = choice;
+						}
+
+						if (choice === "skip") {
+						}
+					}
+				}
+
+				// If no duplicates were found or handled, create new file
+				if (!fileCreated && potentialDuplicates.length === 0) {
+					await this.createOrUpdateFile(vault, filePath, content);
+				}
+			} else {
+				// If enableFullDuplicateCheck is disabled, just create new file
+				await this.createOrUpdateFile(vault, filePath, content);
+			}
 		} catch (error) {
 			devError(
 				`Error saving highlights for ${luaMetadata.docProps.title}:`,
-				error instanceof Error ? error.message : String(error),
+				error,
 			);
 			new Notice(
 				`KOReader Importer: Error saving highlights for ${luaMetadata.docProps.title}. See console for details.`,
@@ -200,7 +326,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 		} catch (error) {
 			devError(
 				"Error updating SDR directories note:",
-				error instanceof Error ? error.message : String(error),
+				error,
 			);
 			new Notice(
 				"KOReader Importer: Error updating SDR directories note. Check the console for details.",
@@ -233,7 +359,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 			} catch (error) {
 				devError(
 					`Error creating folder ${dirPath}:`,
-					error instanceof Error ? error.message : String(error),
+					error,
 				);
 				new Notice(
 					`KOReader Importer: Error creating directory ${dirPath}. Check console for details.`,
@@ -294,7 +420,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 
 	// Helper functions for file name, frontmatter, and content generation
 	async ensureMountPointAndSDRFiles() {
-		if (!this.checkMountPoint()) return;
+		if (!await this.checkMountPoint()) return [];
 
 		const cacheKey = this.getCacheKey(
 			this.settings.koboMountPoint,
@@ -314,7 +440,6 @@ export default class KoReaderHighlightImporter extends Plugin {
 
 		if (sdrFiles.length === 0) {
 			new Notice("No .sdr directories found.");
-			return null;
 		}
 
 		return sdrFiles;
@@ -346,7 +471,8 @@ export default class KoReaderHighlightImporter extends Plugin {
 			) {
 				let value = docProps[key as keyof DocProps];
 				if (key === "description") {
-					value = this.sanitizeHTML(value as string);
+					value = sanitizeHTMLToDom(value as string).textContent ||
+						"";
 				}
 				if (key === "authors") {
 					value = `[[${value}]]`;
@@ -360,9 +486,18 @@ export default class KoReaderHighlightImporter extends Plugin {
 		frontmatter += "---\n\n";
 		return frontmatter;
 	}
-
 	generateHighlightsContent(highlights: Annotation[]): string {
-		highlights.sort((a, b) => a.pageno - b.pageno);
+		highlights.sort((a, b) => {
+			// First sort by page number
+			if (a.pageno !== b.pageno) {
+				return a.pageno - b.pageno;
+			}
+
+			// If same page, sort by datetime
+			const dateA = new Date(a.datetime);
+			const dateB = new Date(b.datetime);
+			return dateA.getTime() - dateB.getTime();
+		});
 		return highlights
 			.map(
 				(highlight) =>
@@ -373,12 +508,6 @@ export default class KoReaderHighlightImporter extends Plugin {
 
 	normalizeFileName(fileName: string): string {
 		return fileName.replace(/[\\/:*?"<>|]/g, "_").trim();
-	}
-
-	sanitizeHTML(html: string): string {
-		const parser = new DOMParser();
-		const doc = parser.parseFromString(html, "text/html");
-		return doc.body.textContent || "";
 	}
 
 	escapeYAMLString(str: string): string {

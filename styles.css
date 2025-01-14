@@ -1,0 +1,45 @@
+.duplicate-buttons {
+    display: flex;
+    gap: 10px;
+    margin-top: 20px;
+}
+
+.duplicate-buttons .mod-button {
+    flex: 1;
+    padding: 8px 12px;
+    border-radius: 4px;
+    text-align: center;
+    cursor: pointer;
+}
+
+.duplicate-buttons .mod-cta {
+    background-color: var(--color-base-30);
+    color: var(--color-base-90);
+}
+
+.duplicate-buttons .mod-warning {
+    background-color: var(--color-red);
+    color: var(--color-base-90);
+}
+
+.duplicate-buttons .mod-disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.duplicate-stats {
+    background: var(--color-base-20);
+    padding: 10px;
+    border-radius: 4px;
+    margin: 10px 0;
+}
+
+.duplicate-buttons .mod-button:hover:not(.mod-disabled) {
+    filter: brightness(1.1);
+    transition: filter 0.2s;
+}
+
+.merge-info-icon {
+    margin-left: 5px;
+    cursor: help;
+}

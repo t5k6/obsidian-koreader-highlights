@@ -1,4 +1,4 @@
-import { type App, ButtonComponent, Modal, Setting } from "obsidian";
+import { type App, ButtonComponent, Modal, setIcon, Setting } from "obsidian";
 import type { DuplicateMatch } from "./duplicateHandler";
 import type { DuplicateChoice, IDuplicateHandlingModal } from "./types";
 
@@ -30,74 +30,143 @@ export class DuplicateHandlingModal extends Modal
 
     onOpen() {
         const { contentEl } = this;
+        contentEl.empty();
 
-        contentEl.createEl("h2", { text: this.title });
-        contentEl.createEl("p", { text: this.message });
+        // Add main container with max width
+        const container = contentEl.createDiv({
+            cls: "duplicate-modal-container",
+        });
 
-        // Statistics
-        const statsDiv = contentEl.createDiv({ cls: "duplicate-stats" });
+        // Header section
+        const headerEl = container.createDiv({ cls: "duplicate-modal-header" });
+        headerEl.createEl("h2", { text: this.title });
+
+        // Add match type badge
+        const badgeEl = headerEl.createEl("span", {
+            cls: `duplicate-badge duplicate-badge-${this.match.matchType}`,
+            text: this.getMatchTypeLabel(),
+        });
+
+        // Message and file path
+        const messageEl = container.createDiv({ cls: "duplicate-message" });
+        messageEl.createEl("p", { text: this.message });
+
+        const filePathEl = messageEl.createDiv({ cls: "duplicate-file-path" });
+        setIcon(filePathEl.createSpan(), "file-text");
+        filePathEl.createSpan({ text: this.match.file.path });
+
+        // Statistics section
         if (this.match.matchType !== "exact") {
-            statsDiv.createEl("p", {
-                text: `New highlights: ${this.match.newHighlights}`,
-                cls: "stat-item",
-            });
-            statsDiv.createEl("p", {
-                text: `Modified highlights: ${this.match.modifiedHighlights}`,
-                cls: "stat-item",
-            });
+            const statsEl = container.createDiv({ cls: "duplicate-stats" });
+
+            const createStatItem = (
+                icon: string,
+                label: string,
+                value: number,
+            ) => {
+                const statItem = statsEl.createDiv({ cls: "stat-item" });
+                setIcon(statItem.createSpan({ cls: "stat-icon" }), icon);
+                statItem.createSpan({ text: label });
+                statItem.createSpan({
+                    cls: "stat-value",
+                    text: value.toString(),
+                });
+            };
+
+            createStatItem(
+                "plus-circle",
+                "New highlights:",
+                this.match.newHighlights,
+            );
+            createStatItem(
+                "edit",
+                "Modified highlights:",
+                this.match.modifiedHighlights,
+            );
         }
 
-        new Setting(contentEl)
-            .setName("Existing file")
-            .setDesc(this.match.file.path)
-            .setClass("duplicate-file-path");
-
-        new Setting(contentEl)
+        // Apply to all setting
+        const settingsEl = container.createDiv({ cls: "duplicate-settings" });
+        new Setting(settingsEl)
             .setName("Apply to all remaining items")
+            .setDesc("Use the same action for all subsequent duplicates")
             .addToggle((toggle) => {
                 toggle.setValue(this.applyToAll).onChange((value) => {
                     this.applyToAll = value;
                 });
             });
 
-        this.createOptionButtons(contentEl);
+        // Action buttons
+        this.createActionButtons(container);
 
+        // Keyboard shortcuts help
+        const shortcutsEl = container.createDiv({ cls: "duplicate-shortcuts" });
+        shortcutsEl.createEl("span", { text: "Shortcuts: " });
+        shortcutsEl.createEl("kbd", { text: "Enter" });
+        shortcutsEl.createSpan({ text: " to Replace, " });
+        shortcutsEl.createEl("kbd", { text: "Esc" });
+        shortcutsEl.createSpan({ text: " to Skip" });
+
+        // Add keyboard listeners
         contentEl.addEventListener("keydown", this.handleKeydown.bind(this));
     }
 
-    private createOptionButtons(contentEl: HTMLElement) {
-        const buttonContainer = contentEl.createDiv({
+    private getMatchTypeLabel(): string {
+        const labels = {
+            exact: "Exact Match",
+            updated: "Updated Content",
+            divergent: "Content Differs",
+        };
+        return labels[this.match.matchType];
+    }
+
+    private createActionButtons(container: HTMLElement) {
+        const buttonContainer = container.createDiv({
             cls: "duplicate-buttons",
         });
 
-        const replaceButton = new ButtonComponent(buttonContainer)
-            .setButtonText("Replace")
-            .onClick(() => this.handleChoice("replace"));
-        if (this.match.matchType === "exact") {
-            replaceButton.setClass("mod-warning");
-        }
+        const createButton = (
+            text: string,
+            choice: DuplicateChoice,
+            icon: string,
+            options: {
+                warning?: boolean;
+                disabled?: boolean;
+                tooltip?: string;
+                primary?: boolean;
+            } = {},
+        ) => {
+            const buttonEl = buttonContainer.createDiv({
+                cls: "button-container",
+            });
+            const button = new ButtonComponent(buttonEl)
+                .setButtonText(text)
+                .onClick(() => this.handleChoice(choice));
 
-        const mergeButton = new ButtonComponent(buttonContainer)
-            .setButtonText("Merge")
-            .onClick(() => this.handleChoice("merge"));
-        if (this.match.matchType === "exact") {
-            mergeButton.setDisabled(true);
-            mergeButton.setTooltip("No new content to merge");
-            buttonContainer.createEl("span", {
-                text: "ℹ️",
-                cls: "merge-info-icon",
-            })
-                .setAttribute("title", "No new content to merge");
-        }
+            setIcon(button.buttonEl.createSpan({ cls: "button-icon" }), icon);
 
-        new ButtonComponent(buttonContainer)
-            .setButtonText("Keep Both")
-            .onClick(() => this.handleChoice("keep-both"));
+            if (options.warning) button.setClass("mod-warning");
+            if (options.disabled) {
+                button.setDisabled(true);
+                if (options.tooltip) button.setTooltip(options.tooltip);
+            }
+            if (options.primary) button.setCta();
+        };
 
-        new ButtonComponent(buttonContainer)
-            .setButtonText("Skip")
-            .setCta()
-            .onClick(() => this.handleChoice("skip"));
+        createButton("Replace", "replace", "replace-all", {
+            warning: this.match.matchType === "exact",
+        });
+
+        createButton("Merge", "merge", "git-merge", {
+            disabled: this.match.matchType === "exact",
+            tooltip: this.match.matchType === "exact"
+                ? "No new content to merge"
+                : undefined,
+        });
+
+        createButton("Keep Both", "keep-both", "copy", {});
+
+        createButton("Skip", "skip", "x", { primary: true });
     }
 
     private handleChoice(choice: DuplicateChoice) {

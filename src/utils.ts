@@ -1,4 +1,6 @@
+import { readdir, readFile, stat } from "node:fs/promises";
 import { basename } from "node:path";
+import { join as node_join } from "node:path";
 import { normalizePath, type TFile, TFolder, type Vault } from "obsidian";
 
 let isDebugMode = false;
@@ -96,6 +98,116 @@ export function devError(...args: unknown[]): void {
     }
 }
 
+export async function generateUniqueFilePath(
+    vault: Vault,
+    baseDir: string,
+    fileName: string,
+    maxFileNameLength?: number,
+): Promise<string> {
+    const normalizedBaseDir = normalizePath(baseDir);
+    let normalizedFileName = normalizePath(fileName);
+
+    // Truncate the file name if it exceeds the maximum length
+    if (maxFileNameLength && normalizedFileName.length > maxFileNameLength) {
+        const ext = normalizedFileName.substring(
+            normalizedFileName.lastIndexOf("."),
+        );
+        const baseName = normalizedFileName.substring(
+            0,
+            normalizedFileName.lastIndexOf("."),
+        );
+        normalizedFileName = `${
+            baseName.slice(0, maxFileNameLength - ext.length)
+        }${ext}`;
+    }
+
+    // Ensure the file name is unique
+    let counter = 1;
+    let newPath = normalizePath(`${normalizedBaseDir}/${normalizedFileName}`);
+    const baseName = normalizedFileName.substring(
+        0,
+        normalizedFileName.lastIndexOf("."),
+    );
+    const ext = normalizedFileName.substring(
+        normalizedFileName.lastIndexOf("."),
+    );
+
+    while (vault.getAbstractFileByPath(newPath)) {
+        newPath = normalizePath(
+            `${normalizedBaseDir}/${baseName} (${counter})${ext}`,
+        );
+        counter++;
+    }
+
+    return newPath;
+}
+
+export async function ensureParentDirectory(
+    vault: Vault,
+    filePath: string,
+): Promise<void> {
+    const dirPath = normalizePath(
+        filePath.substring(0, filePath.lastIndexOf("/")),
+    );
+    const dirExists = vault.getFolderByPath(dirPath);
+
+    if (!dirExists) {
+        await vault.createFolder(dirPath);
+    }
+}
+
+export async function findAndReadMetadataFile(
+    directory: string,
+    allowedFileTypes: string[],
+): Promise<string | null> {
+    const isFileTypeFilterEmpty = !allowedFileTypes.length ||
+        (allowedFileTypes.length === 1 && !allowedFileTypes[0]);
+
+    const searchFiles = async (files: string[]) => {
+        for (const file of files) {
+            if (isFileTypeFilterEmpty && /^metadata\..+\.lua$/.test(file)) {
+                const luaFilePath = node_join(directory, file);
+                try {
+                    const stats = await stat(luaFilePath);
+                    if (stats.isFile()) {
+                        devLog(`File found: ${luaFilePath}`);
+                        return await readFile(luaFilePath, "utf-8");
+                    }
+                    devWarn(`Skipping non-file: ${luaFilePath}`);
+                } catch (error) {
+                    const e = error as NodeJS.ErrnoException;
+                    await handleDirectoryError(luaFilePath, e);
+                }
+            } else if (
+                !isFileTypeFilterEmpty &&
+                allowedFileTypes.some((type) => file === `metadata.${type}.lua`)
+            ) {
+                const luaFilePath = node_join(directory, file);
+                try {
+                    const stats = await stat(luaFilePath);
+                    if (stats.isFile()) {
+                        devLog(`File found: ${luaFilePath}`);
+                        return await readFile(luaFilePath, "utf-8");
+                    }
+                    devWarn(`Skipping non-file: ${luaFilePath}`);
+                } catch (error) {
+                    const e = error as NodeJS.ErrnoException;
+                    await handleDirectoryError(luaFilePath, e);
+                }
+            }
+        }
+        return null;
+    };
+
+    try {
+        const files = await readdir(directory);
+        return searchFiles(files);
+    } catch (error) {
+        devError(`Error reading directory ${directory}:`, error);
+        return null;
+    }
+}
+
 export function getFileNameWithoutExt(filePath: string): string {
     const fileName = basename(filePath);
     const lastDotIndex = fileName.lastIndexOf(".");
@@ -116,11 +228,17 @@ export async function handleDirectoryError(
     filePath: string,
     error: NodeJS.ErrnoException,
 ) {
-    if (error.code === "ENOENT") {
-        devError(`File/Directory not found: ${filePath}`);
-    } else if (error.code === "EPERM") {
-        devError(`Permission denied for file/directory: ${filePath}`);
-    } else {
-        devError(`Error reading file/directory ${filePath}:`, error);
+    switch (error.code) {
+        case "ENOENT":
+            devError(`File/Directory not found: ${filePath}`);
+            break;
+        case "EPERM":
+            devError(`Permission denied for file/directory: ${filePath}`);
+            break;
+        case "EACCES":
+            devError(`Access denied for file/directory: ${filePath}`);
+            break;
+        default:
+            devError(`Error reading file/directory ${filePath}:`, error);
     }
 }

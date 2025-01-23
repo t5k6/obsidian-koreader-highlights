@@ -1,13 +1,19 @@
-import { type App, TFile, type Vault } from "obsidian";
-import { normalizePath } from "obsidian";
+import {
+    type App,
+    type CachedMetadata,
+    type TAbstractFile,
+    TFile,
+    type Vault,
+} from "obsidian";
 import type {
     Annotation,
     DocProps,
     DuplicateChoice,
+    Frontmatter,
     IDuplicateHandlingModal,
     LuaMetadata,
 } from "./types";
-import { devError, devLog } from "./utils";
+import { devError, devLog, generateUniqueFilePath } from "./utils";
 
 export interface DuplicateMatch {
     file: TFile;
@@ -17,11 +23,22 @@ export interface DuplicateMatch {
     luaMetadata: LuaMetadata;
 }
 
+interface ParsedFrontmatter {
+    authors?: string;
+    title?: string;
+    [key: string]: string | string[] | number | undefined;
+}
+
+interface FrontmatterContent {
+    content: string;
+    frontmatter: ParsedFrontmatter;
+}
+
 type CacheKey = string;
 type PotentialDuplicatesCache = Map<CacheKey, TFile[]>;
 
 export class DuplicateHandler {
-    currentMatch: DuplicateMatch | null = null;
+    currentMatch: NonNullable<DuplicateMatch> | null = null;
     private applyToAll = false;
     private applyToAllChoice: DuplicateChoice | null = null;
     private potentialDuplicatesCache: PotentialDuplicatesCache = new Map();
@@ -38,7 +55,70 @@ export class DuplicateHandler {
             highlightsFolder: string;
             enableFullDuplicateCheck: boolean;
         },
-    ) {}
+    ) {
+        // Register metadata cache events for cache invalidation
+        this.app.metadataCache.on(
+            "changed",
+            (file, data, cache) => this.handleMetadataChange(file, data, cache),
+        );
+        this.app.metadataCache.on(
+            "deleted",
+            (file) => this.handleFileDeletion(file),
+        );
+        this.app.vault.on(
+            "rename",
+            (file: TFile | TAbstractFile, oldPath: string) => {
+                if (file instanceof TFile) {
+                    this.handleFileRename(file, oldPath);
+                }
+            },
+        );
+    }
+
+    private handleMetadataChange(
+        file: TFile,
+        data: string,
+        cache: CachedMetadata,
+    ) {
+        // Invalidate cache entries related to the modified file
+        if (!file.path.startsWith(this.settings.highlightsFolder)) return;
+        const { frontmatter } = cache;
+        if (!frontmatter) return;
+        const docProps: DocProps = {
+            title: frontmatter.title,
+            authors: frontmatter.authors,
+            description: frontmatter.description,
+            keywords: frontmatter.keywords,
+            series: frontmatter.series,
+            language: frontmatter.language,
+        };
+
+        if (!docProps.title || !docProps.authors) return;
+
+        const cacheKey = this.getCacheKey(docProps);
+        this.potentialDuplicatesCache.delete(cacheKey);
+    }
+    private handleFileDeletion(file: TFile) {
+        // Remove cache entries related to the deleted file
+        for (const [key, files] of this.potentialDuplicatesCache.entries()) {
+            if (files.includes(file)) {
+                this.potentialDuplicatesCache.delete(key);
+            }
+        }
+    }
+
+    private handleFileRename(file: TFile, oldPath: string) {
+        // Invalidate cache entries related to the old and new paths
+        for (const [key, files] of this.potentialDuplicatesCache.entries()) {
+            if (
+                files.some(
+                    (f) => f.path === oldPath || f.path === file.path,
+                )
+            ) {
+                this.potentialDuplicatesCache.delete(key);
+            }
+        }
+    }
 
     async handleDuplicate(
         match: DuplicateMatch,
@@ -48,12 +128,12 @@ export class DuplicateHandler {
             this.currentMatch = match;
 
             // Reset state if not applying to all
-            if (!this.applyToAll && this.applyToAllChoice !== null) {
+            if (!this.applyToAll) {
                 this.applyToAllChoice = null;
             }
 
             // If applyToAll is true, use the previously chosen action
-            if (this.applyToAll && this.applyToAllChoice !== null) {
+            if (this.applyToAll && this.applyToAllChoice) {
                 await this.handleChoice(
                     this.applyToAllChoice,
                     match,
@@ -99,10 +179,8 @@ export class DuplicateHandler {
             case "keep-both": {
                 // this check is just to make the typescript linter happy
                 // handleChoice wouldn't be called without a currentMatch
-                if (!this.currentMatch) {
-                    return;
-                }
-                const newFileName = this.generateUniqueFileName(
+                if (!this.currentMatch) return;
+                const newFileName = await this.generateUniqueFileName(
                     this.currentMatch.luaMetadata.docProps,
                 );
                 await this.vault.create(newFileName, newContent);
@@ -128,8 +206,7 @@ export class DuplicateHandler {
         const files = this.settings.enableFullDuplicateCheck
             ? this.vault.getMarkdownFiles()
             : this.vault.getFiles().filter((file) =>
-                file.path.startsWith(this.settings.highlightsFolder) &&
-                file instanceof TFile
+                file.path.startsWith(this.settings.highlightsFolder)
             );
         const potentialDuplicates: TFile[] = [];
 
@@ -149,11 +226,11 @@ export class DuplicateHandler {
         return `${docProps.authors}-${docProps.title}`;
     }
 
-    private extractFrontmatter(content: string): Record<string, string> {
+    private extractFrontmatter(content: string): ParsedFrontmatter {
         const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
         if (!frontmatterMatch) return {};
 
-        const frontmatter: Record<string, string> = {};
+        const frontmatter: ParsedFrontmatter = {};
         const lines = frontmatterMatch[1].split("\n");
 
         for (const line of lines) {
@@ -172,7 +249,7 @@ export class DuplicateHandler {
 
     private isMetadataMatch(
         file: TFile,
-        frontmatter: Record<string, string>,
+        frontmatter: ParsedFrontmatter,
         docProps: DocProps,
     ): boolean {
         const metadata = this.app.metadataCache.getFileCache(file);
@@ -225,27 +302,193 @@ export class DuplicateHandler {
         };
     }
 
-    // TODO: refactor this to use a more efficient algorithm
     private extractHighlights(content: string): Annotation[] {
         const highlights: Annotation[] = [];
-        const highlightRegex =
-            /### Chapter: (.*?)\n\(\*Date: (.*?) - Page: (\d+)\*\)\n\n(.*?)\n\n---/gs;
+        const lines = content.split("\n");
 
-        let match: RegExpExecArray | null;
-        do {
-            match = highlightRegex.exec(content);
-            if (match) {
-                highlights.push({
-                    chapter: match[1],
-                    datetime: match[2],
-                    pageno: Number.parseInt(match[3]),
-                    text: match[4],
-                } as Annotation);
+        let currentHighlight: Partial<Annotation> | null = null;
+        let collectingText = false;
+        let currentText: string[] = [];
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+
+            // Skip frontmatter
+            if (i === 0 && line === "---") {
+                while (i < lines.length && lines[i] !== "---") i++;
+                continue;
             }
-        } while (match !== null);
+
+            // Check for chapter header
+            const chapterMatch = line.match(/^### Chapter: (.+)$/);
+            if (chapterMatch) {
+                if (currentHighlight) {
+                    this.finalizeHighlight(
+                        currentHighlight,
+                        currentText,
+                        highlights,
+                    );
+                }
+                currentHighlight = { chapter: chapterMatch[1] };
+                currentText = [];
+                continue;
+            }
+
+            // Check for metadata line (date and page)
+            const metadataMatch = line.match(
+                /^\(\*Date: (.+) - Page: (\d+)\*\)$/,
+            );
+            if (metadataMatch && currentHighlight) {
+                currentHighlight.datetime = metadataMatch[1];
+                currentHighlight.pageno = Number.parseInt(metadataMatch[2], 10);
+                collectingText = true;
+                continue;
+            }
+
+            // Check for highlight end
+            if (line === "---") {
+                if (currentHighlight) {
+                    this.finalizeHighlight(
+                        currentHighlight,
+                        currentText,
+                        highlights,
+                    );
+                }
+                currentHighlight = null;
+                collectingText = false;
+                currentText = [];
+                continue;
+            }
+
+            // Collect highlight text
+            if (collectingText && currentHighlight) {
+                if (line.trim()) {
+                    currentText.push(line);
+                }
+            }
+        }
+
+        // Handle the last highlight if exists
+        if (currentHighlight) {
+            this.finalizeHighlight(currentHighlight, currentText, highlights);
+        }
 
         return highlights;
     }
+
+    private finalizeHighlight(
+        highlight: Partial<Annotation>,
+        textLines: string[],
+        highlights: Annotation[],
+    ): void {
+        if (highlight.chapter && highlight.datetime && highlight.pageno) {
+            highlights.push({
+                chapter: highlight.chapter,
+                datetime: highlight.datetime,
+                pageno: highlight.pageno,
+                text: textLines.join("\n").trim(),
+            } as Annotation);
+        }
+    }
+
+    /**
+     * Alternative implementation using chunks for very large files.
+     * This version is more memory efficient for huge files as it processes
+     * the content in smaller chunks.
+     */
+    private extractHighlightsStreaming(content: string): Annotation[] {
+        const CHUNK_SIZE = 8192; // 8KB chunks
+        const highlights: Annotation[] = [];
+        let buffer = "";
+        let position = 0;
+
+        while (position < content.length) {
+            // Read next chunk
+            const chunk = content.slice(position, position + CHUNK_SIZE);
+            buffer += chunk;
+
+            // Find complete highlight blocks in buffer
+            const blockEnd = buffer.lastIndexOf("\n---\n");
+
+            if (blockEnd !== -1) {
+                // Process complete blocks
+                const completeContent = buffer.slice(0, blockEnd);
+                const remainingBuffer = buffer.slice(blockEnd + 4);
+
+                // Extract highlights from complete content
+                this.processHighlightBlocks(completeContent, highlights);
+
+                // Keep remaining partial block in buffer
+                buffer = remainingBuffer;
+            }
+
+            position += CHUNK_SIZE;
+        }
+
+        // Process any remaining content
+        if (buffer.trim()) {
+            this.processHighlightBlocks(buffer, highlights);
+        }
+
+        return highlights;
+    }
+
+    /**
+     * Helper method to process highlight blocks for the streaming implementation
+     */
+    private processHighlightBlocks(
+        content: string,
+        highlights: Annotation[],
+    ): void {
+        const blocks = content.split("\n---\n");
+
+        for (const block of blocks) {
+            if (!block.trim()) continue;
+
+            const lines = block.split("\n");
+            const chapterMatch = lines[0]?.match(/^### Chapter: (.+)$/);
+            const metadataMatch = lines[1]?.match(
+                /^\(\*Date: (.+) - Page: (\d+)\*\)$/,
+            );
+
+            if (chapterMatch && metadataMatch) {
+                highlights.push({
+                    chapter: chapterMatch[1],
+                    datetime: metadataMatch[1],
+                    pageno: Number.parseInt(metadataMatch[2], 10),
+                    text: lines.slice(2).join("\n").trim(),
+                } as Annotation);
+            }
+        }
+    }
+
+    /**
+     * Performance monitoring wrapper for highlight extraction
+     */
+    private extractHighlightsWithMetrics(content: string): {
+        highlights: Annotation[];
+        metrics: {
+            duration: number;
+            highlightCount: number;
+            contentSize: number;
+        };
+    } {
+        const startTime = performance.now();
+        const highlights = content.length > 50000
+            ? this.extractHighlightsStreaming(content)
+            : this.extractHighlights(content);
+        const endTime = performance.now();
+
+        return {
+            highlights,
+            metrics: {
+                duration: endTime - startTime,
+                highlightCount: highlights.length,
+                contentSize: content.length,
+            },
+        };
+    }
+
     private isHighlightTextEqual(text1: string, text2: string): boolean {
         const normalize = (text: string) =>
             text.trim().replace(/\s+/g, " ").toLowerCase();
@@ -292,17 +535,123 @@ export class DuplicateHandler {
         existingFile: TFile,
         newContent: string,
     ): Promise<string> {
+        const existingContent = await this.vault.read(existingFile);
         const existingHighlights = await this.extractHighlightsFromFile(
             existingFile,
         );
         const newHighlights = this.extractHighlights(newContent);
 
-        const mergedHighlights = this.mergeHighlights(
+        const mergedHighlights: Annotation[] = this.mergeHighlights(
             existingHighlights,
             newHighlights,
         );
 
-        return this.formatMergedContent(newContent, mergedHighlights);
+        const { frontmatter: existingFrontmatter } = this
+            .parseFrontmatterAndContent(existingContent);
+        const { frontmatter: newFrontmatter } = this.parseFrontmatterAndContent(
+            newContent,
+        );
+
+        return this.formatMergedContent(
+            existingFrontmatter,
+            newFrontmatter,
+            mergedHighlights,
+        );
+    }
+
+    private parseFrontmatterAndContent(content: string): FrontmatterContent {
+        const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---\n\n/);
+        if (!frontmatterMatch) {
+            return {
+                content: content,
+                frontmatter: {},
+            };
+        }
+
+        const frontmatterYaml = frontmatterMatch[1];
+        const frontmatter: ParsedFrontmatter = {};
+
+        // Parse the YAML frontmatter
+        const lines = frontmatterYaml.split("\n");
+        for (const line of lines) {
+            const [key, ...valueParts] = line.split(":");
+            if (key && valueParts.length) {
+                const value = valueParts.join(":").trim().replace(
+                    /^"(.*)"$/,
+                    "$1",
+                );
+                frontmatter[key.trim()] = value;
+            }
+        }
+
+        return {
+            content: content.slice(frontmatterMatch[0].length),
+            frontmatter,
+        };
+    }
+
+    private formatMergedContent(
+        existingFrontmatter: ParsedFrontmatter,
+        newFrontmatter: ParsedFrontmatter,
+        mergedHighlights: Annotation[],
+    ): string {
+        // Merge frontmatter, preferring existing user modifications
+        const mergedFrontmatter = this.mergeFrontmatter(
+            existingFrontmatter,
+            newFrontmatter,
+        );
+        const frontmatterString = this.formatFrontmatter(mergedFrontmatter);
+        const highlightsContent = this.formatHighlights(mergedHighlights);
+
+        return `---\n${frontmatterString}---\n\n${highlightsContent}`;
+    }
+
+    private mergeFrontmatter(
+        existing: Frontmatter,
+        newer: Frontmatter,
+    ): Frontmatter {
+        const merged = { ...existing };
+
+        // List of fields that should always be updated from the new content
+        const alwaysUpdateFields = ["title", "authors", "url", "lastAnnotated"];
+
+        // Update fields that should always be refreshed
+        for (const field of alwaysUpdateFields) {
+            if (newer[field]) {
+                merged[field] = newer[field];
+            }
+        }
+
+        // Add any new fields that don't exist in the existing frontmatter
+        for (const [key, value] of Object.entries(newer)) {
+            if (
+                !Object.hasOwn(merged, key) &&
+                !alwaysUpdateFields.includes(key)
+            ) {
+                merged[key] = value;
+            }
+        }
+
+        return merged;
+    }
+
+    private formatFrontmatter(frontmatter: ParsedFrontmatter): string {
+        return Object.entries(frontmatter)
+            .map(([key, value]) => {
+                // Handle arrays
+                if (Array.isArray(value)) {
+                    return `${key}: [${value.join(", ")}]`;
+                }
+                // Handle strings that need quotes
+                if (
+                    typeof value === "string" &&
+                    (value.includes(":") || value.includes("\n"))
+                ) {
+                    return `${key}: "${value.replace(/"/g, '\\"')}"`;
+                }
+                return `${key}: ${value}`;
+            })
+            .join("\n");
     }
 
     private async extractHighlightsFromFile(
@@ -311,19 +660,6 @@ export class DuplicateHandler {
         const content = await this.vault.read(file);
         return this.extractHighlights(content);
     }
-
-    private formatMergedContent(
-        newContent: string,
-        mergedHighlights: Annotation[],
-    ): string {
-        // Preserve frontmatter from new content
-        const frontmatter = newContent.match(/^---\n[\s\S]*?\n---\n\n/)?.[0] ||
-            "";
-        const highlightsContent = this.formatHighlights(mergedHighlights);
-
-        return `${frontmatter}${highlightsContent}`;
-    }
-
     // TODO: refactor this to use a more efficient algorithm
     private mergeHighlights(
         existing: Annotation[],
@@ -364,28 +700,15 @@ export class DuplicateHandler {
             .join("");
     }
 
-    private generateUniqueFileName(
-        docProps: DocProps,
-    ): string {
-        const { vault } = this;
+    private async generateUniqueFileName(docProps: DocProps): Promise<string> {
         const fileName = this.generateFileName(docProps);
-        const dir = normalizePath(
-            `${this.settings.highlightsFolder}/`,
+        return generateUniqueFilePath(
+            this.vault,
+            this.settings.highlightsFolder,
+            fileName,
         );
-        let counter = 1;
-        let newPath = normalizePath(
-            `${dir}/${fileName}`,
-        );
-
-        const baseName = fileName.substring(0, fileName.lastIndexOf("."));
-        const ext = fileName.substring(fileName.lastIndexOf("."));
-
-        while (this.vault.getAbstractFileByPath(newPath)) {
-            newPath = `${dir}${baseName} (${counter})${ext}`;
-            counter++;
-        }
-        return newPath;
     }
+
     private generateFileName(docProps: DocProps): string {
         const normalizedAuthors = this.normalizeFileName(docProps.authors);
         const normalizedTitle = this.normalizeFileName(docProps.title);

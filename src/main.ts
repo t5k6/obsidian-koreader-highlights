@@ -20,6 +20,8 @@ import { findSDRFiles, readSDRFileContent } from "./parser";
 import {
 	devError,
 	devLog,
+	ensureParentDirectory,
+	generateUniqueFilePath,
 	getFileNameWithoutExt,
 	handleDirectoryError,
 	initLogging,
@@ -132,6 +134,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 			);
 		}
 	}
+
 	async handleScanHighlightsDirectory() {
 		if (!await this.checkMountPoint()) return;
 
@@ -162,11 +165,6 @@ export default class KoReaderHighlightImporter extends Plugin {
 				if (!luaMetadata) {
 					// If no allowed file types are specified, pass an empty array to readSDRFileContent
 					// to indicate that any metadata file should be considered.
-					console.log(
-						"allowedFileTypes",
-						this.settings.allowedFileTypes,
-						this.settings.allowedFileTypes.length,
-					);
 					const isFileTypeFilterEmpty = this.settings.allowedFileTypes
 						.every((type) => type.trim() === "");
 
@@ -223,6 +221,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 		}
 		new Notice("KOReader Importer: Highlights imported successfully!");
 	}
+
 	async saveHighlights(
 		highlights: Annotation[],
 		luaMetadata: LuaMetadata,
@@ -300,11 +299,11 @@ export default class KoReaderHighlightImporter extends Plugin {
 
 				// If no duplicates were found or handled, create new file
 				if (!fileCreated && potentialDuplicates.length === 0) {
-					await this.createOrUpdateFile(vault, filePath, content);
+					await this.createOrUpdateFile(filePath, content);
 				}
 			} else {
 				// If enableFullDuplicateCheck is disabled, just create new file
-				await this.createOrUpdateFile(vault, filePath, content);
+				await this.createOrUpdateFile(filePath, content);
 			}
 		} catch (error) {
 			devError(
@@ -316,6 +315,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 			);
 		}
 	}
+
 	async scanHighlightsDirectory(): Promise<void> {
 		const sdrFiles = await this.ensureMountPointAndSDRFiles();
 		if (!sdrFiles || !Array.isArray(sdrFiles)) return;
@@ -334,45 +334,25 @@ export default class KoReaderHighlightImporter extends Plugin {
 		}
 	}
 	async createOrUpdateNote(sdrFiles: string[]): Promise<void> {
-		const vault = this.app.vault;
-		const filePath = normalizePath("KoReader SDR Files.md");
+		const filePath = await generateUniqueFilePath(
+			this.app.vault,
+			"", // Base directory (root)
+			"KoReader SDR Files.md",
+		);
 		const content = `# KoReader SDR Files\n\n${
 			sdrFiles.map((file) => `- ${file}`).join("\n")
 		}`;
-
-		await this.createOrUpdateFile(vault, filePath, content);
+		await this.createOrUpdateFile(filePath, content);
 	}
 
-	async createOrUpdateFile(
-		vault: Vault,
-		filePath: string,
-		content: string,
-	): Promise<void> {
-		const dirPath = normalizePath(
-			filePath.substring(0, filePath.lastIndexOf("/")),
-		);
-		const dirExists = vault.getFolderByPath(dirPath);
+	async createOrUpdateFile(filePath: string, content: string): Promise<void> {
+		await ensureParentDirectory(this.app.vault, filePath);
 
-		if (!dirExists) {
-			try {
-				await vault.createFolder(dirPath);
-			} catch (error) {
-				devError(
-					`Error creating folder ${dirPath}:`,
-					error,
-				);
-				new Notice(
-					`KOReader Importer: Error creating directory ${dirPath}. Check console for details.`,
-				);
-				return;
-			}
-		}
-
-		const file = vault.getAbstractFileByPath(filePath);
+		const file = this.app.vault.getAbstractFileByPath(filePath);
 		if (file instanceof TFile) {
-			await vault.modify(file, content);
+			await this.app.vault.modify(file, content);
 		} else {
-			await vault.create(filePath, content);
+			await this.app.vault.create(filePath, content);
 		}
 	}
 
@@ -454,8 +434,8 @@ export default class KoReaderHighlightImporter extends Plugin {
 		const authorsString = authorsArray.join(" & ") || "Unknown Author";
 		const fileName = `${authorsString} - ${normalizedTitle}.md`;
 
-		const maxFileNameLength = 260 -
-			this.settings.highlightsFolder.length - sep.length - 4; // 4 for '.md'
+		const maxFileNameLength = 260 - this.settings.highlightsFolder.length -
+			1 - 4; // 4 for '.md'
 		return fileName.length > maxFileNameLength
 			? `${fileName.slice(0, maxFileNameLength)}.md`
 			: fileName;
@@ -499,10 +479,12 @@ export default class KoReaderHighlightImporter extends Plugin {
 			return dateA.getTime() - dateB.getTime();
 		});
 		return highlights
-			.map(
-				(highlight) =>
-					`### Chapter: ${highlight.chapter}\n(*Date: ${highlight.datetime} - Page: ${highlight.pageno}*)\n\n${highlight.text}\n\n---\n`,
-			)
+			.map((highlight) => {
+				if (highlight.chapter) {
+					return `### Chapter: ${highlight.chapter}\n(*Date: ${highlight.datetime} - Page: ${highlight.pageno}*)\n\n${highlight.text}\n\n---\n`;
+				}
+				return `(*Date: ${highlight.datetime} - Page: ${highlight.pageno}*)\n\n${highlight.text}\n\n---\n`;
+			})
 			.join("");
 	}
 

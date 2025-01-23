@@ -1,25 +1,137 @@
-.duplicate-buttons {
+/* Modal Container */
+.duplicate-modal-container {
+    max-width: 600px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+/* Header Section */
+.duplicate-modal-header {
     display: flex;
-    gap: 10px;
-    margin-top: 20px;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 20px;
+}
+
+.duplicate-modal-header h2 {
+    margin: 0;
+    flex-grow: 1;
+}
+
+/* Match Type Badges */
+.duplicate-badge {
+    font-size: 12px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-weight: 500;
+}
+
+.duplicate-badge-exact {
+    background-color: var(--color-green);
+    color: var(--color-base-100);
+}
+
+.duplicate-badge-updated {
+    background-color: var(--color-yellow);
+    color: var(--color-base-100);
+}
+
+.duplicate-badge-divergent {
+    background-color: var(--color-orange);
+    color: var(--color-base-100);
+}
+
+/* Message and File Path */
+.duplicate-message {
+    margin-bottom: 20px;
+}
+
+.duplicate-file-path {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background-color: var(--color-base-20);
+    border-radius: 4px;
+    font-family: var(--font-monospace);
+    font-size: 0.9em;
+}
+
+/* Statistics Section */
+.duplicate-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    background: var(--color-base-20);
+    padding: 16px;
+    border-radius: 6px;
+    margin: 20px 0;
+}
+
+.stat-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.stat-icon {
+    color: var(--color-accent);
+}
+
+.stat-value {
+    font-weight: bold;
+    margin-left: auto;
+}
+
+/* Settings Section */
+.duplicate-settings {
+    margin: 20px 0;
+    padding: 12px;
+    background: var(--color-base-20);
+    border-radius: 6px;
+}
+
+/* Action Buttons */
+.duplicate-buttons {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-top: 24px;
+}
+
+.button-container {
+    display: flex;
+    flex-direction: column;
 }
 
 .duplicate-buttons .mod-button {
     flex: 1;
-    padding: 8px 12px;
-    border-radius: 4px;
-    text-align: center;
-    cursor: pointer;
+    padding: 12px;
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.2s ease;
+}
+
+.button-icon {
+    margin-bottom: 4px;
 }
 
 .duplicate-buttons .mod-cta {
-    background-color: var(--color-base-30);
-    color: var(--color-base-90);
+    background-color: var(--color-accent);
+    color: var(--color-base-100);
 }
 
 .duplicate-buttons .mod-warning {
     background-color: var(--color-red);
-    color: var(--color-base-90);
+    color: var(--color-base-100);
+}
+
+.duplicate-buttons .mod-button:hover:not(.mod-disabled) {
+    transform: translateY(-1px);
+    filter: brightness(1.1);
 }
 
 .duplicate-buttons .mod-disabled {
@@ -27,19 +139,17 @@
     cursor: not-allowed;
 }
 
-.duplicate-stats {
-    background: var(--color-base-20);
-    padding: 10px;
+/* Keyboard Shortcuts */
+.duplicate-shortcuts {
+    margin-top: 20px;
+    text-align: center;
+    font-size: 0.9em;
+    color: var(--color-base-70);
+}
+
+.duplicate-shortcuts kbd {
+    background: var(--color-base-30);
+    padding: 2px 6px;
     border-radius: 4px;
-    margin: 10px 0;
-}
-
-.duplicate-buttons .mod-button:hover:not(.mod-disabled) {
-    filter: brightness(1.1);
-    transition: filter 0.2s;
-}
-
-.merge-info-icon {
-    margin-left: 5px;
-    cursor: help;
+    font-size: 0.9em;
 }

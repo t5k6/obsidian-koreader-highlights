@@ -10,6 +10,17 @@ import type {
     TableValue,
 } from "luaparse";
 
+type LuaKey = Extract<
+    Expression,
+    Identifier | StringLiteral | NumericLiteral | BooleanLiteral
+>;
+export type LuaValue = Extract<
+    Expression,
+    StringLiteral | NumericLiteral | BooleanLiteral | TableConstructorExpression
+>;
+
+export type Field = TableKey | TableKeyString | TableValue;
+
 export interface KoReaderHighlightImporterSettings {
     koboMountPoint: string;
     excludedFolders: string[];
@@ -29,7 +40,7 @@ export const DEFAULT_SETTINGS: KoReaderHighlightImporterSettings = {
 };
 
 export interface Annotation {
-    chapter: string;
+    chapter?: string;
     datetime: string;
     pageno: number;
     text: string;
@@ -50,16 +61,18 @@ export interface LuaMetadata {
     annotations: Annotation[];
 }
 
-type LuaKey = Extract<
-    Expression,
-    Identifier | StringLiteral | NumericLiteral | BooleanLiteral
->;
-export type LuaValue = Extract<
-    Expression,
-    StringLiteral | NumericLiteral | BooleanLiteral | TableConstructorExpression
->;
-
-export type Field = TableKey | TableKeyString | TableValue;
+export interface Frontmatter {
+    title?: string;
+    authors?: string;
+    url?: string;
+    lastAnnotated?: string;
+    tags?: string[];
+    aliases?: string[];
+    created?: string;
+    modified?: string;
+    category?: string;
+    [key: string]: string | string[] | number | undefined; // for custom frontmatter fields
+}
 
 export type DuplicateChoice = "replace" | "merge" | "keep-both" | "skip";
 

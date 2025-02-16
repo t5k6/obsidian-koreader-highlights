@@ -5,6 +5,13 @@ import {
     TFile,
     type Vault,
 } from "obsidian";
+import {
+    extractFrontmatter,
+    formatFrontmatter,
+    type FrontmatterContent,
+    type ParsedFrontmatter,
+} from "./frontmatter";
+import { extractHighlights, mergeHighlights } from "./highlightExtractor";
 import type {
     Annotation,
     DocProps,
@@ -21,17 +28,6 @@ export interface DuplicateMatch {
     newHighlights: number;
     modifiedHighlights: number;
     luaMetadata: LuaMetadata;
-}
-
-interface ParsedFrontmatter {
-    authors?: string;
-    title?: string;
-    [key: string]: string | string[] | number | undefined;
-}
-
-interface FrontmatterContent {
-    content: string;
-    frontmatter: ParsedFrontmatter;
 }
 
 type CacheKey = string;
@@ -212,7 +208,7 @@ export class DuplicateHandler {
 
         for (const file of files) {
             const content = await this.vault.read(file);
-            const frontmatter = this.extractFrontmatter(content);
+            const frontmatter = extractFrontmatter(content);
 
             if (this.isMetadataMatch(file, frontmatter, docProps)) {
                 potentialDuplicates.push(file);
@@ -226,27 +222,6 @@ export class DuplicateHandler {
         return `${docProps.authors}-${docProps.title}`;
     }
 
-    private extractFrontmatter(content: string): ParsedFrontmatter {
-        const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
-        if (!frontmatterMatch) return {};
-
-        const frontmatter: ParsedFrontmatter = {};
-        const lines = frontmatterMatch[1].split("\n");
-
-        for (const line of lines) {
-            const [key, ...valueParts] = line.split(":");
-            if (key && valueParts.length) {
-                const value = valueParts.join(":").trim().replace(
-                    /^"(.*)"$/,
-                    "$1",
-                );
-                frontmatter[key.trim()] = value;
-            }
-        }
-
-        return frontmatter;
-    }
-
     private isMetadataMatch(
         file: TFile,
         frontmatter: ParsedFrontmatter,
@@ -254,10 +229,17 @@ export class DuplicateHandler {
     ): boolean {
         const metadata = this.app.metadataCache.getFileCache(file);
         if (!metadata?.frontmatter) return false;
-        const authorMatch =
-            frontmatter.authors?.replace(/\[\[(.*?)\]\]/, "$1") ===
-                docProps.authors;
+
+        // Handle different frontmatter author formats
+        const frontmatterAuthors = typeof frontmatter.authors === "string"
+            ? frontmatter.authors.replace(/\[\[(.*?)\]\]/, "$1")
+            : Array.isArray(frontmatter.authors)
+            ? frontmatter.authors.join(", ")
+            : String(frontmatter.authors || "");
+
+        const authorMatch = frontmatterAuthors === docProps.authors;
         const titleMatch = frontmatter.title === docProps.title;
+
         return authorMatch && titleMatch;
     }
 
@@ -303,190 +285,7 @@ export class DuplicateHandler {
     }
 
     private extractHighlights(content: string): Annotation[] {
-        const highlights: Annotation[] = [];
-        const lines = content.split("\n");
-
-        let currentHighlight: Partial<Annotation> | null = null;
-        let collectingText = false;
-        let currentText: string[] = [];
-
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
-
-            // Skip frontmatter
-            if (i === 0 && line === "---") {
-                while (i < lines.length && lines[i] !== "---") i++;
-                continue;
-            }
-
-            // Check for chapter header
-            const chapterMatch = line.match(/^### Chapter: (.+)$/);
-            if (chapterMatch) {
-                if (currentHighlight) {
-                    this.finalizeHighlight(
-                        currentHighlight,
-                        currentText,
-                        highlights,
-                    );
-                }
-                currentHighlight = { chapter: chapterMatch[1] };
-                currentText = [];
-                continue;
-            }
-
-            // Check for metadata line (date and page)
-            const metadataMatch = line.match(
-                /^\(\*Date: (.+) - Page: (\d+)\*\)$/,
-            );
-            if (metadataMatch && currentHighlight) {
-                currentHighlight.datetime = metadataMatch[1];
-                currentHighlight.pageno = Number.parseInt(metadataMatch[2], 10);
-                collectingText = true;
-                continue;
-            }
-
-            // Check for highlight end
-            if (line === "---") {
-                if (currentHighlight) {
-                    this.finalizeHighlight(
-                        currentHighlight,
-                        currentText,
-                        highlights,
-                    );
-                }
-                currentHighlight = null;
-                collectingText = false;
-                currentText = [];
-                continue;
-            }
-
-            // Collect highlight text
-            if (collectingText && currentHighlight) {
-                if (line.trim()) {
-                    currentText.push(line);
-                }
-            }
-        }
-
-        // Handle the last highlight if exists
-        if (currentHighlight) {
-            this.finalizeHighlight(currentHighlight, currentText, highlights);
-        }
-
-        return highlights;
-    }
-
-    private finalizeHighlight(
-        highlight: Partial<Annotation>,
-        textLines: string[],
-        highlights: Annotation[],
-    ): void {
-        if (highlight.chapter && highlight.datetime && highlight.pageno) {
-            highlights.push({
-                chapter: highlight.chapter,
-                datetime: highlight.datetime,
-                pageno: highlight.pageno,
-                text: textLines.join("\n").trim(),
-            } as Annotation);
-        }
-    }
-
-    /**
-     * Alternative implementation using chunks for very large files.
-     * This version is more memory efficient for huge files as it processes
-     * the content in smaller chunks.
-     */
-    private extractHighlightsStreaming(content: string): Annotation[] {
-        const CHUNK_SIZE = 8192; // 8KB chunks
-        const highlights: Annotation[] = [];
-        let buffer = "";
-        let position = 0;
-
-        while (position < content.length) {
-            // Read next chunk
-            const chunk = content.slice(position, position + CHUNK_SIZE);
-            buffer += chunk;
-
-            // Find complete highlight blocks in buffer
-            const blockEnd = buffer.lastIndexOf("\n---\n");
-
-            if (blockEnd !== -1) {
-                // Process complete blocks
-                const completeContent = buffer.slice(0, blockEnd);
-                const remainingBuffer = buffer.slice(blockEnd + 4);
-
-                // Extract highlights from complete content
-                this.processHighlightBlocks(completeContent, highlights);
-
-                // Keep remaining partial block in buffer
-                buffer = remainingBuffer;
-            }
-
-            position += CHUNK_SIZE;
-        }
-
-        // Process any remaining content
-        if (buffer.trim()) {
-            this.processHighlightBlocks(buffer, highlights);
-        }
-
-        return highlights;
-    }
-
-    /**
-     * Helper method to process highlight blocks for the streaming implementation
-     */
-    private processHighlightBlocks(
-        content: string,
-        highlights: Annotation[],
-    ): void {
-        const blocks = content.split("\n---\n");
-
-        for (const block of blocks) {
-            if (!block.trim()) continue;
-
-            const lines = block.split("\n");
-            const chapterMatch = lines[0]?.match(/^### Chapter: (.+)$/);
-            const metadataMatch = lines[1]?.match(
-                /^\(\*Date: (.+) - Page: (\d+)\*\)$/,
-            );
-
-            if (chapterMatch && metadataMatch) {
-                highlights.push({
-                    chapter: chapterMatch[1],
-                    datetime: metadataMatch[1],
-                    pageno: Number.parseInt(metadataMatch[2], 10),
-                    text: lines.slice(2).join("\n").trim(),
-                } as Annotation);
-            }
-        }
-    }
-
-    /**
-     * Performance monitoring wrapper for highlight extraction
-     */
-    private extractHighlightsWithMetrics(content: string): {
-        highlights: Annotation[];
-        metrics: {
-            duration: number;
-            highlightCount: number;
-            contentSize: number;
-        };
-    } {
-        const startTime = performance.now();
-        const highlights = content.length > 50000
-            ? this.extractHighlightsStreaming(content)
-            : this.extractHighlights(content);
-        const endTime = performance.now();
-
-        return {
-            highlights,
-            metrics: {
-                duration: endTime - startTime,
-                highlightCount: highlights.length,
-                contentSize: content.length,
-            },
-        };
+        return extractHighlights(content);
     }
 
     private isHighlightTextEqual(text1: string, text2: string): boolean {
@@ -607,51 +406,69 @@ export class DuplicateHandler {
     }
 
     private mergeFrontmatter(
-        existing: Frontmatter,
-        newer: Frontmatter,
+        existing: Partial<Frontmatter>,
+        newer: Partial<Frontmatter>,
     ): Frontmatter {
-        const merged = { ...existing };
+        // Start by copying all properties from the existing object.
+        const merged: Partial<Frontmatter> = { ...existing };
 
-        // List of fields that should always be updated from the new content
-        const alwaysUpdateFields = ["title", "authors", "url", "lastAnnotated"];
+        // Iterate over keys in the newer object.
+        for (const key in newer) {
+            if (!Object.prototype.hasOwnProperty.call(newer, key)) continue;
 
-        // Update fields that should always be refreshed
-        for (const field of alwaysUpdateFields) {
-            if (newer[field]) {
-                merged[field] = newer[field];
+            const newValue = newer[key];
+            const existingValue = merged[key];
+
+            // If no existing value exists, simply take the new value.
+            if (existingValue === undefined) {
+                merged[key] = newValue;
+                continue;
             }
-        }
 
-        // Add any new fields that don't exist in the existing frontmatter
-        for (const [key, value] of Object.entries(newer)) {
+            // If both are arrays then merge them uniquely.
+            if (Array.isArray(existingValue) && Array.isArray(newValue)) {
+                merged[key] = Array.from(
+                    new Set([...existingValue, ...newValue]),
+                );
+                continue;
+            }
+
+            // For specific fields that relate to dates or statistics, take the new value.
+            if (["lastRead", "firstRead", "totalReadTime"].includes(key)) {
+                merged[key] = newValue;
+                continue;
+            }
+
+            // For the description field, choose the longer string (if both are strings).
             if (
-                !Object.hasOwn(merged, key) &&
-                !alwaysUpdateFields.includes(key)
+                key === "description" &&
+                typeof newValue === "string" &&
+                typeof existingValue === "string"
             ) {
-                merged[key] = value;
+                merged[key] = newValue.length > existingValue.length
+                    ? newValue
+                    : existingValue;
+                continue;
             }
+
+            // Otherwise, prefer the existing value.
+            merged[key] = existingValue;
         }
 
-        return merged;
+        // Ensure required properties are set (default to empty strings if necessary)
+        merged.title = merged.title ?? "";
+        merged.authors = merged.authors ?? "";
+
+        return merged as Frontmatter;
     }
 
     private formatFrontmatter(frontmatter: ParsedFrontmatter): string {
-        return Object.entries(frontmatter)
-            .map(([key, value]) => {
-                // Handle arrays
-                if (Array.isArray(value)) {
-                    return `${key}: [${value.join(", ")}]`;
-                }
-                // Handle strings that need quotes
-                if (
-                    typeof value === "string" &&
-                    (value.includes(":") || value.includes("\n"))
-                ) {
-                    return `${key}: "${value.replace(/"/g, '\\"')}"`;
-                }
-                return `${key}: ${value}`;
-            })
-            .join("\n");
+        // Use the unified function with options for raw formatting
+        return formatFrontmatter(frontmatter, {
+            useFriendlyKeys: false,
+            sortKeys: false,
+            escapeStrings: false,
+        }).replace(/^---\n|---\n$/g, ""); // Remove YAML markers if needed
     }
 
     private async extractHighlightsFromFile(
@@ -659,37 +476,6 @@ export class DuplicateHandler {
     ): Promise<Annotation[]> {
         const content = await this.vault.read(file);
         return this.extractHighlights(content);
-    }
-    // TODO: refactor this to use a more efficient algorithm
-    private mergeHighlights(
-        existing: Annotation[],
-        newHighlights: Annotation[],
-    ): Annotation[] {
-        const merged = [...existing];
-
-        for (const newHighlight of newHighlights) {
-            const existingIndex = merged.findIndex((eh) =>
-                eh.chapter === newHighlight.chapter &&
-                eh.pageno === newHighlight.pageno &&
-                this.isHighlightTextEqual(eh.text, newHighlight.text)
-            );
-
-            if (existingIndex === -1) {
-                merged.push(newHighlight);
-            }
-        }
-
-        return merged.sort((a, b) => {
-            // First sort by page number
-            if (a.pageno !== b.pageno) {
-                return a.pageno - b.pageno;
-            }
-
-            // If same page, sort by datetime
-            const dateA = new Date(a.datetime);
-            const dateB = new Date(b.datetime);
-            return dateA.getTime() - dateB.getTime();
-        });
     }
 
     private formatHighlights(highlights: Annotation[]): string {
@@ -727,5 +513,16 @@ export class DuplicateHandler {
 
     normalizeFileName(fileName: string): string {
         return fileName.replace(/[\\/:*?"<>|]/g, "_").trim();
+    }
+
+    private mergeHighlights(
+        existing: Annotation[],
+        newHighlights: Annotation[],
+    ): Annotation[] {
+        return mergeHighlights(
+            existing,
+            newHighlights,
+            (a, b) => this.isHighlightTextEqual(a, b),
+        );
     }
 }

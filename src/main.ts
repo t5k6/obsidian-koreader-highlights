@@ -1,12 +1,10 @@
-import {
-	normalizePath,
-	Notice,
-	Plugin,
-	sanitizeHTMLToDom,
-	TFile,
-	type Vault,
-} from "obsidian";
-import { sep } from "node:path";
+import { stat } from "node:fs/promises";
+import { normalizePath, Notice, Plugin, TFile } from "obsidian";
+import { DuplicateHandler } from "./duplicateHandler";
+import { DuplicateHandlingModal } from "./duplicateModal";
+import { createFrontmatterData, formatFrontmatter } from "./frontmatter";
+import { findSDRFiles, readSDRFileContent } from "./parser";
+import { KoReaderSettingTab } from "./settings";
 import {
 	type Annotation,
 	DEFAULT_SETTINGS,
@@ -15,31 +13,106 @@ import {
 	type KoReaderHighlightImporterSettings,
 	type LuaMetadata,
 } from "./types";
-import { KoReaderSettingTab } from "./settings";
-import { findSDRFiles, readSDRFileContent } from "./parser";
 import {
 	devError,
 	devLog,
 	ensureParentDirectory,
+	formatHighlight,
 	generateUniqueFilePath,
 	getFileNameWithoutExt,
 	handleDirectoryError,
 	initLogging,
 	setDebugMode,
 } from "./utils";
-import { DuplicateHandler } from "./duplicateHandler";
-import { DuplicateHandlingModal } from "./duplicateModal";
-import { stat } from "node:fs/promises";
+// import { testDatabase } from "./test-db"; // For debugging/testing
 
-// Cache for findSDRFiles results
-const sdrFilesCache: Map<string, string[]> = new Map();
-
-// Cache for parsed metadata
-const parsedMetadataCache: Map<string, LuaMetadata> = new Map();
+// Caches for SDR file paths and parsed metadata
+const sdrFilesCache = new Map<string, string[]>();
+const parsedMetadataCache = new Map<string, LuaMetadata>();
 
 export default class KoReaderHighlightImporter extends Plugin {
 	settings: KoReaderHighlightImporterSettings = DEFAULT_SETTINGS;
 	duplicateHandler!: DuplicateHandler;
+
+	// --- Initialization & Settings ---
+
+	async onload() {
+		console.log("KoReader Importer Plugin: onload() started");
+		// await testDatabase().catch((err) => console.error("Error in testDatabase():", err));
+		await this.loadSettings();
+		setDebugMode(this.settings.debugMode);
+
+		this.addCommand({
+			id: "import-koreader-highlights",
+			name: "Import",
+			callback: () => this.handleImportHighlights(),
+		});
+
+		this.addCommand({
+			id: "scan-koreader-highlights",
+			name: "Scan",
+			callback: () => this.handleScanHighlightsDirectory(),
+		});
+
+		this.addSettingTab(new KoReaderSettingTab(this.app, this));
+
+		this.duplicateHandler = new DuplicateHandler(
+			this.app.vault,
+			this.app,
+			(app, match, message) =>
+				new DuplicateHandlingModal(app, match, message),
+			this.settings,
+		);
+
+		if (this.settings.debugMode) {
+			try {
+				const logFilePath = await initLogging(
+					this.app.vault,
+					"Koreader_Importer_Logs",
+				);
+				console.log("Log file initialized at:", logFilePath);
+			} catch (error) {
+				console.error("Failed to initialize logging:", error);
+			}
+		}
+	}
+
+	onunload() {
+		sdrFilesCache.clear();
+		parsedMetadataCache.clear();
+	}
+
+	async loadSettings() {
+		this.settings = Object.assign(
+			{},
+			DEFAULT_SETTINGS,
+			await this.loadData(),
+		);
+		if (!this.settings.koboMountPoint) {
+			new Notice(
+				"KOReader Importer: Please specify your KoReader mount point in the plugin settings.",
+			);
+		}
+		// Ensure settings are arrays
+		if (!Array.isArray(this.settings.excludedFolders)) {
+			new Notice(
+				"KOReader Importer: Excluded folders setting should be an array.",
+			);
+			this.settings.excludedFolders = [];
+		}
+		if (!Array.isArray(this.settings.allowedFileTypes)) {
+			new Notice(
+				"KOReader Importer: Allowed file types setting should be an array.",
+			);
+			this.settings.allowedFileTypes = [];
+		}
+	}
+
+	async saveSettings() {
+		await this.saveData(this.settings);
+	}
+
+	// --- Mount Point & SDR Files ---
 
 	private async checkMountPoint(): Promise<boolean> {
 		if (!this.settings.koboMountPoint) {
@@ -62,8 +135,10 @@ export default class KoReaderHighlightImporter extends Plugin {
 			);
 			return true;
 		} catch (error) {
-			const e = error as NodeJS.ErrnoException;
-			handleDirectoryError(this.settings.koboMountPoint, e);
+			handleDirectoryError(
+				this.settings.koboMountPoint,
+				error as NodeJS.ErrnoException,
+			);
 			new Notice(
 				"KOReader Importer: Please check the mount point in the plugin settings.",
 			);
@@ -71,64 +146,38 @@ export default class KoReaderHighlightImporter extends Plugin {
 		}
 	}
 
-	async onload() {
-		await this.loadSettings();
-		setDebugMode(this.settings.debugMode);
+	private getCacheKey(): string {
+		return `${this.settings.koboMountPoint}:${
+			this.settings.excludedFolders.join(",")
+		}:${this.settings.allowedFileTypes.join(",")}`;
+	}
 
-		this.addCommand({
-			id: "import-koreader-highlights",
-			name: "Import",
-			callback: () => this.handleImportHighlights(),
-		});
-
-		this.addCommand({
-			id: "scan-koreader-highlights",
-			name: "Scan",
-			callback: () => this.handleScanHighlightsDirectory(),
-		});
-
-		this.addSettingTab(new KoReaderSettingTab(this.app, this));
-		this.duplicateHandler = new DuplicateHandler(
-			this.app.vault,
-			this.app,
-			(app, match, message) =>
-				new DuplicateHandlingModal(app, match, message),
-			this.settings,
-		);
-		if (this.settings.debugMode) {
-			try {
-				const logFilePath = await initLogging(
-					this.app.vault,
-					"Koreader_Importer_Logs",
-				);
-				console.log("Log file initialized at:", logFilePath);
-			} catch (error) {
-				console.error("Failed to initialize logging:", error);
-			}
+	private async ensureMountPointAndSDRFiles(): Promise<string[]> {
+		if (!(await this.checkMountPoint())) return [];
+		const cacheKey = this.getCacheKey();
+		let sdrFiles = sdrFilesCache.get(cacheKey);
+		if (!sdrFiles) {
+			sdrFiles = await findSDRFiles(
+				this.settings.koboMountPoint,
+				this.settings.excludedFolders,
+				this.settings.allowedFileTypes,
+			);
+			sdrFilesCache.set(cacheKey, sdrFiles);
 		}
+		if (sdrFiles.length === 0) {
+			new Notice("No .sdr directories found.");
+		}
+		return sdrFiles;
 	}
 
-	onunload() {
-		sdrFilesCache.clear();
-		parsedMetadataCache.clear();
-	}
-
-	async clearCaches() {
-		sdrFilesCache.clear();
-		parsedMetadataCache.clear();
-		devLog("Caches cleared.");
-	}
+	// --- Commands: Import & Scan ---
 
 	async handleImportHighlights() {
-		if (!await this.checkMountPoint()) return;
-
+		if (!(await this.checkMountPoint())) return;
 		try {
 			await this.importHighlights();
 		} catch (error) {
-			devError(
-				"Error importing highlights:",
-				error,
-			);
+			devError("Error importing highlights:", error);
 			new Notice(
 				"KOReader Importer: Error importing highlights. Check the console for details.",
 			);
@@ -136,15 +185,11 @@ export default class KoReaderHighlightImporter extends Plugin {
 	}
 
 	async handleScanHighlightsDirectory() {
-		if (!await this.checkMountPoint()) return;
-
+		if (!(await this.checkMountPoint())) return;
 		try {
 			await this.scanHighlightsDirectory();
 		} catch (error) {
-			devError(
-				"Error scanning for highlights:",
-				error,
-			);
+			devError("Error scanning for highlights:", error);
 			new Notice(
 				"KOReader Importer: Error scanning for highlights. Check the console for details.",
 			);
@@ -152,35 +197,25 @@ export default class KoReaderHighlightImporter extends Plugin {
 	}
 
 	async importHighlights() {
-		if (!await this.checkMountPoint()) {
-			return;
-		}
+		if (!(await this.checkMountPoint())) return;
+
 		const sdrFiles = await this.ensureMountPointAndSDRFiles();
-		if (!sdrFiles) return;
+		if (!sdrFiles.length) return;
 
 		for (const file of sdrFiles) {
 			try {
-				let luaMetadata: LuaMetadata | undefined = parsedMetadataCache
-					.get(file);
+				let luaMetadata = parsedMetadataCache.get(file);
 				if (!luaMetadata) {
-					// If no allowed file types are specified, pass an empty array to readSDRFileContent
-					// to indicate that any metadata file should be considered.
-					const isFileTypeFilterEmpty = this.settings.allowedFileTypes
-						.every((type) => type.trim() === "");
-
 					luaMetadata = await readSDRFileContent(
 						file,
-						isFileTypeFilterEmpty
-							? []
-							: this.settings.allowedFileTypes,
+						this.settings.allowedFileTypes,
+						this.settings.frontmatter,
+						this.settings,
 					);
 					parsedMetadataCache.set(file, luaMetadata);
-					devLog(`No metadata found for file ${file}`);
 				}
 
-				const highlights = luaMetadata.annotations || [];
-
-				// Use file name as title if both author and title are missing
+				// Fallback: use file name as author/title if missing
 				if (
 					luaMetadata.docProps.authors === "" &&
 					luaMetadata.docProps.title === ""
@@ -188,54 +223,29 @@ export default class KoReaderHighlightImporter extends Plugin {
 					luaMetadata.docProps.authors = getFileNameWithoutExt(file);
 				}
 				devLog(
-					`Highlights imported successfully!, for ${luaMetadata.docProps.title} from ${luaMetadata.docProps.authors}`,
+					`Importing highlights for: ${luaMetadata.docProps.title} from ${luaMetadata.docProps.authors}`,
 				);
-				await this.saveHighlights(highlights, luaMetadata);
+				await this.saveHighlights(
+					luaMetadata.annotations || [],
+					luaMetadata,
+				);
 			} catch (error) {
-				if (
-					error instanceof Error && error.name === "FileNotFoundError"
-				) {
-					devError(`File not found: ${file}`);
-					new Notice(`KOReader Importer: File not found: ${file}`);
-				} else if (
-					error instanceof Error &&
-					error.name === "MetadataParseError"
-				) {
-					devError(
-						`Error parsing metadata in ${file}:`,
-						error.message,
-					);
-					new Notice(
-						`KOReader Importer: Error parsing metadata in ${file}. Check the console for details.`,
-					);
-				} else {
-					devError(
-						`Error processing file ${file}:`,
-						error,
-					);
-					new Notice(
-						`KOReader Importer: Error processing file ${file}. Check the console for details.`,
-					);
-				}
+				this.handleFileError(error, file);
 			}
 		}
 		new Notice("KOReader Importer: Highlights imported successfully!");
 	}
 
-	async saveHighlights(
+	private async saveHighlights(
 		highlights: Annotation[],
 		luaMetadata: LuaMetadata,
 	): Promise<void> {
-		if (highlights.length === 0) {
-			return;
-		}
+		if (highlights.length === 0) return;
 
-		const { vault } = this.app;
 		const fileName = this.generateFileName(luaMetadata.docProps);
 		const filePath = normalizePath(
 			`${this.settings.highlightsFolder}/${fileName}`,
 		);
-
 		const frontmatter = this.generateFrontmatter(luaMetadata);
 		const content = frontmatter +
 			this.generateHighlightsContent(highlights);
@@ -243,66 +253,22 @@ export default class KoReaderHighlightImporter extends Plugin {
 		try {
 			let fileCreated = false;
 			if (this.settings.enableFullDuplicateCheck) {
-				// Check for potential duplicates
+				// Check for duplicates and process them
 				const potentialDuplicates = await this.duplicateHandler
-					.findPotentialDuplicates(
-						luaMetadata.docProps,
-					);
+					.findPotentialDuplicates(luaMetadata.docProps);
 				if (potentialDuplicates.length > 0) {
-					// Step 1: Analyze all duplicates in parallel
-					const analysisPromises = potentialDuplicates.map(
-						async (duplicate) => {
-							return await this.duplicateHandler.analyzeDuplicate(
-								duplicate,
-								highlights,
-								luaMetadata,
-							);
-						},
+					fileCreated = await this.handleDuplicates(
+						potentialDuplicates,
+						highlights,
+						luaMetadata,
+						content,
 					);
-					const analyses = await Promise.all(analysisPromises);
-
-					// Step 2: Handle duplicates sequentially
-					let applyToAll = false;
-					let applyToAllChoice: DuplicateChoice | null = null;
-
-					for (const analysis of analyses) {
-						if (applyToAll && applyToAllChoice !== null) {
-							// Apply the previously chosen action to all remaining duplicates
-							const { choice } = await this.duplicateHandler
-								.handleDuplicate(
-									analysis,
-									content,
-								);
-							if (choice !== "skip") fileCreated = true;
-							continue;
-						}
-
-						// Prompt the user for a choice
-						this.duplicateHandler.currentMatch = analysis;
-						const { choice, applyToAll: userChoseApplyToAll } =
-							await this.duplicateHandler.handleDuplicate(
-								analysis,
-								content,
-							);
-
-						if (choice !== "skip") fileCreated = true;
-
-						if (userChoseApplyToAll) {
-							applyToAll = true;
-							applyToAllChoice = choice;
-						}
-
-						if (choice === "skip") {
-						}
-					}
 				}
-
-				// If no duplicates were found or handled, create new file
+				// If no duplicates, create the file
 				if (!fileCreated && potentialDuplicates.length === 0) {
 					await this.createOrUpdateFile(filePath, content);
 				}
 			} else {
-				// If enableFullDuplicateCheck is disabled, just create new file
 				await this.createOrUpdateFile(filePath, content);
 			}
 		} catch (error) {
@@ -316,27 +282,76 @@ export default class KoReaderHighlightImporter extends Plugin {
 		}
 	}
 
+	private async handleDuplicates(
+		potentialDuplicates: unknown[],
+		highlights: Annotation[],
+		luaMetadata: LuaMetadata,
+		content: string,
+	): Promise<boolean> {
+		let fileCreated = false;
+		let applyToAll = false;
+		let applyToAllChoice: DuplicateChoice | null = null;
+
+		// Analyze all duplicates concurrently
+		const analyses = await Promise.all(
+			potentialDuplicates.map((duplicate) => {
+				if (this.isTFile(duplicate)) {
+					return this.duplicateHandler.analyzeDuplicate(
+						duplicate,
+						highlights,
+						luaMetadata,
+					);
+				}
+				throw new Error("Duplicate is not of type TFile");
+			}),
+		);
+
+		// Process each duplicate sequentially
+		for (const analysis of analyses) {
+			if (applyToAll && applyToAllChoice !== null) {
+				const { choice } = await this.duplicateHandler.handleDuplicate(
+					analysis,
+					content,
+				);
+				if (choice !== "skip") fileCreated = true;
+				continue;
+			}
+
+			this.duplicateHandler.currentMatch = analysis;
+			const { choice, applyToAll: userChoseApplyToAll } = await this
+				.duplicateHandler.handleDuplicate(analysis, content);
+			if (choice !== "skip") fileCreated = true;
+			if (userChoseApplyToAll) {
+				applyToAll = true;
+				applyToAllChoice = choice;
+			}
+		}
+		return fileCreated;
+	}
+
+	// Add a type guard function to check if an object is a TFile
+	private isTFile(obj: unknown): obj is TFile {
+		return obj instanceof TFile;
+	}
+
 	async scanHighlightsDirectory(): Promise<void> {
 		const sdrFiles = await this.ensureMountPointAndSDRFiles();
-		if (!sdrFiles || !Array.isArray(sdrFiles)) return;
-
+		if (!sdrFiles.length) return;
 		try {
 			await this.createOrUpdateNote(sdrFiles);
 			new Notice("SDR directories listed in KoReader SDR Files.md");
 		} catch (error) {
-			devError(
-				"Error updating SDR directories note:",
-				error,
-			);
+			devError("Error updating SDR directories note:", error);
 			new Notice(
 				"KOReader Importer: Error updating SDR directories note. Check the console for details.",
 			);
 		}
 	}
-	async createOrUpdateNote(sdrFiles: string[]): Promise<void> {
+
+	private async createOrUpdateNote(sdrFiles: string[]): Promise<void> {
 		const filePath = await generateUniqueFilePath(
 			this.app.vault,
-			"", // Base directory (root)
+			"",
 			"KoReader SDR Files.md",
 		);
 		const content = `# KoReader SDR Files\n\n${
@@ -345,9 +360,13 @@ export default class KoReaderHighlightImporter extends Plugin {
 		await this.createOrUpdateFile(filePath, content);
 	}
 
-	async createOrUpdateFile(filePath: string, content: string): Promise<void> {
-		await ensureParentDirectory(this.app.vault, filePath);
+	// --- File I/O Helpers ---
 
+	private async createOrUpdateFile(
+		filePath: string,
+		content: string,
+	): Promise<void> {
+		await ensureParentDirectory(this.app.vault, filePath);
 		const file = this.app.vault.getAbstractFileByPath(filePath);
 		if (file instanceof TFile) {
 			await this.app.vault.modify(file, content);
@@ -356,76 +375,28 @@ export default class KoReaderHighlightImporter extends Plugin {
 		}
 	}
 
-	async loadSettings() {
-		this.settings = Object.assign(
-			{},
-			DEFAULT_SETTINGS,
-			await this.loadData(),
-		);
-		if (!this.settings.koboMountPoint) {
-			new Notice(
-				"KOReader Importer: Please specify your KoReader mount point in the plugin settings.",
-			);
-		}
-
-		if (!Array.isArray(this.settings.excludedFolders)) {
-			new Notice(
-				"KOReader Importer: Excluded folders setting should be an array.",
-			);
-			this.settings.excludedFolders = [];
-		}
-		if (!Array.isArray(this.settings.allowedFileTypes)) {
-			new Notice(
-				"KOReader Importer: Allowed file types setting should be an array",
-			);
-			this.settings.allowedFileTypes = [];
+	private handleFileError(error: unknown, file: string): void {
+		if (error instanceof Error) {
+			if (error.name === "FileNotFoundError") {
+				devError(`File not found: ${file}`);
+				new Notice(`KOReader Importer: File not found: ${file}`);
+			} else if (error.name === "MetadataParseError") {
+				devError(`Error parsing metadata in ${file}:`, error.message);
+				new Notice(
+					`KOReader Importer: Error parsing metadata in ${file}. Check the console for details.`,
+				);
+			} else {
+				devError(`Error processing file ${file}:`, error);
+				new Notice(
+					`KOReader Importer: Error processing file ${file}. Check the console for details.`,
+				);
+			}
 		}
 	}
 
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
+	// --- File Name & Content Generation ---
 
-	getCacheKey(
-		rootDir: string,
-		excludedFolders: string[],
-		allowedFileTypes: string[],
-	): string {
-		return `${rootDir}:${excludedFolders.join(",")}:${
-			allowedFileTypes.join(
-				",",
-			)
-		}`;
-	}
-
-	// Helper functions for file name, frontmatter, and content generation
-	async ensureMountPointAndSDRFiles() {
-		if (!await this.checkMountPoint()) return [];
-
-		const cacheKey = this.getCacheKey(
-			this.settings.koboMountPoint,
-			this.settings.excludedFolders,
-			this.settings.allowedFileTypes,
-		);
-
-		let sdrFiles = sdrFilesCache.get(cacheKey);
-		if (!sdrFiles) {
-			sdrFiles = await findSDRFiles(
-				this.settings.koboMountPoint,
-				this.settings.excludedFolders,
-				this.settings.allowedFileTypes,
-			);
-			sdrFilesCache.set(cacheKey, sdrFiles);
-		}
-
-		if (sdrFiles.length === 0) {
-			new Notice("No .sdr directories found.");
-		}
-
-		return sdrFiles;
-	}
-
-	generateFileName(docProps: DocProps): string {
+	private generateFileName(docProps: DocProps): string {
 		const normalizedAuthors = this.normalizeFileName(docProps.authors);
 		const normalizedTitle = this.normalizeFileName(docProps.title);
 		const authorsArray = normalizedAuthors.split(",").map((author) =>
@@ -434,6 +405,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 		const authorsString = authorsArray.join(" & ") || "Unknown Author";
 		const fileName = `${authorsString} - ${normalizedTitle}.md`;
 
+		// Ensure file name is not too long (taking folder length into account)
 		const maxFileNameLength = 260 - this.settings.highlightsFolder.length -
 			1 - 4; // 4 for '.md'
 		return fileName.length > maxFileNameLength
@@ -441,58 +413,35 @@ export default class KoReaderHighlightImporter extends Plugin {
 			: fileName;
 	}
 
-	generateFrontmatter(luaMetadata: LuaMetadata): string {
-		let frontmatter = "---\n";
-		const docProps = luaMetadata.docProps;
-		for (const key in docProps) {
-			if (
-				Object.prototype.hasOwnProperty.call(docProps, key) &&
-				docProps[key as keyof DocProps] !== ""
-			) {
-				let value = docProps[key as keyof DocProps];
-				if (key === "description") {
-					value = sanitizeHTMLToDom(value as string).textContent ||
-						"";
-				}
-				if (key === "authors") {
-					value = `[[${value}]]`;
-				}
-				frontmatter += `${key}: "${
-					this.escapeYAMLString(value as string)
-				}"\n`;
-			}
-		}
-		frontmatter += `pages: ${luaMetadata.pages}\n`;
-		frontmatter += "---\n\n";
-		return frontmatter;
+	private generateFrontmatter(luaMetadata: LuaMetadata): string {
+		const data = createFrontmatterData(
+			luaMetadata,
+			this.settings.frontmatter,
+		);
+		return formatFrontmatter(data);
 	}
-	generateHighlightsContent(highlights: Annotation[]): string {
+
+	private generateHighlightsContent(highlights: Annotation[]): string {
 		highlights.sort((a, b) => {
-			// First sort by page number
-			if (a.pageno !== b.pageno) {
-				return a.pageno - b.pageno;
-			}
-
-			// If same page, sort by datetime
-			const dateA = new Date(a.datetime);
-			const dateB = new Date(b.datetime);
-			return dateA.getTime() - dateB.getTime();
+			if (a.pageno !== b.pageno) return a.pageno - b.pageno;
+			return new Date(a.datetime).getTime() -
+				new Date(b.datetime).getTime();
 		});
-		return highlights
-			.map((highlight) => {
-				if (highlight.chapter) {
-					return `### Chapter: ${highlight.chapter}\n(*Date: ${highlight.datetime} - Page: ${highlight.pageno}*)\n\n${highlight.text}\n\n---\n`;
-				}
-				return `(*Date: ${highlight.datetime} - Page: ${highlight.pageno}*)\n\n${highlight.text}\n\n---\n`;
-			})
-			.join("");
+		return highlights.map(formatHighlight).join("");
 	}
 
-	normalizeFileName(fileName: string): string {
+	private normalizeFileName(fileName: string): string {
 		return fileName.replace(/[\\/:*?"<>|]/g, "_").trim();
 	}
 
-	escapeYAMLString(str: string): string {
+	private escapeYAMLString(str: string): string {
 		return str.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+	}
+
+	// --- Cache Clearing (if needed externally) ---
+	async clearCaches() {
+		sdrFilesCache.clear();
+		parsedMetadataCache.clear();
+		devLog("Caches cleared.");
 	}
 }

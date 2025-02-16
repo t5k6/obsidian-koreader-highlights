@@ -153,3 +153,32 @@
     border-radius: 4px;
     font-size: 0.9em;
 }
+
+.frontmatter-field-list {
+    max-height: 400px;
+    overflow-y: auto;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    padding: 8px;
+    margin-bottom: 16px;
+}
+
+.frontmatter-field-item {
+    padding: 4px 0;
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.frontmatter-field-item:last-child {
+    border-bottom: none;
+}
+
+.custom-fields-section {
+    margin-top: 2em;
+    border-top: 1px solid var(--background-modifier-border);
+    padding-top: 1em;
+}
+
+.custom-fields-section .setting-item {
+    padding-top: 0;
+    border-bottom: none;
+}

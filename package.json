@@ -1,12 +1,13 @@
 {
 	"name": "koreader-highlights-importer",
-	"version": "1.0.3",
+	"version": "1.0.4",
 	"description": "Imports highlights and metadata from KoReader into Obsidian notes (https://obsidian.md)",
 	"main": "main.js",
-	"type": "module",
+	"type": "commonjs",
 	"scripts": {
-		"dev": "node esbuild.config.mjs",
-		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+		"dev": "node esbuild.config.cjs",
+		"build": "node esbuild.config.cjs production",
+		"lint": "biome lint"
 	},
 	"keywords": [
 		"obsidian",
@@ -17,19 +18,20 @@
 	],
 	"author": "Tahsin Kocaman",
 	"license": "MIT",
+	"dependencies": {
+		"luaparse": "^0.3.1",
+		"obsidian": "^1.8.7",
+		"sql.js": "^1.12.0"
+	},
 	"devDependencies": {
 		"@types/jest": "^29.5.14",
 		"@types/luaparse": "^0.2.12",
-		"@types/node": "^22.10.7",
+		"@types/node": "^22.13.4",
+		"@types/sql.js": "^1.4.9",
 		"biome": "^0.3.3",
-		"builtin-modules": "4.0.0",
-		"esbuild": "0.24.2",
+		"esbuild": "0.25.0",
 		"jest": "^29.7.0",
-		"obsidian": "latest",
 		"tslib": "2.8.1",
 		"typescript": "5.7.2"
-	},
-	"dependencies": {
-		"luaparse": "^0.3.1"
 	}
 }

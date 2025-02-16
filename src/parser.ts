@@ -1,6 +1,3 @@
-import { readdir, readFile, stat } from "node:fs/promises";
-import { join as node_join } from "node:path";
-import type { Dirent } from "node:fs";
 import luaparser from "luaparse";
 import type {
     Expression,
@@ -9,10 +6,16 @@ import type {
     TableKeyString,
     TableValue,
 } from "luaparse/lib/ast";
+import type { Dirent } from "node:fs";
+import { readdir } from "node:fs/promises";
+import path, { join as node_join } from "node:path";
+import { getBookStatistics } from "./db";
+import { createFrontmatterData } from "./frontmatter";
 import type {
     Annotation,
     DocProps,
-    Field,
+    FrontmatterSettings,
+    KoReaderHighlightImporterSettings,
     LuaMetadata,
     LuaValue,
 } from "./types";
@@ -21,6 +24,7 @@ import {
     devLog,
     devWarn,
     findAndReadMetadataFile,
+    getFileNameWithoutExt,
     handleDirectoryError,
 } from "./utils";
 
@@ -47,15 +51,14 @@ function cleanString(rawValue: string): string {
         .replace(/^"(.*)"$/, "$1") // Remove surrounding quotes
         .replace(/ΓÇö/g, "—") // Fix em dashes
         .replace(/\\(.)/g, "$1") // Handle other escape sequences
-        .replace(/\"/g, ""); // Remove any remaining quotes
+        .replace(/"/g, ""); // Use straight quotes for consistency (.replace(/\"/g, "");)
 }
 
 function sanitizeString(rawValue: string): string {
     const cached = STRING_CACHE.get(rawValue);
     if (cached) return cached;
 
-    const cleaned = cleanString(rawValue); // Use the utility function
-
+    const cleaned = cleanString(rawValue);
     // Cache result
     if (STRING_CACHE.size > 1000) STRING_CACHE.clear();
     STRING_CACHE.set(rawValue, cleaned);
@@ -85,28 +88,25 @@ export async function findSDRFiles(
 
         const processPromises = entries.map(async (entry) => {
             const fullPath = node_join(directory, entry.name);
-
             if (excludedSet.has(entry.name)) return;
 
             if (entry.isDirectory()) {
+                // First: Always recursively process subdirectories
+                await traverseDir(fullPath);
+
+                // Second: Check if current directory is SDR
                 if (entry.name.endsWith(SDR_DIR_SUFFIX)) {
-                    if (
-                        await findAndReadMetadataFile(
-                            fullPath,
-                            allowedFileTypes,
-                        ) !== null
-                    ) {
+                    const hasMetadata = await findAndReadMetadataFile(
+                        fullPath,
+                        allowedFileTypes,
+                    );
+
+                    if (hasMetadata) {
                         sdrFiles.push(fullPath);
-                        devLog("Found .sdr directory:", fullPath);
-                    } else if (allowedFileTypes.length > 0) {
-                        devWarn(
-                            `No matching metadata file found in ${fullPath}. Allowed file types were ${
-                                allowedFileTypes.join(", ")
-                            }.`,
-                        );
+                        devLog("Found valid SDR directory:", fullPath);
+                    } else {
+                        devWarn(`SDR directory missing metadata: ${fullPath}`);
                     }
-                } else {
-                    await traverseDir(fullPath);
                 }
             }
         });
@@ -169,7 +169,7 @@ export function parseHighlights(text: string): LuaMetadata {
     const defaultResult: LuaMetadata = {
         docProps: {
             authors: "Unknown Author",
-            title: "",
+            title: "Untitled",
             description: "",
             keywords: "",
             series: "",
@@ -193,6 +193,11 @@ export function parseHighlights(text: string): LuaMetadata {
             return defaultResult;
         }
 
+        if (!isTableConstructor(returnValue)) {
+            devError("Invalid return value type");
+            return defaultResult;
+        }
+
         const result: LuaMetadata = { ...defaultResult };
         let creDomVersion: number | null = null;
 
@@ -203,16 +208,29 @@ export function parseHighlights(text: string): LuaMetadata {
                     continue;
                 }
 
-                const key = extractKeyFromField(field);
+                const { key } = extractField(field);
                 if (!key) continue;
 
                 switch (key) {
-                    case "doc_props":
+                    case "doc_props": {
+                        const extractedProps = extractDocProps(field);
                         result.docProps = {
-                            ...result.docProps,
-                            ...extractDocProps(field),
+                            // Maintain defaults but allow proper override
+                            authors: extractedProps.authors ||
+                                result.docProps.authors,
+                            title: extractedProps.title ||
+                                result.docProps.title,
+                            description: extractedProps.description ||
+                                result.docProps.description,
+                            keywords: extractedProps.keywords ||
+                                result.docProps.keywords,
+                            series: extractedProps.series ||
+                                result.docProps.series,
+                            language: extractedProps.language ||
+                                result.docProps.language,
                         };
                         break;
+                    }
                     case "cre_dom_version":
                         if (
                             "type" in field.value &&
@@ -272,26 +290,40 @@ export function parseHighlights(text: string): LuaMetadata {
         return result;
     } catch (error) {
         const e = error as Error;
-        devError("Error parsing Lua:", e.message);
+        devError("Error parsing Lua:", e.message, e.stack);
         return defaultResult;
     }
 }
 
-function extractKeyFromField(field: Field): string | number | null {
+type LuaTableField = TableKey | TableKeyString | TableValue;
+
+function extractField(
+    field: LuaTableField,
+): { key: string | number | null; value: ReturnType<typeof extractLuaValue> } {
+    let key: string | number | null = null;
+    let value: ReturnType<typeof extractLuaValue> = null;
+
+    // Key extraction
     if (field.type === "TableKey" || field.type === "TableKeyString") {
-        const key = field.key;
-        if (key.type === "StringLiteral") {
-            return key.raw.replace(/^"(.*)"$/, "$1");
-        }
-        if (key.type === "NumericLiteral") {
-            return key.value;
-        }
-        if (key.type === "Identifier") {
-            return key.name;
+        const keyField = field.key;
+        if (keyField.type === "StringLiteral") {
+            key = keyField.raw.replace(/^"(.*)"$/, "$1");
+        } else if (keyField.type === "NumericLiteral") {
+            key = keyField.value;
+        } else if (keyField.type === "Identifier") {
+            key = keyField.name;
         }
     }
-    devWarn(`Unexpected key type: ${field.type}`);
-    return null;
+
+    // Value extraction
+    if (
+        ["TableValue", "TableKey", "TableKeyString"].includes(field.type) &&
+        isLuaValue(field.value)
+    ) {
+        value = extractLuaValue(field.value);
+    }
+
+    return { key: key ?? null, value: value ?? null };
 }
 
 function extractVersionNumber(value: LuaValue): number | null {
@@ -302,28 +334,6 @@ function extractVersionNumber(value: LuaValue): number | null {
         return value.value ? Number.parseInt(value.value, 10) : null;
     }
     return null;
-}
-
-function extractValue(
-    field: Field,
-): string | number | boolean | Record<string, unknown> | null {
-    if (
-        (field.type === "TableValue" || field.type === "TableKey" ||
-            field.type === "TableKeyString") &&
-        isLuaValue(field.value)
-    ) {
-        return extractLuaValue(field.value);
-    }
-    return null;
-}
-
-function isLuaValue(value: Expression): value is LuaValue {
-    return (
-        value.type === "StringLiteral" ||
-        value.type === "NumericLiteral" ||
-        value.type === "BooleanLiteral" ||
-        value.type === "TableConstructorExpression"
-    );
 }
 
 function extractLuaValue(
@@ -339,9 +349,9 @@ function extractLuaValue(
         case "TableConstructorExpression":
             return value.fields.reduce<Record<string, unknown>>(
                 (acc, field) => {
-                    const key = extractKeyFromField(field);
+                    const { key, value } = extractField(field);
                     if (key) {
-                        acc[key.toString()] = extractValue(field);
+                        acc[key.toString()] = value;
                     }
                     return acc;
                 },
@@ -376,61 +386,60 @@ function extractAnnotations(field: TableKey): Annotation[] {
     return annotations;
 }
 
-function extractModernAnnotation(entry: Field): Annotation | null {
-    if (entry.value?.type !== "TableConstructorExpression") {
-        return null;
-    }
+function createAnnotation(
+    fields: LuaTableField[],
+    options: { isLegacy: boolean } = { isLegacy: false },
+): Annotation | null {
     const annotation: Annotation = {
         chapter: "",
-        datetime: "",
+        datetime: new Date().toISOString(),
         pageno: 0,
         text: "",
     };
 
-    for (const field of entry.value.fields) {
-        const key = extractKeyFromField(field);
-        if (!key) continue;
+    for (const field of fields) {
+        const { key, value } = extractField(field);
+        if (!key || typeof key !== "string") continue;
 
-        if (field.value.type === "StringLiteral") {
-            const rawValue = field.value.raw;
-            // Remove surrounding quotes if present
-            const value = rawValue.replace(/^"(.*)"$/, "$1");
-            switch (key) {
-                case "chapter":
-                    annotation.chapter = typeof value === "string" ? value : "";
-                    break;
-                case "datetime":
-                    annotation.datetime = typeof value === "string"
-                        ? value
-                        : "";
-                    break;
-                case "pageno":
-                case "page": // Handle both modern 'pageno' and legacy 'page'
-                    annotation.pageno = Number.parseInt(value, 10) || 0;
-                    break;
-                case "text":
-                    annotation.text = typeof value === "string"
-                        ? sanitizeString(value).replace(/\\\n/g, "\n\n")
-                        : "";
-                    break;
+        // Handle field mapping differences
+        const fieldMap: Record<string, keyof Annotation> = {
+            [options.isLegacy ? "chapter_name" : "chapter"]: "chapter",
+            [options.isLegacy ? "date" : "datetime"]: "datetime",
+            [options.isLegacy ? "page" : "pageno"]: "pageno",
+            text: "text",
+        };
+
+        const targetField = fieldMap[key] || key;
+        if (!(targetField in annotation)) continue;
+
+        // Type-safe value handling
+        if (typeof value === "string") {
+            if (targetField === "pageno") {
+                annotation.pageno = Number.parseInt(value, 10) || 0;
+            } else if (targetField === "text") {
+                annotation.text = sanitizeString(value)
+                    .replace(/\\\n/g, "\n\n")
+                    .replace(/\\$/g, "\n\n");
+            } else {
+                annotation[targetField as Exclude<keyof Annotation, "pageno">] =
+                    sanitizeString(value);
             }
-        } // Handle NumericLiteral values
-        else if (field.value.type === "NumericLiteral") {
-            switch (key) {
-                case "pageno":
-                case "page":
-                    annotation.pageno = field.value.value;
-                    break;
-            }
+        } else if (typeof value === "number" && targetField === "pageno") {
+            annotation.pageno = value;
+        } else if (typeof value === "boolean") {
+            // Handle highlights via text presence instead
+            annotation.text = value ? "Highlighted section" : "";
         }
     }
 
-    // Validate that we have at least some content
-    if (!annotation.text && !annotation.chapter) {
-        return null;
-    }
+    //console.log(`Modern Annotations: ${JSON.stringify(annotation)}`)
 
-    return annotation;
+    return annotation.text ? annotation : null;
+}
+
+function extractModernAnnotation(field: LuaTableField): Annotation | null {
+    if (!isTableConstructor(field.value)) return null;
+    return createAnnotation(field.value.fields);
 }
 
 function extractLegacyAnnotations(field: TableKey): Annotation[] {
@@ -462,97 +471,14 @@ function extractLegacyAnnotations(field: TableKey): Annotation[] {
             }
 
             const highlightFields = highlightGroup.value.fields;
-            const annotation = extractLegacyHighlight(
-                highlightFields,
-                pageNumber,
-            );
+            const annotation = createAnnotation(highlightFields, {
+                isLegacy: true,
+            });
             if (annotation) annotations.push(annotation);
         }
     }
+    //console.log(`Legacy Annotations: ${JSON.stringify(annotations)}`)
     return annotations;
-}
-
-function extractLegacyHighlight(
-    fields: Field[],
-    pageNumber: number,
-): Annotation | null {
-    const annotation: Annotation = {
-        chapter: "",
-        datetime: "",
-        pageno: pageNumber,
-        text: "",
-    };
-    devLog(`extractLegacyHighlight: Processing fields for page ${pageNumber}`);
-
-    for (const field of fields) {
-        if (field.type !== "TableKey") {
-            devWarn(
-                `extractLegacyHighlight: Expected TableKey for field but got ${field.type}, ${
-                    JSON.stringify(field)
-                }`,
-            );
-            continue;
-        }
-
-        const key = extractKeyFromField(field);
-        if (!key || typeof key !== "string") {
-            devWarn(
-                `extractLegacyHighlight: Could not extract valid key from field key: ${
-                    JSON.stringify(field.key)
-                }`,
-            );
-            continue;
-        }
-
-        switch (key) {
-            case "datetime":
-                if (field.value.type === "StringLiteral") {
-                    annotation.datetime = field.value.raw.replace(
-                        /^"(.*)"$/,
-                        "$1",
-                    );
-                    devLog(
-                        `extractLegacyHighlight: Found datetime: ${annotation.datetime}`,
-                    ); // Added log
-                } else {
-                    devWarn(
-                        `extractLegacyHighlight: Expected StringLiteral for datetime value but got ${field.value.type}`,
-                    );
-                }
-                break;
-            case "text":
-                if (field.value.type === "StringLiteral") {
-                    annotation.text = sanitizeString(field.value.raw).replace(
-                        /\\\n/g,
-                        "\n\n",
-                    );
-                    devLog(
-                        `extractLegacyHighlight: Found text: ${annotation.text}`,
-                    );
-                } else {
-                    devWarn(
-                        `extractLegacyHighlight: Expected StringLiteral for text value but got ${field.value.type}`,
-                    );
-                }
-                break;
-            default:
-                devLog(`extractLegacyHighlight: Unhandled key: ${key}`); // Log unhandled keys
-        }
-    }
-
-    // Only return the annotation if it has at least the required fields
-    if (annotation.datetime && annotation.text) {
-        devLog(
-            `extractLegacyHighlight: Returning annotation: ${
-                JSON.stringify(annotation)
-            }`,
-        );
-        return annotation;
-    }
-    devWarn(
-        `extractLegacyHighlight: Incomplete annotation (missing datetime or text) for page ${pageNumber}. Datetime: ${annotation.datetime}, Text: ${annotation.text}`,
-    );
-    return null;
 }
 
 function extractPageNumber(field: TableKey | TableKeyString): number | null {
@@ -572,16 +498,101 @@ function extractPageNumber(field: TableKey | TableKeyString): number | null {
 
 export async function readSDRFileContent(
     filePath: string,
-    allowedFileTypes: string[] = [],
+    allowedFileTypes: string[],
+    frontmatterSettings: FrontmatterSettings,
+    settings: KoReaderHighlightImporterSettings,
 ): Promise<LuaMetadata> {
-    const content = await findAndReadMetadataFile(filePath, allowedFileTypes);
+    try {
+        // 1. Parallel file operations
+        const content = await findAndReadMetadataFile(
+            filePath,
+            allowedFileTypes,
+        );
 
-    if (content) {
-        return parseHighlights(content);
+        if (!content) {
+            return {
+                ...DEFAULT_METADATA,
+                frontmatter: createFrontmatterData(
+                    DEFAULT_METADATA,
+                    frontmatterSettings,
+                ),
+            };
+        }
+
+        // 2. Streamlined metadata parsing
+        const metadata = parseHighlights(content);
+        const fallbackName = getFileNameWithoutExt(filePath);
+
+        // 3. Efficient fallback handling
+        metadata.docProps.title ??= fallbackName;
+        metadata.docProps.authors ??= fallbackName;
+
+        // 4. Conditional metadata fetching
+        metadata.frontmatter = createFrontmatterData(
+            metadata,
+            frontmatterSettings,
+        );
+
+        try {
+            const rootDir = path.parse(settings.koboMountPoint).root;
+            const dbPath = path.join(
+                rootDir,
+                ".adds",
+                "koreader",
+                "settings",
+                "statistics.sqlite3",
+            );
+            const stats = await getBookStatistics(
+                dbPath,
+                metadata.docProps.authors,
+                metadata.docProps.title,
+            );
+
+            if (stats) {
+                metadata.statistics = {
+                    book: stats.book,
+                    readingSessions: stats.readingSessions,
+                    derived: stats.derived,
+                };
+            }
+        } catch (error) {
+            devError("Non-critical error fetching stats:", error);
+        }
+
+        // 6. Add file system metadata
+        // metadata.fileInfo = {
+        //     size: fileStats.size,
+        //     mtime: fileStats.mtime.toISOString()
+        // };
+        return metadata;
+    } catch (error) {
+        devError(`Error processing ${filePath}:`, error);
+        return {
+            ...DEFAULT_METADATA,
+            frontmatter: createFrontmatterData(
+                DEFAULT_METADATA,
+                frontmatterSettings,
+            ),
+        };
     }
+}
 
-    devError(
-        `No valid metadata file found in ${filePath}. Returning default metadata.`,
+// Helper function to check if a value is a LuaValue
+function isLuaValue(value: Expression): value is LuaValue {
+    return (
+        value.type === "StringLiteral" ||
+        value.type === "NumericLiteral" ||
+        value.type === "BooleanLiteral" ||
+        value.type === "TableConstructorExpression"
     );
-    return DEFAULT_METADATA;
+}
+
+function isTableValue(field: LuaTableField): field is TableValue {
+    return field.type === "TableValue";
+}
+
+function isTableConstructor(
+    node: Expression,
+): node is TableConstructorExpression {
+    return node.type === "TableConstructorExpression";
 }

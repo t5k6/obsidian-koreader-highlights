@@ -1,7 +1,7 @@
 import { readdir, readFile, stat } from "node:fs/promises";
-import { basename } from "node:path";
-import { join as node_join } from "node:path";
+import { basename, join as node_join } from "node:path";
 import { normalizePath, type TFile, TFolder, type Vault } from "obsidian";
+import type { Annotation } from "./types";
 
 let isDebugMode = false;
 let logFilePath: string;
@@ -9,6 +9,64 @@ let logFile: TFile | null = null;
 let logVault: Vault;
 
 const formattedDate = getFormattedDate();
+
+/**
+ * DebugLevel enumeration for controlling the verbosity of debug messages.
+ */
+enum DebugLevel {
+    NONE = 0,
+    ERROR = 1,
+    WARNING = 2,
+    INFO = 3,
+}
+
+/* Global variable to store the current debug level.
+   Defaults to NONE so no debug logs are printed. */
+let currentDebugLevel: DebugLevel = DebugLevel.NONE;
+
+/**
+ * Set the current debug level.
+ * @param level - The debug level to set: NONE, ERROR, WARNING, or INFO.
+ */
+export function setDebugLevel(level: DebugLevel): void {
+    currentDebugLevel = level;
+}
+
+/**
+ * Logs information messages if the current debug level is INFO.
+ *
+ * When the level is set to INFO, all messages will be logged.
+ */
+export function devLog(...args: string[]): void {
+    if (currentDebugLevel >= DebugLevel.INFO) {
+        console.log(...args);
+        writeLog(args.join(" "), "INFO");
+    }
+}
+
+/**
+ * Logs warning messages if the current debug level is WARNING or above.
+ *
+ * When the debug level is WARNING, this will log both warnings and errors.
+ */
+export function devWarn(...args: string[]): void {
+    if (currentDebugLevel >= DebugLevel.WARNING) {
+        console.warn(...args);
+        writeLog(args.map((arg) => formatMessage(arg)).join(" "), "WARNING");
+    }
+}
+
+/**
+ * Logs error messages if the current debug level is ERROR or above.
+ *
+ * When confirgured as ERROR, only errors will be logged.
+ */
+export function devError(...args: unknown[]): void {
+    if (currentDebugLevel >= DebugLevel.ERROR) {
+        console.error(...args.map((arg) => formatMessage(arg)));
+        writeLog(args.map((arg) => formatMessage(arg)).join(" "), "ERROR");
+    }
+}
 
 function getFormattedDate(): string {
     const date = new Date();
@@ -76,26 +134,6 @@ export async function writeLog(
 
 export function setDebugMode(debugMode: boolean) {
     isDebugMode = debugMode;
-}
-
-export function devLog(...args: string[]) {
-    if (isDebugMode) {
-        console.log(...args);
-        writeLog(args.join(" "), "INFO");
-    }
-}
-export function devWarn(...args: string[]) {
-    if (isDebugMode) {
-        console.warn(...args);
-        writeLog(args.map((arg) => formatMessage(arg)).join(" "), "WARNING");
-    }
-}
-
-export function devError(...args: unknown[]): void {
-    if (isDebugMode) {
-        console.error(...args.map((arg) => formatMessage(arg)));
-        writeLog(args.map((arg) => formatMessage(arg)).join(" "), "ERROR");
-    }
 }
 
 export async function generateUniqueFilePath(
@@ -241,4 +279,42 @@ export async function handleDirectoryError(
         default:
             devError(`Error reading file/directory ${filePath}:`, error);
     }
+}
+
+export function formatHighlight(highlight: Annotation): string {
+    const header = highlight.chapter
+        ? `### Chapter: ${highlight.chapter}\n(*Date: ${
+            formatDate(highlight.datetime)
+        } - Page: ${highlight.pageno}*)\n\n`
+        : `(*Date: ${
+            formatDate(highlight.datetime)
+        } - Page: ${highlight.pageno}*)\n\n`;
+    return `${header}${highlight.text}\n\n---\n`;
+}
+
+function formatDate(dateStr: string): string {
+    const date = new Date(dateStr);
+    return date.toLocaleDateString("en-US", {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+    });
+}
+
+export function secondsToHoursMinutes(seconds: number): string {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    return `${hours}h ${minutes}m`;
+}
+
+export function formatUnixTimestamp(timestamp: number): string {
+    return new Date(timestamp * 1000).toLocaleDateString("en-US", {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+    });
+}
+
+export function formatPercent(percent: number): string {
+    return `${Math.round(percent)}%`;
 }

@@ -1,6 +1,3 @@
-import { readdir, readFile, stat } from "node:fs/promises";
-import { join as node_join } from "node:path";
-import type { Dirent } from "node:fs";
 import luaparser from "luaparse";
 import type {
     Expression,
@@ -9,10 +6,15 @@ import type {
     TableKeyString,
     TableValue,
 } from "luaparse/lib/ast";
+import type { Dirent } from "node:fs";
+import { readdir } from "node:fs/promises";
+import { join as node_join } from "node:path";
+import { getBookStatistics } from "./db";
+import { createFrontmatterData } from "./frontmatter";
 import type {
     Annotation,
     DocProps,
-    Field,
+    FrontmatterSettings,
     LuaMetadata,
     LuaValue,
 } from "./types";
@@ -21,6 +23,7 @@ import {
     devLog,
     devWarn,
     findAndReadMetadataFile,
+    getFileNameWithoutExt,
     handleDirectoryError,
 } from "./utils";
 
@@ -169,7 +172,7 @@ export function parseHighlights(text: string): LuaMetadata {
     const defaultResult: LuaMetadata = {
         docProps: {
             authors: "Unknown Author",
-            title: "",
+            title: "Untitled",
             description: "",
             keywords: "",
             series: "",
@@ -277,7 +280,22 @@ export function parseHighlights(text: string): LuaMetadata {
     }
 }
 
-function extractKeyFromField(field: Field): string | number | null {
+type LuaTableField = TableKey | TableKeyString | TableValue;
+
+function extractValue(
+    field: LuaTableField,
+): string | number | boolean | Record<string, unknown> | null {
+    if (
+        (field.type === "TableValue" || field.type === "TableKey" ||
+            field.type === "TableKeyString") &&
+        isLuaValue(field.value)
+    ) {
+        return extractLuaValue(field.value);
+    }
+    return null;
+}
+
+function extractKeyFromField(field: LuaTableField): string | number | null {
     if (field.type === "TableKey" || field.type === "TableKeyString") {
         const key = field.key;
         if (key.type === "StringLiteral") {
@@ -302,28 +320,6 @@ function extractVersionNumber(value: LuaValue): number | null {
         return value.value ? Number.parseInt(value.value, 10) : null;
     }
     return null;
-}
-
-function extractValue(
-    field: Field,
-): string | number | boolean | Record<string, unknown> | null {
-    if (
-        (field.type === "TableValue" || field.type === "TableKey" ||
-            field.type === "TableKeyString") &&
-        isLuaValue(field.value)
-    ) {
-        return extractLuaValue(field.value);
-    }
-    return null;
-}
-
-function isLuaValue(value: Expression): value is LuaValue {
-    return (
-        value.type === "StringLiteral" ||
-        value.type === "NumericLiteral" ||
-        value.type === "BooleanLiteral" ||
-        value.type === "TableConstructorExpression"
-    );
 }
 
 function extractLuaValue(
@@ -376,7 +372,7 @@ function extractAnnotations(field: TableKey): Annotation[] {
     return annotations;
 }
 
-function extractModernAnnotation(entry: Field): Annotation | null {
+function extractModernAnnotation(entry: LuaTableField): Annotation | null {
     if (entry.value?.type !== "TableConstructorExpression") {
         return null;
     }
@@ -392,45 +388,34 @@ function extractModernAnnotation(entry: Field): Annotation | null {
         if (!key) continue;
 
         if (field.value.type === "StringLiteral") {
-            const rawValue = field.value.raw;
-            // Remove surrounding quotes if present
-            const value = rawValue.replace(/^"(.*)"$/, "$1");
+            const value = field.value.raw.replace(/^"(.*)"$/, "$1");
             switch (key) {
                 case "chapter":
-                    annotation.chapter = typeof value === "string" ? value : "";
+                    annotation.chapter = value;
                     break;
                 case "datetime":
-                    annotation.datetime = typeof value === "string"
-                        ? value
-                        : "";
+                    annotation.datetime = value;
                     break;
                 case "pageno":
-                case "page": // Handle both modern 'pageno' and legacy 'page'
+                case "page":
                     annotation.pageno = Number.parseInt(value, 10) || 0;
                     break;
                 case "text":
-                    annotation.text = typeof value === "string"
-                        ? sanitizeString(value).replace(/\\\n/g, "\n\n")
-                        : "";
+                    annotation.text = sanitizeString(value).replace(
+                        /\\\n/g,
+                        "\n\n",
+                    );
                     break;
             }
-        } // Handle NumericLiteral values
-        else if (field.value.type === "NumericLiteral") {
-            switch (key) {
-                case "pageno":
-                case "page":
-                    annotation.pageno = field.value.value;
-                    break;
-            }
+        } else if (
+            field.value.type === "NumericLiteral" &&
+            (key === "pageno" || key === "page")
+        ) {
+            annotation.pageno = field.value.value;
         }
     }
 
-    // Validate that we have at least some content
-    if (!annotation.text && !annotation.chapter) {
-        return null;
-    }
-
-    return annotation;
+    return annotation.text || annotation.chapter ? annotation : null;
 }
 
 function extractLegacyAnnotations(field: TableKey): Annotation[] {
@@ -473,7 +458,7 @@ function extractLegacyAnnotations(field: TableKey): Annotation[] {
 }
 
 function extractLegacyHighlight(
-    fields: Field[],
+    fields: LuaTableField[],
     pageNumber: number,
 ): Annotation | null {
     const annotation: Annotation = {
@@ -482,14 +467,11 @@ function extractLegacyHighlight(
         pageno: pageNumber,
         text: "",
     };
-    devLog(`extractLegacyHighlight: Processing fields for page ${pageNumber}`);
 
     for (const field of fields) {
         if (field.type !== "TableKey") {
             devWarn(
-                `extractLegacyHighlight: Expected TableKey for field but got ${field.type}, ${
-                    JSON.stringify(field)
-                }`,
+                `extractLegacyHighlight: Expected TableKey for field but got ${field.type}`,
             );
             continue;
         }
@@ -497,9 +479,7 @@ function extractLegacyHighlight(
         const key = extractKeyFromField(field);
         if (!key || typeof key !== "string") {
             devWarn(
-                `extractLegacyHighlight: Could not extract valid key from field key: ${
-                    JSON.stringify(field.key)
-                }`,
+                "extractLegacyHighlight: Could not extract valid key from field",
             );
             continue;
         }
@@ -511,13 +491,6 @@ function extractLegacyHighlight(
                         /^"(.*)"$/,
                         "$1",
                     );
-                    devLog(
-                        `extractLegacyHighlight: Found datetime: ${annotation.datetime}`,
-                    ); // Added log
-                } else {
-                    devWarn(
-                        `extractLegacyHighlight: Expected StringLiteral for datetime value but got ${field.value.type}`,
-                    );
                 }
                 break;
             case "text":
@@ -526,33 +499,14 @@ function extractLegacyHighlight(
                         /\\\n/g,
                         "\n\n",
                     );
-                    devLog(
-                        `extractLegacyHighlight: Found text: ${annotation.text}`,
-                    );
-                } else {
-                    devWarn(
-                        `extractLegacyHighlight: Expected StringLiteral for text value but got ${field.value.type}`,
-                    );
                 }
                 break;
             default:
-                devLog(`extractLegacyHighlight: Unhandled key: ${key}`); // Log unhandled keys
+                devLog(`extractLegacyHighlight: Unhandled key: ${key}`);
         }
     }
 
-    // Only return the annotation if it has at least the required fields
-    if (annotation.datetime && annotation.text) {
-        devLog(
-            `extractLegacyHighlight: Returning annotation: ${
-                JSON.stringify(annotation)
-            }`,
-        );
-        return annotation;
-    }
-    devWarn(
-        `extractLegacyHighlight: Incomplete annotation (missing datetime or text) for page ${pageNumber}. Datetime: ${annotation.datetime}, Text: ${annotation.text}`,
-    );
-    return null;
+    return annotation.datetime && annotation.text ? annotation : null;
 }
 
 function extractPageNumber(field: TableKey | TableKeyString): number | null {
@@ -572,16 +526,84 @@ function extractPageNumber(field: TableKey | TableKeyString): number | null {
 
 export async function readSDRFileContent(
     filePath: string,
-    allowedFileTypes: string[] = [],
+    allowedFileTypes: string[],
+    frontmatterSettings: FrontmatterSettings,
 ): Promise<LuaMetadata> {
-    const content = await findAndReadMetadataFile(filePath, allowedFileTypes);
+    try {
+        // 1. Parallel file operations
+        const content = await findAndReadMetadataFile(
+            filePath,
+            allowedFileTypes,
+        );
+        if (!content) {
+            return {
+                ...DEFAULT_METADATA,
+                frontmatter: createFrontmatterData(
+                    DEFAULT_METADATA,
+                    frontmatterSettings,
+                ),
+            };
+        }
 
-    if (content) {
-        return parseHighlights(content);
+        // 2. Streamlined metadata parsing
+        const metadata = parseHighlights(content);
+        const fallbackName = getFileNameWithoutExt(filePath);
+
+        // 3. Efficient fallback handling
+        if (!metadata.docProps.title || !metadata.docProps.authors) {
+            metadata.docProps.title ||= fallbackName;
+            metadata.docProps.authors ||= fallbackName;
+        }
+
+        // 4. Conditional metadata fetching
+        metadata.frontmatter = createFrontmatterData(
+            metadata,
+            frontmatterSettings,
+        );
+
+        try {
+            const stats = await getBookStatistics(
+                "D:/statistics.sqlite3",
+                metadata.docProps.authors,
+                metadata.docProps.title,
+            );
+
+            if (stats) {
+                metadata.statistics = {
+                    book: stats.book,
+                    readingSessions: stats.readingSessions,
+                    derived: stats.derived,
+                };
+            }
+        } catch (error) {
+            devError("Non-critical error fetching stats:", error);
+        }
+
+        // 6. Add file system metadata
+        // metadata.fileInfo = {
+        //     size: fileStats.size,
+        //     mtime: fileStats.mtime.toISOString()
+        // };
+
+        return metadata;
+    } catch (error) {
+        devError(`Error processing ${filePath}:`, error);
+        return {
+            ...DEFAULT_METADATA,
+            frontmatter: createFrontmatterData(
+                DEFAULT_METADATA,
+                frontmatterSettings,
+            ),
+        };
     }
+}
 
-    devError(
-        `No valid metadata file found in ${filePath}. Returning default metadata.`,
+// Helper function to check if a value is a LuaValue
+function isLuaValue(value: Expression): value is LuaValue {
+    return (
+        value.type === "StringLiteral" ||
+        value.type === "NumericLiteral" ||
+        value.type === "BooleanLiteral" ||
+        value.type === "TableConstructorExpression"
     );
-    return DEFAULT_METADATA;
 }

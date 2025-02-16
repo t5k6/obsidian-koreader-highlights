@@ -1,6 +1,7 @@
 import {
     AbstractInputSuggest,
     type App,
+    Modal,
     normalizePath,
     Notice,
     PluginSettingTab,
@@ -8,7 +9,8 @@ import {
     TFolder,
 } from "obsidian";
 import type KoReaderHighlightImporter from "./main";
-import { setDebugMode } from "./utils";
+import type { FrontmatterSettings } from "./types";
+import { setDebugLevel } from "./utils";
 
 class FolderInputSuggest extends AbstractInputSuggest<string> {
     constructor(
@@ -76,18 +78,35 @@ export class KoReaderSettingTab extends PluginSettingTab {
                     })
             );
 
+        // Debounce function to delay the execution of a function
+        function debounce<T extends (...args: string[]) => void>(
+            func: T,
+            delay: number,
+        ): (...args: Parameters<T>) => void {
+            let timeout: NodeJS.Timeout | null = null; // Use NodeJS.Timeout for TypeScript
+            return (...args: Parameters<T>): void => {
+                if (timeout) {
+                    clearTimeout(timeout);
+                }
+                timeout = setTimeout(() => func(...args), delay);
+            };
+        }
+
+        // Create the setting for Highlights folder
         new Setting(containerEl)
             .setName("Highlights folder")
             .setDesc(
                 "Specify the directory where you would like to save your highlights.",
             )
-            .addText((text) => {
-                text
+            .addText((textComponent) => {
+                textComponent
                     .setPlaceholder("/KoReader Highlights/")
                     .setValue(this.plugin.settings.highlightsFolder)
-                    .onChange(async (value) => {
+                    .onChange(debounce(async (value: string) => {
                         try {
-                            const normalizedResult = normalizePath(value);
+                            const normalizedResult: string = normalizePath(
+                                value,
+                            );
 
                             // Create the folder if it doesn't exist
                             const folder = this.app.vault.getAbstractFileByPath(
@@ -101,17 +120,20 @@ export class KoReaderSettingTab extends PluginSettingTab {
                             this.plugin.settings.highlightsFolder =
                                 normalizedResult;
                             await this.plugin.saveSettings();
+                            new Notice(`Folder created: ${normalizedResult}`); // Optional feedback
                         } catch (error) {
                             new Notice(
                                 `KOReader Importer: Failed to create folder: ${value}`,
                             );
                         }
-                    });
+                    }, 1000)); // Adjust the delay as needed (1000 ms = 1 second)
+
+                // Add FolderInputSuggest for folder suggestions
                 new FolderInputSuggest(
                     this.app,
-                    text.inputEl,
-                    (result) => {
-                        text.setValue(result);
+                    textComponent.inputEl,
+                    (result: string) => {
+                        textComponent.setValue(result);
                     },
                 );
             });
@@ -181,7 +203,7 @@ export class KoReaderSettingTab extends PluginSettingTab {
         // --- Advanced/Troubleshooting ---
         new Setting(containerEl).setName("Advanced/Troubleshooting")
             .setHeading();
-
+        this.addFrontmatterSelection(containerEl);
         new Setting(containerEl)
             .setName("Enable full vault duplicate check")
             .setDesc(
@@ -197,16 +219,164 @@ export class KoReaderSettingTab extends PluginSettingTab {
             );
 
         new Setting(containerEl)
-            .setName("Debug mode")
-            .setDesc("Enable debug logging for troubleshooting.")
-            .addToggle((toggle) =>
-                toggle
-                    .setValue(this.plugin.settings.debugMode)
-                    .onChange(async (value) => {
-                        this.plugin.settings.debugMode = value;
-                        setDebugMode(value);
-                        await this.plugin.saveSettings();
-                    })
-            );
+            .setName("Debug level")
+            .setDesc(
+                "Select the debug verbosity level (None: no logs, Error: only errors, Warning: warnings & errors, Info: all messages).",
+            )
+            .addDropdown((dropdown) => {
+                dropdown.addOption("0", "None");
+                dropdown.addOption("1", "Error");
+                dropdown.addOption("2", "Warning");
+                dropdown.addOption("3", "Info");
+                dropdown.setValue(this.plugin.settings.debugLevel.toString());
+                dropdown.onChange(async (value: string) => {
+                    const level = Number.parseInt(value);
+                    this.plugin.settings.debugLevel = level;
+                    setDebugLevel(level);
+                    await this.plugin.saveSettings();
+                });
+            });
+    }
+    private addFrontmatterSelection(containerEl: HTMLElement) {
+        const fieldOptions = [
+            // DocProps fields
+            { id: "title", name: "Title" },
+            { id: "authors", name: "Authors" },
+            { id: "description", name: "Description" },
+            { id: "keywords", name: "Keywords" },
+            { id: "series", name: "Series" },
+            { id: "language", name: "Language" },
+
+            // Statistics fields
+            { id: "pages", name: "Page Count" },
+            { id: "highlights", name: "Highlight Count" },
+            { id: "notes", name: "Note Count" },
+            { id: "lastRead", name: "Last Read Date" },
+            { id: "totalReadTime", name: "Total Reading Time" },
+            { id: "progress", name: "Reading Progress" },
+            { id: "readingStatus", name: "Reading Status" },
+            { id: "averageTimePerPage", name: "Average Time/Page" },
+        ];
+
+        new Setting(containerEl)
+            .setName("Frontmatter Fields")
+            .setDesc(
+                "All document properties are included by default. Select fields to exclude:",
+            )
+            .addButton((button) => {
+                button.setButtonText("Manage Fields");
+                button.setCta();
+                button.onClick(() => {
+                    this.showFieldSelectionModal(fieldOptions);
+                });
+            });
+    }
+
+    private showFieldSelectionModal(
+        fieldOptions: Array<{ id: string; name: string }>,
+    ) {
+        const modal = new (class extends Modal {
+            private disabledFields: string[];
+            private customFields: string[];
+
+            constructor(
+                app: App,
+                private settings: FrontmatterSettings,
+                private options: Array<{ id: string; name: string }>,
+                private onSave: (disabled: string[], customs: string[]) => void,
+            ) {
+                super(app);
+                this.disabledFields = [...(settings.disabledFields || [])];
+                this.customFields = [...(settings.customFields || [])];
+            }
+
+            onOpen() {
+                const { contentEl } = this;
+                contentEl.createEl("h3", { text: "Manage Frontmatter Fields" });
+
+                // Predefined Fields Section
+                contentEl.createEl("h4", {
+                    text:
+                        "Standard Fields (Choose the ones you want to exclude",
+                });
+                const predefinedList = contentEl.createDiv(
+                    "frontmatter-field-list",
+                );
+
+                for (const field of this.options) {
+                    const isDisabled = this.disabledFields.includes(field.id);
+                    const itemEl = predefinedList.createDiv(
+                        "frontmatter-field-item",
+                    );
+
+                    new Setting(itemEl)
+                        .setName(field.name)
+                        .addToggle((toggle) =>
+                            toggle
+                                .setValue(isDisabled)
+                                .onChange((disabled) => {
+                                    if (disabled) {
+                                        this.disabledFields.push(field.id);
+                                    } else {
+                                        this.disabledFields = this
+                                            .disabledFields.filter((f) =>
+                                                f !== field.id
+                                            );
+                                    }
+                                })
+                        );
+                }
+
+                // Custom Fields Section
+                contentEl.createEl("h4", { text: "Custom Fields" });
+                const customFieldsEl = contentEl.createDiv(
+                    "custom-fields-section",
+                );
+
+                new Setting(customFieldsEl)
+                    .setName("Add custom fields")
+                    .setDesc(
+                        "Comma-separated property names from document metadata",
+                    )
+                    .addText((text) =>
+                        text
+                            .setValue(this.customFields.join(", "))
+                            .onChange((value) => {
+                                this.customFields = value.split(",")
+                                    .map((f) => f.trim())
+                                    .filter((f) =>
+                                        f.length > 0 &&
+                                        !this.options.some((o) => o.id === f) &&
+                                        !this.customFields.includes(f)
+                                    );
+                            })
+                    );
+
+                // Save Controls
+                new Setting(contentEl)
+                    .addButton((button) =>
+                        button
+                            .setButtonText("Save")
+                            .onClick(() => {
+                                this.onSave(
+                                    [...new Set(this.disabledFields)],
+                                    [...new Set(this.customFields)],
+                                );
+                                this.close();
+                            })
+                    );
+            }
+        })(
+            this.app,
+            this.plugin.settings.frontmatter,
+            fieldOptions,
+            (disabled, customs) => {
+                this.plugin.settings.frontmatter.disabledFields = disabled;
+                this.plugin.settings.frontmatter.customFields = customs;
+                this.plugin.saveSettings();
+            },
+        );
+
+        modal.open();
     }
 }

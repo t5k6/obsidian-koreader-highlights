@@ -227,26 +227,36 @@ export class DuplicateHandler {
     }
 
     private extractFrontmatter(content: string): ParsedFrontmatter {
-        const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
-        if (!frontmatterMatch) return {};
-
         const frontmatter: ParsedFrontmatter = {};
-        const lines = frontmatterMatch[1].split("\n");
+        const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
 
+        if (!frontmatterMatch) return frontmatter;
+
+        const lines = frontmatterMatch[1].split("\n");
         for (const line of lines) {
-            const [key, ...valueParts] = line.split(":");
-            if (key && valueParts.length) {
-                const value = valueParts.join(":").trim().replace(
-                    /^"(.*)"$/,
-                    "$1",
-                );
-                frontmatter[key.trim()] = value;
+            const match = line.match(/^(\w+):\s*(.*)/);
+            if (match) {
+                const key = match[1].trim();
+                let value = match[2].trim();
+
+                // Remove quotes if present
+                if (/^['"].*['"]$/.test(value)) {
+                    value = value.slice(1, -1);
+                }
+
+                // Handle array values
+                if (value.startsWith("[") && value.endsWith("]")) {
+                    frontmatter[key] = value.slice(1, -1).split(",").map((v) =>
+                        v.trim()
+                    );
+                } else {
+                    frontmatter[key] = value;
+                }
             }
         }
 
         return frontmatter;
     }
-
     private isMetadataMatch(
         file: TFile,
         frontmatter: ParsedFrontmatter,
@@ -607,32 +617,60 @@ export class DuplicateHandler {
     }
 
     private mergeFrontmatter(
-        existing: Frontmatter,
-        newer: Frontmatter,
+        existing: Partial<Frontmatter>,
+        newer: Partial<Frontmatter>,
     ): Frontmatter {
-        const merged = { ...existing };
+        // Start by copying all properties from the existing object.
+        const merged: Partial<Frontmatter> = { ...existing };
 
-        // List of fields that should always be updated from the new content
-        const alwaysUpdateFields = ["title", "authors", "url", "lastAnnotated"];
+        // Iterate over keys in the newer object.
+        for (const key in newer) {
+            if (!Object.prototype.hasOwnProperty.call(newer, key)) continue;
 
-        // Update fields that should always be refreshed
-        for (const field of alwaysUpdateFields) {
-            if (newer[field]) {
-                merged[field] = newer[field];
+            const newValue = newer[key];
+            const existingValue = merged[key];
+
+            // If no existing value exists, simply take the new value.
+            if (existingValue === undefined) {
+                merged[key] = newValue;
+                continue;
             }
-        }
 
-        // Add any new fields that don't exist in the existing frontmatter
-        for (const [key, value] of Object.entries(newer)) {
+            // If both are arrays then merge them uniquely.
+            if (Array.isArray(existingValue) && Array.isArray(newValue)) {
+                merged[key] = Array.from(
+                    new Set([...existingValue, ...newValue]),
+                );
+                continue;
+            }
+
+            // For specific fields that relate to dates or statistics, take the new value.
+            if (["lastRead", "firstRead", "totalReadTime"].includes(key)) {
+                merged[key] = newValue;
+                continue;
+            }
+
+            // For the description field, choose the longer string (if both are strings).
             if (
-                !Object.hasOwn(merged, key) &&
-                !alwaysUpdateFields.includes(key)
+                key === "description" &&
+                typeof newValue === "string" &&
+                typeof existingValue === "string"
             ) {
-                merged[key] = value;
+                merged[key] = newValue.length > existingValue.length
+                    ? newValue
+                    : existingValue;
+                continue;
             }
+
+            // Otherwise, prefer the existing value.
+            merged[key] = existingValue;
         }
 
-        return merged;
+        // Ensure required properties are set (default to empty strings if necessary)
+        merged.title = merged.title ?? "";
+        merged.authors = merged.authors ?? "";
+
+        return merged as Frontmatter;
     }
 
     private formatFrontmatter(frontmatter: ParsedFrontmatter): string {

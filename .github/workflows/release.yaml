@@ -17,6 +17,9 @@ jobs:
         with:
           node-version: "20.x"
 
+      - name: Generate WASM file
+        run: node esbuild.config.mjs
+
       - name: Build plugin
         run: |
           npm install

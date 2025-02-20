@@ -1,16 +1,11 @@
-import esbuild from 'esbuild';
-import * as fs from 'node:fs';
-import { builtinModules } from 'node:module';
-import * as path from 'node:path';
-import { dirname } from 'node:path';
-import process from 'node:process';
-import { fileURLToPath } from 'node:url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+const esbuild = require('esbuild');
+const fs = require('fs');
+const { builtinModules } = require('module');
+const path = require('path');
+const process = require('process');
 
 async function embedWasm() {
-	// Read the WASM file from sql.js package
+	// Read the WASM file from the sql.js package
 	const wasmPath = path.join(
 		__dirname,
 		"node_modules",
@@ -21,9 +16,9 @@ async function embedWasm() {
 	const wasmBuffer = fs.readFileSync(wasmPath);
 	const wasmBase64 = wasmBuffer.toString("base64");
 
-	// Generate the TypeScript file with the embedded WASM content
+	// Generate the file with the embedded WASM content
 	const wasmModule = `// Generated file - DO NOT EDIT
-export const SQLITE_WASM = "${wasmBase64}";
+exports.SQLITE_WASM = "${wasmBase64}";
 `;
 
 	// Write the generated file to the binaries folder
@@ -43,7 +38,6 @@ async function build() {
     If you want to view the source, please visit the GitHub repository of this plugin.
     */`;
 
-	// Check if production mode is enabled
 	const prod = process.argv.includes('production');
 
 	// Build the plugin using esbuild
@@ -53,8 +47,8 @@ async function build() {
 		},
 		entryPoints: ['src/main.ts'],
 		bundle: true,
-		external: ['...builtinModules', 'obsidian'],
-		format: 'cjs',
+		external: [...builtinModules, 'obsidian'],
+		format: 'cjs', // output as CommonJS
 		target: 'es2022',
 		sourcemap: prod ? false : 'inline',
 		treeShaking: true,
@@ -74,4 +68,4 @@ async function build() {
 build().catch((err) => {
 	console.error("Unexpected error during build:", err);
 	process.exit(1);
-});
+}); 

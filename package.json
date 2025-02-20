@@ -3,10 +3,11 @@
 	"version": "1.0.4",
 	"description": "Imports highlights and metadata from KoReader into Obsidian notes (https://obsidian.md)",
 	"main": "main.js",
-	"type": "module",
+	"type": "commonjs",
 	"scripts": {
-		"dev": "node esbuild.config.mjs",
-		"build": "node esbuild.config.mjs production"
+		"dev": "node esbuild.config.cjs",
+		"build": "node esbuild.config.cjs production",
+		"lint": "biome lint"
 	},
 	"keywords": [
 		"obsidian",

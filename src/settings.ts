@@ -31,16 +31,27 @@ class FolderInputSuggest extends AbstractInputSuggest<string> {
             );
     }
 
-    renderSuggestion(folderPath: string, el: HTMLElement) {
-        el.createEl("div", { text: folderPath });
+    getValue(): string {
+        return this.inputEl.value;
     }
 
-    async onChooseSuggestion(
-        item: string,
-        evt: MouseEvent | KeyboardEvent,
-    ): Promise<void> {
-        this.inputEl.value = item;
-        this.onSubmit(item);
+    renderSuggestion(suggestion: string, el: HTMLElement): void {
+        const suggestionEl = el.createEl("div", { 
+            text: suggestion, 
+            cls: "suggestion-item" 
+        });
+        suggestionEl.addEventListener("mousedown", (evt: MouseEvent) => {
+            evt.preventDefault();
+        });
+        suggestionEl.addEventListener("click", (evt: MouseEvent) => {
+            this.onChooseSuggestion(suggestion, evt);
+        });
+    }
+
+    onChooseSuggestion(suggestion: string, evt: MouseEvent | KeyboardEvent): void {
+        this.inputEl.value = suggestion;
+        this.inputEl.trigger("input");
+        this.onSubmit(suggestion);
         this.close();
     }
 }
@@ -78,20 +89,6 @@ export class KoReaderSettingTab extends PluginSettingTab {
                     })
             );
 
-        // Debounce function to delay the execution of a function
-        function debounce<T extends (...args: string[]) => void>(
-            func: T,
-            delay: number,
-        ): (...args: Parameters<T>) => void {
-            let timeout: NodeJS.Timeout | null = null; // Use NodeJS.Timeout for TypeScript
-            return (...args: Parameters<T>): void => {
-                if (timeout) {
-                    clearTimeout(timeout);
-                }
-                timeout = setTimeout(() => func(...args), delay);
-            };
-        }
-
         // Create the setting for Highlights folder
         new Setting(containerEl)
             .setName("Highlights folder")
@@ -101,40 +98,39 @@ export class KoReaderSettingTab extends PluginSettingTab {
             .addText((textComponent) => {
                 textComponent
                     .setPlaceholder("/KoReader Highlights/")
-                    .setValue(this.plugin.settings.highlightsFolder)
-                    .onChange(debounce(async (value: string) => {
-                        try {
-                            const normalizedResult: string = normalizePath(
-                                value,
-                            );
+                    .setValue(this.plugin.settings.highlightsFolder);
 
-                            // Create the folder if it doesn't exist
-                            const folder = this.app.vault.getAbstractFileByPath(
-                                normalizedResult,
-                            );
-                            if (!folder || !(folder instanceof TFolder)) {
-                                await this.app.vault.createFolder(
-                                    normalizedResult,
-                                );
-                            }
-                            this.plugin.settings.highlightsFolder =
-                                normalizedResult;
-                            await this.plugin.saveSettings();
-                            new Notice(`Folder created: ${normalizedResult}`); // Optional feedback
-                        } catch (error) {
-                            new Notice(
-                                `KOReader Importer: Failed to create folder: ${value}`,
-                            );
-                        }
-                    }, 1000)); // Adjust the delay as needed (1000 ms = 1 second)
+                // A helper that normalizes the path, creates the folder if needed,
+                // updates plugin settings, and gives user feedback.
+                const processFolderInput = async (value: string) => {
+                    const normalizedResult: string = normalizePath(value);
+                    const folder = this.app.vault.getAbstractFileByPath(normalizedResult);
+                    if (!folder || !(folder instanceof TFolder)) {
+                        await this.app.vault.createFolder(normalizedResult);
+                    }
+                    this.plugin.settings.highlightsFolder = normalizedResult;
+                    await this.plugin.saveSettings();
+                    new Notice(`Folder created: ${normalizedResult}`);
+                };
 
-                // Add FolderInputSuggest for folder suggestions
+                // Use blur event so folder creation happens only when the user is done editing.
+                textComponent.inputEl.addEventListener("blur", async () => {
+                    const value = textComponent.inputEl.value.trim();
+                    if (!value) return;
+                    try {
+                        await processFolderInput(value);
+                    } catch (error) {
+                        new Notice(`KOReader Importer: Failed to create folder: ${value}`);
+                    }
+                });
+
+                // Add FolderInputSuggest for folder suggestions.
                 new FolderInputSuggest(
                     this.app,
                     textComponent.inputEl,
                     (result: string) => {
                         textComponent.setValue(result);
-                    },
+                    }
                 );
             });
 

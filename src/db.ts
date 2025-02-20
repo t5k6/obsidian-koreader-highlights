@@ -29,8 +29,8 @@ async function initializeDatabase(dbPath: string): Promise<void> {
         // TypeScript doesn't officially support the `wasmBinary` property,
         // so we use a type assertion to bypass the error.
         const SQL = await initSqlJs({
-            wasmBinary: binary,
-        } as any);
+            wasmBinary: binary as Uint8Array,
+        });
 
         // Check if the database file exists.
         if (!fs.existsSync(dbPath)) {
@@ -82,7 +82,6 @@ export async function getBookStatistics(
         );
         bookQuery.bind([authors, title]);
 
-        // Advance to the first row
         if (!bookQuery.step()) {
             devLog(`No book found for: ${authors} - ${title}`);
             bookQuery.free();
@@ -90,7 +89,6 @@ export async function getBookStatistics(
         }
 
         const rawBookResult = bookQuery.getAsObject();
-        devLog("Raw book result:", JSON.stringify(rawBookResult));
         const bookResult = rawBookResult as unknown as BookStatistics;
         bookQuery.free();
 
@@ -104,34 +102,19 @@ export async function getBookStatistics(
             "SELECT * FROM page_stat_data WHERE id_book = ? ORDER BY start_time",
         );
         sessionsQuery.bind([bookResult.id]);
+
         const sessions: PageStatData[] = [];
         while (sessionsQuery.step()) {
-            const row = sessionsQuery.getAsObject() as unknown as PageStatData;
-            sessions.push(row);
+            sessions.push(
+                sessionsQuery.getAsObject() as unknown as PageStatData,
+            );
         }
         sessionsQuery.free();
-
-        devLog("Calculating derived statistics");
-        const derived = {
-            percentComplete: bookResult.total_read_pages > 0
-                ? Math.round(
-                    (bookResult.total_read_pages / bookResult.pages) * 100,
-                )
-                : 0,
-            averageTimePerPage: bookResult.total_read_pages > 0
-                ? bookResult.total_read_time / bookResult.total_read_pages
-                : 0,
-            firstReadDate: sessions.length > 0
-                ? new Date(sessions[0].start_time * 1000)
-                : null,
-            lastReadDate: new Date(bookResult.last_open * 1000),
-            readingStatus: determineReadingStatus(bookResult, sessions),
-        };
 
         return {
             book: bookResult,
             readingSessions: sessions,
-            derived: derived,
+            derived: calculateDerivedStatistics(bookResult, sessions),
         };
     } catch (error) {
         const err = error as Error;
@@ -167,4 +150,23 @@ export function closeDatabase(): void {
         db = null;
         devLog("Database connection closed");
     }
+}
+
+function calculateDerivedStatistics(
+    book: BookStatistics,
+    sessions: PageStatData[],
+) {
+    return {
+        percentComplete: book.total_read_pages > 0
+            ? Math.round((book.total_read_pages / book.pages) * 100)
+            : 0,
+        averageTimePerPage: book.total_read_pages > 0
+            ? book.total_read_time / 60 / book.total_read_pages
+            : 0,
+        firstReadDate: sessions.length > 0
+            ? new Date(sessions[0].start_time * 1000)
+            : null,
+        lastReadDate: new Date(book.last_open * 1000),
+        readingStatus: determineReadingStatus(book, sessions),
+    };
 }

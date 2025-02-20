@@ -210,6 +210,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 						file,
 						this.settings.allowedFileTypes,
 						this.settings.frontmatter,
+						this.settings,
 					);
 					parsedMetadataCache.set(file, luaMetadata);
 				}

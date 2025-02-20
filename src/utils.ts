@@ -1,6 +1,12 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, join as node_join } from "node:path";
-import { normalizePath, type TFile, TFolder, type Vault } from "obsidian";
+import {
+    normalizePath,
+    Notice,
+    type TFile,
+    TFolder,
+    type Vault,
+} from "obsidian";
 import type { Annotation } from "./types";
 
 let isDebugMode = false;
@@ -15,9 +21,9 @@ const formattedDate = getFormattedDate();
  */
 enum DebugLevel {
     NONE = 0,
-    ERROR = 1,
+    INFO = 1,
     WARNING = 2,
-    INFO = 3,
+    ERROR = 3,
 }
 
 /* Global variable to store the current debug level.
@@ -37,10 +43,10 @@ export function setDebugLevel(level: DebugLevel): void {
  *
  * When the level is set to INFO, all messages will be logged.
  */
-export function devLog(...args: string[]): void {
+export function devLog(...args: unknown[]): void {
     if (currentDebugLevel >= DebugLevel.INFO) {
-        console.log(...args);
-        writeLog(args.join(" "), "INFO");
+        console.log(...args.map((arg) => formatMessage(arg)));
+        writeLog(args.map((arg) => formatMessage(arg)).join(" "), "INFO");
     }
 }
 
@@ -269,6 +275,7 @@ export async function handleDirectoryError(
     switch (error.code) {
         case "ENOENT":
             devError(`File/Directory not found: ${filePath}`);
+            new Notice(`File/Directory not found: ${filePath}`);
             break;
         case "EPERM":
             devError(`Permission denied for file/directory: ${filePath}`);

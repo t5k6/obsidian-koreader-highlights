@@ -114,8 +114,9 @@ function formatStatValue(key: string, value: unknown): string | number {
         case "lastRead":
             return formatUnixTimestamp(value as number);
         case "totalReadTime":
-        case "averageTimePerPage":
             return secondsToHoursMinutes(value as number);
+        case "averageTimePerPage":
+            return secondsToHoursMinutes((value as number) * 60);
         case "progress":
             return formatPercent(value as number);
         default:
@@ -156,31 +157,95 @@ function getFriendlyKey(key: string): string {
     return friendlyKeyMap[key] || camelToTitle(key);
 }
 
+export interface ParsedFrontmatter {
+    [key: string]: string | string[] | number | undefined;
+}
+
+export function extractFrontmatter(content: string): ParsedFrontmatter {
+    const frontmatter: ParsedFrontmatter = {};
+    const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+
+    if (!frontmatterMatch) return frontmatter;
+
+    const lines = frontmatterMatch[1].split("\n");
+    for (const line of lines) {
+        const match = line.match(/^(\w+):\s*(.*)/);
+        if (match) {
+            const key = match[1].trim();
+            let value = match[2].trim();
+            if (/^['"].*['"]$/.test(value)) {
+                value = value.slice(1, -1);
+            }
+            if (value.startsWith("[") && value.endsWith("]")) {
+                frontmatter[key] = value.slice(1, -1).split(",").map((v) =>
+                    v.trim()
+                );
+            } else {
+                frontmatter[key] = value;
+            }
+        }
+    }
+    return frontmatter;
+}
+
+export interface FrontmatterContent {
+    content: string;
+    frontmatter: ParsedFrontmatter;
+}
+
+export function parseFrontmatterAndContent(
+    content: string,
+): FrontmatterContent {
+    const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---\n\n/);
+    if (!frontmatterMatch) {
+        return { content, frontmatter: {} };
+    }
+    const frontmatterString = frontmatterMatch[1];
+    const frontmatter = extractFrontmatter(`---\n${frontmatterString}\n---`);
+    return { content: content.slice(frontmatterMatch[0].length), frontmatter };
+}
+
 /**
  * Format the frontmatter YAML. Uses friendly key names.
  */
-// src/frontmatter.ts
-
-export function formatFrontmatter(data: Frontmatter): string {
+export function formatFrontmatter(
+    data: Frontmatter | ParsedFrontmatter,
+    options: {
+        useFriendlyKeys: boolean;
+        sortKeys: boolean;
+        escapeStrings: boolean;
+    } = {
+        useFriendlyKeys: true,
+        sortKeys: true,
+        escapeStrings: true,
+    },
+): string {
     const yamlLines: string[] = ["---"];
+    const entries = options.sortKeys
+        ? Object.entries(data).sort(([a], [b]) => a.localeCompare(b))
+        : Object.entries(data);
 
-    // Sort or order the keys as needed (or maintain insertion order)
-    for (
-        const [key, value] of Object.entries(data).sort(([keyA], [keyB]) =>
-            keyA.localeCompare(keyB)
-        )
-    ) {
-        const friendlyKey = getFriendlyKey(key);
-        const safeKey = /[\s:]/.test(friendlyKey)
-            ? `"${friendlyKey}"`
-            : friendlyKey;
+    for (const [key, value] of entries) {
+        const formattedKey = options.useFriendlyKeys
+            ? getFriendlyKey(key)
+            : key;
+
+        const safeKey = /[\s:]/.test(formattedKey)
+            ? `"${formattedKey}"`
+            : formattedKey;
 
         if (Array.isArray(value)) {
-            yamlLines.push(
-                `${safeKey}: [${value.map((v) => `"${v}"`).join(", ")}]`,
-            );
+            const items = options.escapeStrings
+                ? value.map((v) => `"${escapeYAMLString(String(v))}"`)
+                : value.map(String);
+            yamlLines.push(`${safeKey}: [${items.join(", ")}]`);
         } else if (typeof value === "string") {
-            yamlLines.push(`${safeKey}: "${escapeYAMLString(value)}"`);
+            const escaped = options.escapeStrings
+                ? `"${escapeYAMLString(value)}"`
+                : (value.includes(":") || value.includes("\n"))
+                ? `"${value.replace(/"/g, '\\"')}"`
+                : value;
+            yamlLines.push(`${safeKey}: ${escaped}`);
         } else {
             yamlLines.push(`${safeKey}: ${value}`);
         }

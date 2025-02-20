@@ -1,10 +1,10 @@
 import builtins from 'builtin-modules';
 import esbuild from 'esbuild';
-import { fileURLToPath } from 'node:url';
-import { dirname } from 'node:path';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { dirname } from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -23,12 +23,12 @@ async function embedWasm() {
 
 	// Generate the TypeScript file with the embedded WASM content
 	const wasmModule = `// Generated file - DO NOT EDIT
-export const SQLITE_WASM: string = "${wasmBase64}";
+export const SQLITE_WASM = "${wasmBase64}";
 `;
 
 	// Write the generated file to the binaries folder
 	fs.writeFileSync(
-		path.join(__dirname, "src", "binaries", "sql-wasm-base64.ts"),
+		path.join(__dirname, "src", "binaries", "sql-wasm-base64.js"),
 		wasmModule
 	);
 	console.log("WASM binary embedded successfully!");
@@ -56,6 +56,7 @@ async function build() {
 		external: [
 			'obsidian',
 			'electron',
+			'@codemirror/*',
 			...builtins
 		],
 		format: 'cjs',

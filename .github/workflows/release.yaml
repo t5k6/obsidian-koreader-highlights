@@ -17,10 +17,6 @@ jobs:
         with:
           node-version: "22.x"
 
-      # Install dependencies first so that esbuild (and other packages) are available
-      - name: Install dependencies
-        run: npm ci
-
       - name: Generate WASM file
         run: node esbuild.config.mjs production
 

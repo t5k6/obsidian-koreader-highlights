@@ -18,7 +18,7 @@ jobs:
           node-version: "22.x"
 
       - name: Generate WASM file
-        run: node esbuild.config.mjs production
+        run: node esbuild.config.cjs production
 
       - name: Build plugin
         run: npm run build

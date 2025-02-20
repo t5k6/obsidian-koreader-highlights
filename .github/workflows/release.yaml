@@ -17,11 +17,14 @@ jobs:
         with:
           node-version: "22.x"
 
+      - name: Install dependencies
+        run: pnpm install
+
       - name: Generate WASM file
         run: node esbuild.config.cjs production
 
       - name: Build plugin
-        run: npm run build
+        run: pnpm run build
 
       - name: Create release
         env:

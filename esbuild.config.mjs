@@ -1,4 +1,4 @@
-import builtins from 'builtin-modules';
+import builtins from './node_modules/builtin-modules/index.js';
 import esbuild from 'esbuild';
 import * as fs from 'node:fs';
 import * as path from 'node:path';

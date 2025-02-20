@@ -1,6 +1,6 @@
-import builtins from './node_modules/builtin-modules/index.js';
 import esbuild from 'esbuild';
 import * as fs from 'node:fs';
+import { builtinModules } from 'node:module';
 import * as path from 'node:path';
 import { dirname } from 'node:path';
 import process from 'node:process';
@@ -47,28 +47,28 @@ async function build() {
 	const prod = process.argv.includes('production');
 
 	// Build the plugin using esbuild
-	esbuild.build({
+	const buildOptions = {
 		banner: {
 			js: banner,
 		},
 		entryPoints: ['src/main.ts'],
 		bundle: true,
-		external: [
-			'obsidian',
-			'electron',
-			'@codemirror/*',
-			...builtins
-		],
+		external: ['...builtinModules', 'obsidian'],
 		format: 'cjs',
 		target: 'es2022',
 		sourcemap: prod ? false : 'inline',
 		treeShaking: true,
 		outfile: 'main.js',
 		platform: 'node',
-	}).catch((err) => {
-		console.error("Build failed:", err);
+	};
+
+	try {
+		await esbuild.build(buildOptions);
+		console.log('Build completed successfully!');
+	} catch (error) {
+		console.error('Unexpected error during build:', error);
 		process.exit(1);
-	});
+	}
 }
 
 build().catch((err) => {

@@ -289,14 +289,16 @@ export async function handleDirectoryError(
 }
 
 export function formatHighlight(highlight: Annotation): string {
+    // Create the header with chapter, date, and page info
     const header = highlight.chapter
-        ? `### Chapter: ${highlight.chapter}\n(*Date: ${
-            formatDate(highlight.datetime)
-        } - Page: ${highlight.pageno}*)\n\n`
-        : `(*Date: ${
-            formatDate(highlight.datetime)
-        } - Page: ${highlight.pageno}*)\n\n`;
-    return `${header}${highlight.text}\n\n---\n`;
+        ? `### Chapter: ${highlight.chapter}\n(*Date: ${formatDate(highlight.datetime)} - Page: ${highlight.pageno}*)\n\n`
+        : `(*Date: ${formatDate(highlight.datetime)} - Page: ${highlight.pageno}*)\n\n`;
+
+    // Add the note section if a note exists
+    const noteSection = highlight.note ? `\n\n> [!NOTE] Note\n> ${highlight.note}` : "";
+
+    // Combine header, highlighted text, and note, with separators
+    return `${header}${highlight.text}${noteSection}\n\n---\n`;
 }
 
 function formatDate(dateStr: string): string {

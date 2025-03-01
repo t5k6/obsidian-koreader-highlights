@@ -75,6 +75,7 @@ export interface Annotation {
     datetime: string;
     pageno: number;
     text: string;
+    note?: string;
 }
 
 // Metadata structure

@@ -395,45 +395,44 @@ function createAnnotation(
         datetime: new Date().toISOString(),
         pageno: 0,
         text: "",
+        note: undefined,  // Initialize note as undefined
     };
 
     for (const field of fields) {
         const { key, value } = extractField(field);
         if (!key || typeof key !== "string") continue;
 
-        // Handle field mapping differences
+        // Define field mappings for both modern and legacy formats
         const fieldMap: Record<string, keyof Annotation> = {
             [options.isLegacy ? "chapter_name" : "chapter"]: "chapter",
             [options.isLegacy ? "date" : "datetime"]: "datetime",
             [options.isLegacy ? "page" : "pageno"]: "pageno",
             text: "text",
+            note: "note",    // Handle modern "note" field
+            notes: "note",   // Handle legacy "notes" field
         };
 
-        const targetField = fieldMap[key] || key;
-        if (!(targetField in annotation)) continue;
+        const targetField = fieldMap[key];
+        if (!targetField || !(targetField in annotation)) continue;
 
-        // Type-safe value handling
+        // Handle the field values based on their type
         if (typeof value === "string") {
             if (targetField === "pageno") {
                 annotation.pageno = Number.parseInt(value, 10) || 0;
-            } else if (targetField === "text") {
-                annotation.text = sanitizeString(value)
+            } else if (targetField === "text" || targetField === "note") {
+                annotation[targetField] = sanitizeString(value)
                     .replace(/\\\n/g, "\n\n")
                     .replace(/\\$/g, "\n\n");
             } else {
-                annotation[targetField as Exclude<keyof Annotation, "pageno">] =
+                annotation[targetField as Exclude<keyof Annotation, "pageno" | "note">] =
                     sanitizeString(value);
             }
         } else if (typeof value === "number" && targetField === "pageno") {
             annotation.pageno = value;
-        } else if (typeof value === "boolean") {
-            // Handle highlights via text presence instead
-            annotation.text = value ? "Highlighted section" : "";
         }
     }
 
-    //console.log(`Modern Annotations: ${JSON.stringify(annotation)}`)
-
+    // Return the annotation only if it has highlighted text
     return annotation.text ? annotation : null;
 }
 

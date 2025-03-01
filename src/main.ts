@@ -26,13 +26,11 @@ import {
 } from "./utils";
 // import { testDatabase } from "./test-db"; // For debugging/testing
 
-// Caches for SDR file paths and parsed metadata
-const sdrFilesCache = new Map<string, string[]>();
-const parsedMetadataCache = new Map<string, LuaMetadata>();
-
 export default class KoReaderHighlightImporter extends Plugin {
 	settings: KoReaderHighlightImporterSettings = DEFAULT_SETTINGS;
 	duplicateHandler!: DuplicateHandler;
+	private sdrFilesCache = new Map<string, string[]>();
+	private parsedMetadataCache = new Map<string, LuaMetadata>();
 
 	// --- Initialization & Settings ---
 
@@ -78,8 +76,8 @@ export default class KoReaderHighlightImporter extends Plugin {
 	}
 
 	onunload() {
-		sdrFilesCache.clear();
-		parsedMetadataCache.clear();
+		this.sdrFilesCache.clear();
+		this.parsedMetadataCache.clear();
 	}
 
 	async loadSettings() {
@@ -155,14 +153,14 @@ export default class KoReaderHighlightImporter extends Plugin {
 	private async ensureMountPointAndSDRFiles(): Promise<string[]> {
 		if (!(await this.checkMountPoint())) return [];
 		const cacheKey = this.getCacheKey();
-		let sdrFiles = sdrFilesCache.get(cacheKey);
+		let sdrFiles = this.sdrFilesCache.get(cacheKey);
 		if (!sdrFiles) {
 			sdrFiles = await findSDRFiles(
 				this.settings.koboMountPoint,
 				this.settings.excludedFolders,
 				this.settings.allowedFileTypes,
 			);
-			sdrFilesCache.set(cacheKey, sdrFiles);
+			this.sdrFilesCache.set(cacheKey, sdrFiles);
 		}
 		if (sdrFiles.length === 0) {
 			new Notice("No .sdr directories found.");
@@ -204,7 +202,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 
 		for (const file of sdrFiles) {
 			try {
-				let luaMetadata = parsedMetadataCache.get(file);
+				let luaMetadata = this.parsedMetadataCache.get(file);
 				if (!luaMetadata) {
 					luaMetadata = await readSDRFileContent(
 						file,
@@ -212,7 +210,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 						this.settings.frontmatter,
 						this.settings,
 					);
-					parsedMetadataCache.set(file, luaMetadata);
+					this.parsedMetadataCache.set(file, luaMetadata);
 				}
 
 				// Fallback: use file name as author/title if missing
@@ -440,8 +438,8 @@ export default class KoReaderHighlightImporter extends Plugin {
 
 	// --- Cache Clearing (if needed externally) ---
 	async clearCaches() {
-		sdrFilesCache.clear();
-		parsedMetadataCache.clear();
+		this.sdrFilesCache.clear();
+		this.parsedMetadataCache.clear();
 		devLog("Caches cleared.");
 	}
 }

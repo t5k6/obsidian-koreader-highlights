@@ -1,18 +1,33 @@
 # KoReader Highlights Importer Plugin for Obsidian
 
-This plugin imports highlights from [KoReader](https://github.com/koreader/koreader) into [Obsidian](https://obsidian.md/) notes. It scans for `.sdr` directories, parses Lua metadata files, and saves highlights into Markdown files within Obsidian.
+This plugin imports **highlights and notes** from [KoReader](https://github.com/koreader/koreader) into [Obsidian](https://obsidian.md/) notes. It scans for `.sdr` directories, parses Lua metadata files, and saves both highlights and associated notes into Markdown files within Obsidian.
+
 
 ## ✨ Features
-- **Import Highlights**: Import highlights from your KoReader into Obsidian.
-- **Scan Highlights**: Scan for highlight files on your KoReader device.
+- **Import Highlights and notes**: Import highlights and any associated notes from your KoReader into Obsidian.
+- **Scan Highlights**: Scan for metadata files on your KoReader device.
 - **Customizable Settings**: Configure the mount point, excluded folders, allowed file types, and highlights folder.
 - **Automatic Metadata Handling:** Extracts metadata like author, title, description, pages, and keywords from KoReader's metadata files and adds it as YAML frontmatter to your Obsidian notes.
 
 ## 📦 Installation
-   - Download or clone this repository into your Obsidian vault's plugins (`<vault-directory>/.obsidian/plugins`)
-      (To find your plugins folder: Go to **Settings > Community Plugins > Installed plugins**, and click the 📂 icon next to the "Installed plugins" heading.)
-   - Close and reopen Obsidian.
-   - **Enable:** Go to **Settings > Community plugins**, find "KoReader Highlights Importer," and toggle the switch to enable it.
+
+You can install the KoReader Highlights Importer Plugin using one of the following methods:
+
+### Option 1: Install from Obsidian's Community Plugins (Recommended)
+This is the easiest way to install the plugin, as it uses Obsidian’s built-in marketplace:
+
+1- Open **Obsidian** and navigate to **Settings > Community plugins**.  
+2- In the **Community plugins** section, click **Browse**.  
+3- Type "**KoReader Highlights Importer**" into the search bar.  
+4- Click on the plugin from the search results, then click **Install**.  
+5- After installation, return to **Settings > Community plugins**, locate "**KoReader Highlights Importer**" in the list, and toggle the switch to enable it.
+
+### Option 2: Manual Installation
+
+   1- Download or clone this repository into your Obsidian vault's plugins (`<vault-directory>/.obsidian/plugins`)  
+      *(Tip: To find your plugins folder: Go to **Settings > Community Plugins > Installed plugins**, and click the 📂 icon next to the "Installed plugins" heading.)*  
+   2- Close and reopen Obsidian.  
+   3- **Enable:** Go to **Settings > Community plugins**, find "KoReader Highlights Importer," and toggle the switch to enable it.
 
 ## ⚙️ Setup & Configuration
 

@@ -295,7 +295,12 @@ export function formatHighlight(highlight: Annotation): string {
         : `(*Date: ${formatDate(highlight.datetime)} - Page: ${highlight.pageno}*)\n\n`;
 
     // Add the note section if a note exists
-    const noteSection = highlight.note ? `\n\n> [!NOTE] Note\n> ${highlight.note}` : "";
+    const noteSection = highlight.note
+        ? `\n\n> [!NOTE] Note\n${highlight.note
+              .split("\n")
+              .map((line) => `> ${line.trim()}`)
+              .join("\n")}`
+        : "";
 
     // Combine header, highlighted text, and note, with separators
     return `${header}${highlight.text}${noteSection}\n\n---\n`;

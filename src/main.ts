@@ -1,5 +1,6 @@
 import { stat } from "node:fs/promises";
 import { normalizePath, Notice, Plugin, TFile } from "obsidian";
+import { ProgressModal } from "./ProgressModal";
 import { DuplicateHandler } from "./duplicateHandler";
 import { DuplicateHandlingModal } from "./duplicateModal";
 import { createFrontmatterData, formatFrontmatter } from "./frontmatter";
@@ -196,9 +197,14 @@ export default class KoReaderHighlightImporter extends Plugin {
 
 	async importHighlights() {
 		if (!(await this.checkMountPoint())) return;
+		const modal = new ProgressModal(this.app);
+		modal.open();
 
 		const sdrFiles = await this.ensureMountPointAndSDRFiles();
 		if (!sdrFiles.length) return;
+		const total = sdrFiles.length;
+		modal.setTotal(total);
+		let completed = 0;
 
 		for (const file of sdrFiles) {
 			try {
@@ -227,8 +233,12 @@ export default class KoReaderHighlightImporter extends Plugin {
 					luaMetadata.annotations || [],
 					luaMetadata,
 				);
+				completed++;
+				modal.updateProgress(completed);
 			} catch (error) {
 				this.handleFileError(error, file);
+			} finally {
+				modal.close();
 			}
 		}
 		new Notice("KOReader Importer: Highlights imported successfully!");

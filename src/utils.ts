@@ -7,7 +7,7 @@ import {
     TFolder,
     type Vault,
 } from "obsidian";
-import type { Annotation } from "./types";
+import type { Annotation, DocProps } from "./types";
 
 let isDebugMode = false;
 let logFilePath: string;
@@ -252,6 +252,30 @@ export async function findAndReadMetadataFile(
     }
 }
 
+export function generateFileName(
+    docProps: DocProps,
+    highlightsFolder: string,
+): string {
+    const authors = docProps.authors || "Unknown Author";
+    const title = docProps.title || "Untitled";
+    const normalizedAuthors = normalizeFileName(authors);
+    const normalizedTitle = normalizeFileName(title);
+    const authorsArray = normalizedAuthors.split(",").map((author) =>
+        author.trim()
+    );
+    const authorsString = authorsArray.join(" & ") || "Unknown Author";
+    const fileName = `${authorsString} - ${normalizedTitle}.md`;
+
+    const maxFileNameLength = 260 - highlightsFolder.length - 1 - 4; // 4 for '.md'
+    return fileName.length > maxFileNameLength
+        ? `${fileName.slice(0, maxFileNameLength)}.md`
+        : fileName;
+}
+
+function normalizeFileName(fileName: string): string {
+    return fileName.replace(/[\\/:*?"<>|]/g, "_").trim();
+}
+
 export function getFileNameWithoutExt(filePath: string): string {
     const fileName = basename(filePath);
     const lastDotIndex = fileName.lastIndexOf(".");
@@ -291,15 +315,21 @@ export async function handleDirectoryError(
 export function formatHighlight(highlight: Annotation): string {
     // Create the header with chapter, date, and page info
     const header = highlight.chapter
-        ? `### Chapter: ${highlight.chapter}\n(*Date: ${formatDate(highlight.datetime)} - Page: ${highlight.pageno}*)\n\n`
-        : `(*Date: ${formatDate(highlight.datetime)} - Page: ${highlight.pageno}*)\n\n`;
+        ? `### Chapter: ${highlight.chapter}\n(*Date: ${
+            formatDate(highlight.datetime)
+        } - Page: ${highlight.pageno}*)\n\n`
+        : `(*Date: ${
+            formatDate(highlight.datetime)
+        } - Page: ${highlight.pageno}*)\n\n`;
 
     // Add the note section if a note exists
     const noteSection = highlight.note
-        ? `\n\n> [!NOTE] Note\n${highlight.note
-              .split("\n")
-              .map((line) => `> ${line.trim()}`)
-              .join("\n")}`
+        ? `\n\n> [!NOTE] Note\n${
+            highlight.note
+                .split("\n")
+                .map((line) => `> ${line.trim()}`)
+                .join("\n")
+        }`
         : "";
 
     // Combine header, highlighted text, and note, with separators

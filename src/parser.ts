@@ -168,8 +168,8 @@ function extractDocProps(field: TableKey | TableValue): DocProps {
 export function parseHighlights(text: string): LuaMetadata {
     const defaultResult: LuaMetadata = {
         docProps: {
-            authors: "Unknown Author",
-            title: "Untitled",
+            authors: "",
+            title: "",
             description: "",
             keywords: "",
             series: "",
@@ -395,27 +395,24 @@ function createAnnotation(
         datetime: new Date().toISOString(),
         pageno: 0,
         text: "",
-        note: undefined,  // Initialize note as undefined
+        note: undefined,
     };
-
     for (const field of fields) {
         const { key, value } = extractField(field);
         if (!key || typeof key !== "string") continue;
-
-        // Define field mappings for both modern and legacy formats
         const fieldMap: Record<string, keyof Annotation> = {
-            [options.isLegacy ? "chapter_name" : "chapter"]: "chapter",
-            [options.isLegacy ? "date" : "datetime"]: "datetime",
-            [options.isLegacy ? "page" : "pageno"]: "pageno",
-            text: "text",
-            note: "note",    // Handle modern "note" field
-            notes: "note",   // Handle legacy "notes" field
+            "chapter": "chapter",
+            "chapter_name": "chapter", // Support both for legacy
+            "datetime": "datetime",
+            "date": "datetime", // Support both for legacy
+            "pageno": "pageno",
+            "page": "pageno", // For modern or variant legacy
+            "text": "text",
+            "note": "note",
+            "notes": "note",
         };
-
         const targetField = fieldMap[key];
         if (!targetField || !(targetField in annotation)) continue;
-
-        // Handle the field values based on their type
         if (typeof value === "string") {
             if (targetField === "pageno") {
                 annotation.pageno = Number.parseInt(value, 10) || 0;
@@ -424,15 +421,14 @@ function createAnnotation(
                     .replace(/\\\n/g, "\n\n")
                     .replace(/\\$/g, "\n\n");
             } else {
-                annotation[targetField as Exclude<keyof Annotation, "pageno" | "note">] =
-                    sanitizeString(value);
+                annotation[
+                    targetField as Exclude<keyof Annotation, "pageno" | "note">
+                ] = sanitizeString(value);
             }
         } else if (typeof value === "number" && targetField === "pageno") {
             annotation.pageno = value;
         }
     }
-
-    // Return the annotation only if it has highlighted text
     return annotation.text ? annotation : null;
 }
 
@@ -443,21 +439,17 @@ function extractModernAnnotation(field: LuaTableField): Annotation | null {
 
 function extractLegacyAnnotations(field: TableKey): Annotation[] {
     if (field.value.type !== "TableConstructorExpression") return [];
-
     const annotations: Annotation[] = [];
     for (const pageField of field.value.fields) {
         if (pageField.type !== "TableKey") continue;
-
         const pageNumber = extractPageNumber(pageField);
         if (pageNumber === null) continue;
-
         if (pageField.value.type !== "TableConstructorExpression") {
             devWarn(
                 `Expected TableConstructorExpression for page ${pageNumber}`,
             );
             continue;
         }
-
         for (const highlightGroup of pageField.value.fields) {
             if (
                 highlightGroup.type !== "TableKey" || !highlightGroup.value ||
@@ -468,15 +460,16 @@ function extractLegacyAnnotations(field: TableKey): Annotation[] {
                 );
                 continue;
             }
-
             const highlightFields = highlightGroup.value.fields;
             const annotation = createAnnotation(highlightFields, {
                 isLegacy: true,
             });
-            if (annotation) annotations.push(annotation);
+            if (annotation) {
+                annotation.pageno = pageNumber;
+                annotations.push(annotation);
+            }
         }
     }
-    //console.log(`Legacy Annotations: ${JSON.stringify(annotations)}`)
     return annotations;
 }
 

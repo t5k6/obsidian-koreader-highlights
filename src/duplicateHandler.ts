@@ -20,7 +20,12 @@ import type {
     IDuplicateHandlingModal,
     LuaMetadata,
 } from "./types";
-import { devError, devLog, generateUniqueFilePath } from "./utils";
+import {
+    devError,
+    devLog,
+    generateFileName,
+    generateUniqueFilePath,
+} from "./utils";
 
 export interface DuplicateMatch {
     file: TFile;
@@ -487,28 +492,15 @@ export class DuplicateHandler {
     }
 
     private async generateUniqueFileName(docProps: DocProps): Promise<string> {
-        const fileName = this.generateFileName(docProps);
+        const fileName = generateFileName(
+            docProps,
+            this.settings.highlightsFolder,
+        );
         return generateUniqueFilePath(
             this.vault,
             this.settings.highlightsFolder,
             fileName,
         );
-    }
-
-    private generateFileName(docProps: DocProps): string {
-        const normalizedAuthors = this.normalizeFileName(docProps.authors);
-        const normalizedTitle = this.normalizeFileName(docProps.title);
-        const authorsArray = normalizedAuthors.split(",").map((author) =>
-            author.trim()
-        );
-        const authorsString = authorsArray.join(" & ") || "Unknown Author";
-        const fileName = `${authorsString} - ${normalizedTitle}.md`;
-
-        const maxFileNameLength = 260 -
-            this.settings.highlightsFolder.length - 1 - 4; // 4 for '.md'
-        return fileName.length > maxFileNameLength
-            ? `${fileName.slice(0, maxFileNameLength)}.md`
-            : fileName;
     }
 
     normalizeFileName(fileName: string): string {

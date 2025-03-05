@@ -9,7 +9,6 @@ import { KoReaderSettingTab } from "./settings";
 import {
 	type Annotation,
 	DEFAULT_SETTINGS,
-	type DocProps,
 	type DuplicateChoice,
 	type KoReaderHighlightImporterSettings,
 	type LuaMetadata,
@@ -19,6 +18,7 @@ import {
 	devLog,
 	ensureParentDirectory,
 	formatHighlight,
+	generateFileName,
 	generateUniqueFilePath,
 	getFileNameWithoutExt,
 	handleDirectoryError,
@@ -164,7 +164,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 			this.sdrFilesCache.set(cacheKey, sdrFiles);
 		}
 		if (sdrFiles.length === 0) {
-			new Notice("No .sdr directories found.");
+			new Notice("No SDR directories with metadata files found.");
 		}
 		return sdrFiles;
 	}
@@ -200,48 +200,55 @@ export default class KoReaderHighlightImporter extends Plugin {
 		const modal = new ProgressModal(this.app);
 		modal.open();
 
-		const sdrFiles = await this.ensureMountPointAndSDRFiles();
-		if (!sdrFiles.length) return;
-		const total = sdrFiles.length;
-		modal.setTotal(total);
-		let completed = 0;
-
-		for (const file of sdrFiles) {
-			try {
-				let luaMetadata = this.parsedMetadataCache.get(file);
-				if (!luaMetadata) {
-					luaMetadata = await readSDRFileContent(
-						file,
-						this.settings.allowedFileTypes,
-						this.settings.frontmatter,
-						this.settings,
-					);
-					this.parsedMetadataCache.set(file, luaMetadata);
-				}
-
-				// Fallback: use file name as author/title if missing
-				if (
-					luaMetadata.docProps.authors === "" &&
-					luaMetadata.docProps.title === ""
-				) {
-					luaMetadata.docProps.authors = getFileNameWithoutExt(file);
-				}
-				devLog(
-					`Importing highlights for: ${luaMetadata.docProps.title} from ${luaMetadata.docProps.authors}`,
-				);
-				await this.saveHighlights(
-					luaMetadata.annotations || [],
-					luaMetadata,
-				);
-				completed++;
-				modal.updateProgress(completed);
-			} catch (error) {
-				this.handleFileError(error, file);
-			} finally {
+		try {
+			const sdrFiles = await this.ensureMountPointAndSDRFiles();
+			if (!sdrFiles.length) {
+				new Notice("No SDR directories with metadata files found.");
 				modal.close();
+				return;
 			}
+			const total = sdrFiles.length;
+			modal.setTotal(total);
+			let completed = 0;
+
+			for (const file of sdrFiles) {
+				try {
+					let luaMetadata = this.parsedMetadataCache.get(file);
+					if (!luaMetadata) {
+						luaMetadata = await readSDRFileContent(
+							file,
+							this.settings.allowedFileTypes,
+							this.settings.frontmatter,
+							this.settings,
+						);
+						this.parsedMetadataCache.set(file, luaMetadata);
+					}
+					// Fallback: use file name as author and title if both are missing
+					if (
+						luaMetadata.docProps.authors === "" &&
+						luaMetadata.docProps.title === ""
+					) {
+						const fallbackName = getFileNameWithoutExt(file);
+						luaMetadata.docProps.authors = fallbackName;
+						luaMetadata.docProps.title = fallbackName;
+					}
+					devLog(
+						`Importing highlights for: ${luaMetadata.docProps.title} from ${luaMetadata.docProps.authors}`,
+					);
+					await this.saveHighlights(
+						luaMetadata.annotations || [],
+						luaMetadata,
+					);
+					completed++;
+					modal.updateProgress(completed);
+				} catch (error) {
+					this.handleFileError(error, file);
+				}
+			}
+			new Notice("KOReader Importer: Highlights imported successfully!");
+		} finally {
+			modal.close();
 		}
-		new Notice("KOReader Importer: Highlights imported successfully!");
 	}
 
 	private async saveHighlights(
@@ -250,7 +257,10 @@ export default class KoReaderHighlightImporter extends Plugin {
 	): Promise<void> {
 		if (highlights.length === 0) return;
 
-		const fileName = this.generateFileName(luaMetadata.docProps);
+		const fileName = generateFileName(
+			luaMetadata.docProps,
+			this.settings.highlightsFolder,
+		);
 		const filePath = normalizePath(
 			`${this.settings.highlightsFolder}/${fileName}`,
 		);
@@ -403,24 +413,6 @@ export default class KoReaderHighlightImporter extends Plugin {
 	}
 
 	// --- File Name & Content Generation ---
-
-	private generateFileName(docProps: DocProps): string {
-		const normalizedAuthors = this.normalizeFileName(docProps.authors);
-		const normalizedTitle = this.normalizeFileName(docProps.title);
-		const authorsArray = normalizedAuthors.split(",").map((author) =>
-			author.trim()
-		);
-		const authorsString = authorsArray.join(" & ") || "Unknown Author";
-		const fileName = `${authorsString} - ${normalizedTitle}.md`;
-
-		// Ensure file name is not too long (taking folder length into account)
-		const maxFileNameLength = 260 - this.settings.highlightsFolder.length -
-			1 - 4; // 4 for '.md'
-		return fileName.length > maxFileNameLength
-			? `${fileName.slice(0, maxFileNameLength)}.md`
-			: fileName;
-	}
-
 	private generateFrontmatter(luaMetadata: LuaMetadata): string {
 		const data = createFrontmatterData(
 			luaMetadata,
@@ -436,10 +428,6 @@ export default class KoReaderHighlightImporter extends Plugin {
 				new Date(b.datetime).getTime();
 		});
 		return highlights.map(formatHighlight).join("");
-	}
-
-	private normalizeFileName(fileName: string): string {
-		return fileName.replace(/[\\/:*?"<>|]/g, "_").trim();
 	}
 
 	private escapeYAMLString(str: string): string {

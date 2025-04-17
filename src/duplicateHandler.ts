@@ -269,8 +269,8 @@ export class DuplicateHandler {
                 newHighlightCount++;
             } else if (
                 !this.isHighlightTextEqual(
-                    existingMatch.text,
-                    newHighlight.text,
+                    existingMatch.text || "",
+                    newHighlight.text || "",
                 )
             ) {
                 modifiedHighlightCount++;

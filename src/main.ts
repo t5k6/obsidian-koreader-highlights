@@ -14,15 +14,17 @@ import {
 	type LuaMetadata,
 } from "./types";
 import {
+	compareAnnotations,
 	devError,
 	devLog,
 	ensureParentDirectory,
-	formatHighlight,
+	formatAllHighlights,
 	generateFileName,
 	generateUniqueFilePath,
 	getFileNameWithoutExt,
 	handleDirectoryError,
 	initLogging,
+	setDebugLevel,
 	setDebugMode,
 } from "./utils";
 // import { testDatabase } from "./test-db"; // For debugging/testing
@@ -64,6 +66,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 		);
 
 		if (this.settings.debugMode) {
+			setDebugLevel(this.settings.debugLevel);
 			try {
 				const logFilePath = await initLogging(
 					this.app.vault,
@@ -424,10 +427,12 @@ export default class KoReaderHighlightImporter extends Plugin {
 	private generateHighlightsContent(highlights: Annotation[]): string {
 		highlights.sort((a, b) => {
 			if (a.pageno !== b.pageno) return a.pageno - b.pageno;
-			return new Date(a.datetime).getTime() -
-				new Date(b.datetime).getTime();
+			if (a.chapter !== b.chapter) {
+				return (a.chapter || "").localeCompare(b.chapter || "");
+			}
+			return compareAnnotations(a, b);
 		});
-		return highlights.map(formatHighlight).join("");
+		return formatAllHighlights(highlights);
 	}
 
 	private escapeYAMLString(str: string): string {

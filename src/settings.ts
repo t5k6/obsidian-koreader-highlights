@@ -36,9 +36,9 @@ class FolderInputSuggest extends AbstractInputSuggest<string> {
     }
 
     renderSuggestion(suggestion: string, el: HTMLElement): void {
-        const suggestionEl = el.createEl("div", { 
-            text: suggestion, 
-            cls: "suggestion-item" 
+        const suggestionEl = el.createEl("div", {
+            text: suggestion,
+            cls: "suggestion-item",
         });
         suggestionEl.addEventListener("mousedown", (evt: MouseEvent) => {
             evt.preventDefault();
@@ -48,7 +48,10 @@ class FolderInputSuggest extends AbstractInputSuggest<string> {
         });
     }
 
-    onChooseSuggestion(suggestion: string, evt: MouseEvent | KeyboardEvent): void {
+    onChooseSuggestion(
+        suggestion: string,
+        evt: MouseEvent | KeyboardEvent,
+    ): void {
         this.inputEl.value = suggestion;
         this.inputEl.trigger("input");
         this.onSubmit(suggestion);
@@ -104,7 +107,9 @@ export class KoReaderSettingTab extends PluginSettingTab {
                 // updates plugin settings, and gives user feedback.
                 const processFolderInput = async (value: string) => {
                     const normalizedResult: string = normalizePath(value);
-                    const folder = this.app.vault.getAbstractFileByPath(normalizedResult);
+                    const folder = this.app.vault.getAbstractFileByPath(
+                        normalizedResult,
+                    );
                     if (!folder || !(folder instanceof TFolder)) {
                         await this.app.vault.createFolder(normalizedResult);
                     }
@@ -120,7 +125,9 @@ export class KoReaderSettingTab extends PluginSettingTab {
                     try {
                         await processFolderInput(value);
                     } catch (error) {
-                        new Notice(`KOReader Importer: Failed to create folder: ${value}`);
+                        new Notice(
+                            `KOReader Importer: Failed to create folder: ${value}`,
+                        );
                     }
                 });
 
@@ -130,7 +137,7 @@ export class KoReaderSettingTab extends PluginSettingTab {
                     textComponent.inputEl,
                     (result: string) => {
                         textComponent.setValue(result);
-                    }
+                    },
                 );
             });
 
@@ -221,9 +228,9 @@ export class KoReaderSettingTab extends PluginSettingTab {
             )
             .addDropdown((dropdown) => {
                 dropdown.addOption("0", "None");
-                dropdown.addOption("1", "Error");
+                dropdown.addOption("3", "Error");
                 dropdown.addOption("2", "Warning");
-                dropdown.addOption("3", "Info");
+                dropdown.addOption("1", "Info");
                 dropdown.setValue(this.plugin.settings.debugLevel.toString());
                 dropdown.onChange(async (value: string) => {
                     const level = Number.parseInt(value);

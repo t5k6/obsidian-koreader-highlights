@@ -5,9 +5,6 @@ import type {
     NumericLiteral,
     StringLiteral,
     TableConstructorExpression,
-    TableKey,
-    TableKeyString,
-    TableValue,
 } from "luaparse";
 
 // Common base types
@@ -73,9 +70,15 @@ export interface PageStatData {
 export interface Annotation {
     chapter?: string;
     datetime: string;
+    datetime_updated?: string;
     pageno: number;
-    text: string;
+    pageref?: string;
+    text?: string;
     note?: string;
+    color?: string;
+    drawer?: "lighten" | "underscore" | "strikeout" | "invert"; // KOReader drawer styles
+    pos0?: string;
+    pos1?: string;
 }
 
 // Metadata structure
@@ -127,6 +130,9 @@ export interface KoReaderHighlightImporterSettings {
     enableFullDuplicateCheck: boolean;
     frontmatter: FrontmatterSettings;
     debugLevel: number;
+    maxHighlightGap: number; // Max character gap for successive highlights (default: 5)
+    maxTimeGapMinutes: number; // Max time gap for grouping by session (default: 10)
+    mergeOverlappingHighlights: boolean; // Enable/disable overlap merging (default: true)
 }
 
 // Constants
@@ -139,9 +145,12 @@ export const DEFAULT_SETTINGS: KoReaderHighlightImporterSettings = {
     enableFullDuplicateCheck: false,
     frontmatter: {
         disabledFields: [],
-        customFields: []
+        customFields: [],
     },
-    debugLevel: 0
+    debugLevel: 0,
+    maxHighlightGap: 5,
+    maxTimeGapMinutes: 10,
+    mergeOverlappingHighlights: true,
 };
 
 // Duplicate handling

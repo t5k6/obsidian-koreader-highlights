@@ -393,43 +393,80 @@ function createAnnotation(
     const annotation: Annotation = {
         chapter: "",
         datetime: new Date().toISOString(),
+        drawer: undefined,
         pageno: 0,
         text: "",
         note: undefined,
+        color: undefined,
+        pos0: undefined,
+        pos1: undefined,
     };
+
+    const allowedDrawers: Annotation['drawer'][] = ["lighten", "underscore", "strikeout", "invert"];
+
     for (const field of fields) {
         const { key, value } = extractField(field);
         if (!key || typeof key !== "string") continue;
+
         const fieldMap: Record<string, keyof Annotation> = {
             "chapter": "chapter",
             "chapter_name": "chapter", // Support both for legacy
+            "color": "color",
             "datetime": "datetime",
             "date": "datetime", // Support both for legacy
+            "drawer": "drawer",
             "pageno": "pageno",
             "page": "pageno", // For modern or variant legacy
             "text": "text",
             "note": "note",
             "notes": "note",
+            "pos0": "pos0",
+            "pos1": "pos1",
         };
         const targetField = fieldMap[key];
-        if (!targetField || !(targetField in annotation)) continue;
+        if (!targetField || !(targetField in annotation)) {
+            devWarn(`Unknown annotation field: ${key}`);
+            continue;
+        }
+
         if (typeof value === "string") {
             if (targetField === "pageno") {
                 annotation.pageno = Number.parseInt(value, 10) || 0;
-            } else if (targetField === "text" || targetField === "note") {
+            } else if (targetField === "drawer") {
+                const sanitized = sanitizeString(value);
+                if (allowedDrawers.includes(sanitized as any)) {
+                    annotation.drawer = sanitized as Annotation['drawer'];
+                } else {
+                    devWarn(`Invalid drawer value: ${sanitized}`);
+                }
+            } else if (
+                targetField === "text" ||
+                targetField === "note" ||
+                targetField === "color"
+            ) {
                 annotation[targetField] = sanitizeString(value)
                     .replace(/\\\n/g, "\n\n")
                     .replace(/\\$/g, "\n\n");
             } else {
-                annotation[
-                    targetField as Exclude<keyof Annotation, "pageno" | "note">
-                ] = sanitizeString(value);
+                annotation[targetField as "chapter" | "datetime" | "pos0" | "pos1"] = sanitizeString(value);
             }
+            devLog(
+                `Parsed field ${key}=${value} for annotation (target: ${targetField})`,
+            );
         } else if (typeof value === "number" && targetField === "pageno") {
             annotation.pageno = value;
+            devLog(`Parsed numeric pageno=${value}`);
         }
     }
-    return annotation.text ? annotation : null;
+
+    if (!annotation.text) {
+        devLog(`Skipping annotation with no text: ${JSON.stringify(annotation)}`);
+        return null;
+    }
+    if (!annotation.pos0 || !annotation.pos1) {
+        devLog(`Annotation missing pos0 or pos1: ${JSON.stringify(annotation)}`);
+    }
+    return annotation;
 }
 
 function extractModernAnnotation(field: LuaTableField): Annotation | null {

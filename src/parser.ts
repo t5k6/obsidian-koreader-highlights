@@ -19,14 +19,12 @@ import type {
     LuaMetadata,
     LuaValue,
 } from "./types";
+import { handleDirectoryError } from "./utils/file-utils";
 import {
-    devError,
-    devLog,
-    devWarn,
     findAndReadMetadataFile,
     getFileNameWithoutExt,
-    handleDirectoryError,
-} from "./utils";
+} from "./utils/format-utils";
+import { devError, devLog, devWarn } from "./utils/logging";
 
 const SDR_DIR_SUFFIX = ".sdr";
 
@@ -402,7 +400,12 @@ function createAnnotation(
         pos1: undefined,
     };
 
-    const allowedDrawers: Annotation['drawer'][] = ["lighten", "underscore", "strikeout", "invert"];
+    const allowedDrawers: Annotation["drawer"][] = [
+        "lighten",
+        "underscore",
+        "strikeout",
+        "invert",
+    ];
 
     for (const field of fields) {
         const { key, value } = extractField(field);
@@ -435,7 +438,7 @@ function createAnnotation(
             } else if (targetField === "drawer") {
                 const sanitized = sanitizeString(value);
                 if (allowedDrawers.includes(sanitized as any)) {
-                    annotation.drawer = sanitized as Annotation['drawer'];
+                    annotation.drawer = sanitized as Annotation["drawer"];
                 } else {
                     devWarn(`Invalid drawer value: ${sanitized}`);
                 }
@@ -448,7 +451,9 @@ function createAnnotation(
                     .replace(/\\\n/g, "\n\n")
                     .replace(/\\$/g, "\n\n");
             } else {
-                annotation[targetField as "chapter" | "datetime" | "pos0" | "pos1"] = sanitizeString(value);
+                annotation[
+                    targetField as "chapter" | "datetime" | "pos0" | "pos1"
+                ] = sanitizeString(value);
             }
             devLog(
                 `Parsed field ${key}=${value} for annotation (target: ${targetField})`,
@@ -460,11 +465,15 @@ function createAnnotation(
     }
 
     if (!annotation.text) {
-        devLog(`Skipping annotation with no text: ${JSON.stringify(annotation)}`);
+        devLog(
+            `Skipping annotation with no text: ${JSON.stringify(annotation)}`,
+        );
         return null;
     }
     if (!annotation.pos0 || !annotation.pos1) {
-        devLog(`Annotation missing pos0 or pos1: ${JSON.stringify(annotation)}`);
+        devLog(
+            `Annotation missing pos0 or pos1: ${JSON.stringify(annotation)}`,
+        );
     }
     return annotation;
 }

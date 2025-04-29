@@ -1,3 +1,4 @@
+import path from "node:path";
 import { Modal } from "obsidian";
 
 export class ProgressModal extends Modal {
@@ -25,9 +26,11 @@ export class ProgressModal extends Modal {
         });
     }
 
-    updateProgress(completed: number) {
-        if (this.progressEl) {
-            this.progressEl.value = completed;
+    updateProgress(completed: number, currentFile?: string) {
+        if (this.progressEl) this.progressEl.value = completed;
+        if (currentFile) {
+            this.statusEl.setText(`Processing: ${path.basename(currentFile)}`);
         }
     }
+
 }

@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import initSqlJs from "sql.js";
 import { SQLITE_WASM } from "./binaries/sql-wasm-base64";
 import type { BookStatistics, LuaMetadata, PageStatData } from "./types";
-import { devError, devLog } from "./utils";
+import { devError, devLog } from "./utils/logging";
 
 // Define types for our SQL database and statements
 type SQLDatabase = InstanceType<

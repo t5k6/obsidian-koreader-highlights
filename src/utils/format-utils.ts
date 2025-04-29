@@ -1,18 +1,8 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, join as node_join } from "node:path";
-import {
-    normalizePath,
-    Notice,
-    type TFile,
-    TFolder,
-    type Vault,
-} from "obsidian";
-import { type Annotation, DEFAULT_SETTINGS, type DocProps } from "./types";
-
-let isDebugMode = false;
-let logFilePath: string;
-let logFile: TFile | null = null;
-let logVault: Vault;
+import { type Annotation, DEFAULT_SETTINGS, type DocProps } from "../types";
+import { handleDirectoryError } from "./file-utils";
+import { devError, devLog, devWarn } from "./logging";
 
 const KOReaderHighlightColors: Record<string, string> = {
     red: "#ff0000",
@@ -54,193 +44,6 @@ interface CfiParts {
 // Group 7: End offset for pos1
 const CFI_REGEX_COMBINED =
     /epubcfi\(([^!]*!)?([^,]+)(?:,\/(\d+):(\d+)(?:\,\/\d+:\d+)?)?(?:,\/(\d+):(\d+))?\)$/;
-
-const formattedDate = getFormattedDate();
-
-/**
- * DebugLevel enumeration for controlling the verbosity of debug messages.
- */
-enum DebugLevel {
-    NONE = 0,
-    INFO = 1,
-    WARNING = 2,
-    ERROR = 3,
-}
-
-/* Global variable to store the current debug level.
-   Defaults to NONE so no debug logs are printed. */
-let currentDebugLevel: DebugLevel = DebugLevel.NONE;
-
-/**
- * Set the current debug level.
- * @param level - The debug level to set: NONE, ERROR, WARNING, or INFO.
- */
-export function setDebugLevel(level: DebugLevel): void {
-    currentDebugLevel = level;
-}
-
-/**
- * Logs information messages if the current debug level is INFO.
- */
-export function devLog(...args: unknown[]): void {
-    console.log(
-        `[Debug Check] Current level is: ${currentDebugLevel}, Required: ${DebugLevel.INFO}`,
-    );
-
-    if (currentDebugLevel >= DebugLevel.INFO) {
-        console.log(...args.map((arg) => formatMessage(arg)));
-        writeLog(args.map((arg) => formatMessage(arg)).join(" "), "INFO");
-    }
-}
-
-/**
- * Logs warning messages if the current debug level is WARNING or above.
- */
-export function devWarn(...args: string[]): void {
-    if (currentDebugLevel >= DebugLevel.WARNING) {
-        console.warn(...args);
-        writeLog(args.map((arg) => formatMessage(arg)).join(" "), "WARNING");
-    }
-}
-
-/**
- * Logs error messages if the current debug level is ERROR or above.
- */
-export function devError(...args: unknown[]): void {
-    if (currentDebugLevel >= DebugLevel.ERROR) {
-        console.error(...args.map((arg) => formatMessage(arg)));
-        writeLog(args.map((arg) => formatMessage(arg)).join(" "), "ERROR");
-    }
-}
-
-function getFormattedDate(): string {
-    const date = new Date();
-    return date.toISOString()
-        .replace(/[:.]/g, "-") // Replace colons and periods with hyphens
-        .replace("T", "_"); // Replace the 'T' in ISO format with an underscore
-}
-
-export async function initLogging(
-    vault: Vault,
-    logFolderPath: string,
-): Promise<string> {
-    logVault = vault;
-    const logDir = normalizePath(logFolderPath);
-
-    try {
-        const folder = vault.getAbstractFileByPath(logDir);
-
-        if (!folder || !(folder instanceof TFolder)) {
-            await vault.createFolder(logDir);
-        }
-    } catch (error) {
-        if ((error as Error).message !== "Folder already exists.") {
-            console.error("Failed to create or access log folder:", error);
-            throw error;
-        }
-        console.log(`Log folder already exists: ${logDir}`);
-    }
-
-    logFilePath = normalizePath(
-        `${logDir}/koreader-importer_${formattedDate}.md`,
-    );
-
-    logFile = await vault.create(
-        logFilePath,
-        `Log initialized at ${new Date().toISOString()}\n`,
-    );
-
-    return logFilePath;
-}
-
-export async function writeLog(
-    message: string,
-    level: "INFO" | "WARNING" | "ERROR",
-): Promise<void> {
-    const timestamp = new Date().toISOString();
-    const logEntry = `[${timestamp}] [${level}] ${message}\n`;
-
-    if (logFile) {
-        try {
-            await logVault.modify(
-                logFile,
-                (await logVault.read(logFile)) + logEntry,
-            );
-        } catch (error) {
-            console.error("Failed to append to log file:", error);
-        }
-    } else {
-        console.error(
-            "Log file not initialized. Cannot write log entry:",
-            logEntry,
-        );
-    }
-}
-
-export function setDebugMode(debugMode: boolean) {
-    isDebugMode = debugMode;
-    if (debugMode) {
-        setDebugLevel(DebugLevel.INFO);
-    } else {
-        setDebugLevel(DebugLevel.NONE);
-    }
-}
-
-export async function generateUniqueFilePath(
-    vault: Vault,
-    baseDir: string,
-    fileName: string,
-    maxFileNameLength?: number,
-): Promise<string> {
-    const normalizedBaseDir = normalizePath(baseDir);
-    let normalizedFileName = normalizePath(fileName);
-
-    if (maxFileNameLength && normalizedFileName.length > maxFileNameLength) {
-        const ext = normalizedFileName.substring(
-            normalizedFileName.lastIndexOf("."),
-        );
-        const baseName = normalizedFileName.substring(
-            0,
-            normalizedFileName.lastIndexOf("."),
-        );
-        normalizedFileName = `${
-            baseName.slice(0, maxFileNameLength - ext.length)
-        }${ext}`;
-    }
-
-    let counter = 1;
-    let newPath = normalizePath(`${normalizedBaseDir}/${normalizedFileName}`);
-    const baseName = normalizedFileName.substring(
-        0,
-        normalizedFileName.lastIndexOf("."),
-    );
-    const ext = normalizedFileName.substring(
-        normalizedFileName.lastIndexOf("."),
-    );
-
-    while (vault.getAbstractFileByPath(newPath)) {
-        newPath = normalizePath(
-            `${normalizedBaseDir}/${baseName} (${counter})${ext}`,
-        );
-        counter++;
-    }
-
-    return newPath;
-}
-
-export async function ensureParentDirectory(
-    vault: Vault,
-    filePath: string,
-): Promise<void> {
-    const dirPath = normalizePath(
-        filePath.substring(0, filePath.lastIndexOf("/")),
-    );
-    const dirExists = vault.getFolderByPath(dirPath);
-
-    if (!dirExists) {
-        await vault.createFolder(dirPath);
-    }
-}
 
 export async function findAndReadMetadataFile(
     directory: string,
@@ -297,20 +100,50 @@ export async function findAndReadMetadataFile(
 export function generateFileName(
     docProps: DocProps,
     highlightsFolder: string,
+    originalFileName?: string,
 ): string {
-    const authors = docProps.authors || "Unknown Author";
-    const title = docProps.title || "Untitled";
-    const normalizedAuthors = normalizeFileName(authors);
-    const normalizedTitle = normalizeFileName(title);
-    const authorsArray = normalizedAuthors.split(",").map((author) =>
-        author.trim()
-    );
-    const authorsString = authorsArray.join(" & ") || "Unknown Author";
-    const fileName = `${authorsString} - ${normalizedTitle}.md`;
+    const DEFAULT_AUTHOR = "Unknown Author";
+    const DEFAULT_TITLE = "Untitled";
+    const FILE_EXTENSION = ".md";
+    const AUTHOR_SEPARATOR = " & ";
+    const TITLE_SEPARATOR = " - ";
 
-    const maxFileNameLength = 260 - highlightsFolder.length - 1 - 4; // 4 for '.md'
-    return fileName.length > maxFileNameLength
-        ? `${fileName.slice(0, maxFileNameLength)}.md`
+    // Check if both author and title are missing/default
+    const isMissingMetadata =
+        (!docProps.authors || docProps.authors === DEFAULT_AUTHOR) &&
+        (!docProps.title || docProps.title === DEFAULT_TITLE);
+
+    // Fallback to original filename if metadata is missing
+    if (isMissingMetadata && originalFileName) {
+        const fileNameWithoutExt = getFileNameWithoutExt(originalFileName);
+        return `${fileNameWithoutExt}${FILE_EXTENSION}`;
+    }
+
+    // Process authors
+    const authors = docProps.authors || DEFAULT_AUTHOR;
+    const normalizedAuthors = normalizeFileName(authors);
+    const authorsString = normalizedAuthors
+        .split(",")
+        .map((author) => author.trim())
+        .filter(Boolean)
+        .join(AUTHOR_SEPARATOR) || DEFAULT_AUTHOR;
+
+    // Process title
+    const title = docProps.title || DEFAULT_TITLE;
+    const normalizedTitle = normalizeFileName(title);
+
+    // Create filename
+    const fileName =
+        `${authorsString}${TITLE_SEPARATOR}${normalizedTitle}${FILE_EXTENSION}`;
+
+    // Calculate max length considering path constraints
+    const maxPathLength = 260; // Windows MAX_PATH limit
+    const availableLength = maxPathLength - highlightsFolder.length - 1; // -1 for path separator
+    const maxFileNameLength = availableLength - FILE_EXTENSION.length;
+
+    // Truncate if necessary
+    return fileName.length > availableLength
+        ? `${fileName.slice(0, maxFileNameLength)}${FILE_EXTENSION}`
         : fileName;
 }
 
@@ -322,36 +155,6 @@ export function getFileNameWithoutExt(filePath: string): string {
     const fileName = basename(filePath);
     const lastDotIndex = fileName.lastIndexOf(".");
     return lastDotIndex === -1 ? fileName : fileName.slice(0, lastDotIndex);
-}
-
-function formatMessage(arg: unknown): string {
-    if (arg instanceof Error) {
-        return arg.message;
-    }
-    if (typeof arg === "object" && arg !== null) {
-        return JSON.stringify(arg, null, 2);
-    }
-    return String(arg);
-}
-
-export async function handleDirectoryError(
-    filePath: string,
-    error: NodeJS.ErrnoException,
-) {
-    switch (error.code) {
-        case "ENOENT":
-            devError(`File/Directory not found: ${filePath}`);
-            new Notice(`File/Directory not found: ${filePath}`);
-            break;
-        case "EPERM":
-            devError(`Permission denied for file/directory: ${filePath}`);
-            break;
-        case "EACCES":
-            devError(`Access denied for file/directory: ${filePath}`);
-            break;
-        default:
-            devError(`Error reading file/directory ${filePath}:`, error);
-    }
 }
 
 // Utility to parse pos0/pos1
@@ -570,7 +373,10 @@ function deduplicateOverlaps(group: Annotation[]): Annotation[] {
     return deduplicated.filter((h) => h.text && h.text.trim().length > 0);
 }
 
-function formatHighlightGroup(group: Annotation[]): string {
+function formatHighlightGroup(
+    group: Annotation[],
+    isFirstInChapter: boolean,
+): string {
     if (!group.length) return "";
 
     // Deduplicate overlaps
@@ -582,22 +388,15 @@ function formatHighlightGroup(group: Annotation[]): string {
         return !min || d < min ? d : min;
     }, null as Date | null);
     const pageno = deduplicatedGroup[0].pageno;
-    const chapter = deduplicatedGroup.find((h) => h.chapter)?.chapter;
+    const header = `*${
+        formatDate(earliestDate?.toISOString() || deduplicatedGroup[0].datetime)
+    } - Page ${pageno}*\n\n`;
+    //    const header = `
+    // <div class="highlight-header">
+    //     <span class="highlight-date">${formatDate(earliestDate?.toISOString() || deduplicatedGroup[0].datetime)}</span>
+    //     <span class="highlight-page">Page ${pageno}</span>
+    // </div>`;
 
-    // Header
-    const header = chapter
-        ? `### Chapter: ${chapter}\n(*Date: ${
-            formatDate(
-                earliestDate?.toISOString() || deduplicatedGroup[0].datetime,
-            )
-        } - Page: ${pageno}*)\n\n`
-        : `(*Date: ${
-            formatDate(
-                earliestDate?.toISOString() || deduplicatedGroup[0].datetime,
-            )
-        } - Page: ${pageno}*)\n\n`;
-
-    // Sort by pos0 to ensure correct text order
     const sortedGroup = [...deduplicatedGroup].sort((a, b) => {
         const posA = parsePosition(a.pos0);
         const posB = parsePosition(b.pos0);
@@ -667,7 +466,26 @@ export function formatAllHighlights(annotations: Annotation[]): string {
         settings.maxTimeGapMinutes,
     );
     devLog(`Total groups created: ${groups.length}`);
-    return groups.map((group) => formatHighlightGroup(group)).join("");
+
+    // Group by chapter first
+    const chapterGroups = new Map<string, Annotation[][]>();
+    for (const group of groups) {
+        const chapter = group[0].chapter || "Unknown Chapter";
+        if (!chapterGroups.has(chapter)) {
+            chapterGroups.set(chapter, []);
+        }
+        chapterGroups.get(chapter)?.push(group);
+    }
+
+    let result = "";
+    for (const [chapter, chapterAnnotationGroups] of chapterGroups.entries()) {
+        result += `## ${chapter}\n\n`;
+        for (let i = 0; i < chapterAnnotationGroups.length; i++) {
+            const group = chapterAnnotationGroups[i];
+            result += formatHighlightGroup(group, i === 0);
+        }
+    }
+    return result;
 }
 
 function formatDate(dateStr: string): string {

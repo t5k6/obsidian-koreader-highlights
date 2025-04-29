@@ -20,12 +20,9 @@ import type {
     IDuplicateHandlingModal,
     LuaMetadata,
 } from "./types";
-import {
-    devError,
-    devLog,
-    generateFileName,
-    generateUniqueFilePath,
-} from "./utils";
+import { generateUniqueFilePath } from "./utils/file-utils";
+import { generateFileName } from "./utils/format-utils";
+import { devError, devLog } from "./utils/logging";
 
 export interface DuplicateMatch {
     file: TFile;

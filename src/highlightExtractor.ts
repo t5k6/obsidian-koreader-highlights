@@ -72,7 +72,7 @@ export function mergeHighlights(
     const exists = merged.some((eh) =>
       eh.chapter === newHighlight.chapter &&
       eh.pageno === newHighlight.pageno &&
-      isTextEqual(eh.text, newHighlight.text)
+      isTextEqual(eh.text || "", newHighlight.text || "")
     );
     if (!exists) merged.push(newHighlight);
   }

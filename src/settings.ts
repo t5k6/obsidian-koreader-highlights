@@ -10,7 +10,7 @@ import {
 } from "obsidian";
 import type KoReaderHighlightImporter from "./main";
 import type { FrontmatterSettings } from "./types";
-import { setDebugLevel } from "./utils";
+import { setDebugLevel } from "./utils/logging";
 
 class FolderInputSuggest extends AbstractInputSuggest<string> {
     constructor(

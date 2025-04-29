@@ -5,11 +5,11 @@ import type {
     LuaMetadata,
 } from "./types";
 import {
-    devError,
     formatPercent,
     formatUnixTimestamp,
     secondsToHoursMinutes,
-} from "./utils";
+} from "./utils/format-utils";
+import { devError } from "./utils/logging";
 
 export function createFrontmatterData(
     metadata: LuaMetadata,

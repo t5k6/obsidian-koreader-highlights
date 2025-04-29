@@ -1,8 +1,7 @@
 import { stat } from "node:fs/promises";
+import path from "node:path";
 import { normalizePath, Notice, Plugin, TFile } from "obsidian";
-import { ProgressModal } from "./ProgressModal";
 import { DuplicateHandler } from "./duplicateHandler";
-import { DuplicateHandlingModal } from "./duplicateModal";
 import { createFrontmatterData, formatFrontmatter } from "./frontmatter";
 import { findSDRFiles, readSDRFileContent } from "./parser";
 import { KoReaderSettingTab } from "./settings";
@@ -13,20 +12,28 @@ import {
 	type KoReaderHighlightImporterSettings,
 	type LuaMetadata,
 } from "./types";
+import { ProgressModal } from "./ui/ProgressModal";
+import { DuplicateHandlingModal } from "./ui/duplicateModal";
+import {
+	ensureParentDirectory,
+	generateUniqueFilePath,
+	handleDirectoryError,
+} from "./utils/file-utils";
 import {
 	compareAnnotations,
-	devError,
-	devLog,
-	ensureParentDirectory,
 	formatAllHighlights,
 	generateFileName,
-	generateUniqueFilePath,
 	getFileNameWithoutExt,
-	handleDirectoryError,
+} from "./utils/format-utils";
+
+import {
+	devError,
+	devLog,
 	initLogging,
+	LogManager,
 	setDebugLevel,
 	setDebugMode,
-} from "./utils";
+} from "./utils/logging";
 // import { testDatabase } from "./test-db"; // For debugging/testing
 
 export default class KoReaderHighlightImporter extends Plugin {
@@ -68,9 +75,14 @@ export default class KoReaderHighlightImporter extends Plugin {
 		if (this.settings.debugMode) {
 			setDebugLevel(this.settings.debugLevel);
 			try {
+				const cleanupOptions = await LogManager.promptForCleanup(
+					this.app.vault,
+					"Koreader_Importer_Logs",
+				);
 				const logFilePath = await initLogging(
 					this.app.vault,
 					"Koreader_Importer_Logs",
+					cleanupOptions,
 				);
 				console.log("Log file initialized at:", logFilePath);
 			} catch (error) {
@@ -188,6 +200,8 @@ export default class KoReaderHighlightImporter extends Plugin {
 
 	async handleScanHighlightsDirectory() {
 		if (!(await this.checkMountPoint())) return;
+		const modal = new ProgressModal(this.app);
+		modal.open();
 		try {
 			await this.scanHighlightsDirectory();
 		} catch (error) {
@@ -195,6 +209,9 @@ export default class KoReaderHighlightImporter extends Plugin {
 			new Notice(
 				"KOReader Importer: Error scanning for highlights. Check the console for details.",
 			);
+		} finally {
+			modal.close();
+			new Notice("Scan completed!");
 		}
 	}
 
@@ -243,7 +260,7 @@ export default class KoReaderHighlightImporter extends Plugin {
 						luaMetadata,
 					);
 					completed++;
-					modal.updateProgress(completed);
+					modal.updateProgress(completed, path.basename(file));
 				} catch (error) {
 					this.handleFileError(error, file);
 				}
@@ -400,16 +417,18 @@ export default class KoReaderHighlightImporter extends Plugin {
 		if (error instanceof Error) {
 			if (error.name === "FileNotFoundError") {
 				devError(`File not found: ${file}`);
-				new Notice(`KOReader Importer: File not found: ${file}`);
+				new Notice(
+					`KOReader Importer: File not found: ${file}. Please ensure the file exists on your device.`,
+				);
 			} else if (error.name === "MetadataParseError") {
 				devError(`Error parsing metadata in ${file}:`, error.message);
 				new Notice(
-					`KOReader Importer: Error parsing metadata in ${file}. Check the console for details.`,
+					`KOReader Importer: Error parsing metadata in ${file}. Check file format or device compatibility.`,
 				);
 			} else {
 				devError(`Error processing file ${file}:`, error);
 				new Notice(
-					`KOReader Importer: Error processing file ${file}. Check the console for details.`,
+					`KOReader Importer: Unexpected error processing file ${file}. See console for details.`,
 				);
 			}
 		}

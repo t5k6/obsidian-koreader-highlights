@@ -6,34 +6,55 @@ on:
       - "*"
 
 jobs:
-  build:
+  build-and-release:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Use Node.js
-        uses: actions/setup-node@v3
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: "22.x"
+          cache: 'pnpm'
 
       # Install dependencies first so that esbuild (and other packages) are available
       - name: Install dependencies
-        run: npm install
+        run: pnpm install --frozen-lockfile
 
-      - name: Generate WASM file
-        run: node esbuild.config.cjs production
-
-      - name: Build plugin
-        run: npm run build
+      - name: Build plugin for release
+        env:
+          NODE_ENV: production
+        run: pnpm run build
 
       - name: Create release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="${GITHUB_REF#refs/tags/}"
+          tag_name="${GITHUB_REF#refs/tags/}"
+          echo "Creating release for tag: $tag_name"
 
-          gh release create "$tag" \
-            --title="$tag" \
-            --draft \
-            main.js manifest.json styles.css
+          # Create an array of assets to upload
+          assets_to_upload=()
+          if [ -f "main.js" ]; then assets_to_upload+=("main.js"); else echo "WARNING: main.js not found!"; fi
+          if [ -f "manifest.json" ]; then assets_to_upload+=("manifest.json"); else echo "WARNING: manifest.json not found!"; fi
+          if [ -f "styles.css" ]; then assets_to_upload+=("styles.css"); else echo "WARNING: styles.css not found (optional)!"; fi
+
+          if [ ${#assets_to_upload[@]} -eq 0 ]; then
+            echo "ERROR: No assets found to upload. Aborting release."
+            exit 1
+          fi
+
+          echo "Uploading assets: ${assets_to_upload[*]}"
+
+          gh release create "$tag_name" \
+            --title "$tag_name" \
+            --notes "Release for version $tag_name" \
+            --generate-notes \
+            "${assets_to_upload[@]}"

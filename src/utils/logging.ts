@@ -1,11 +1,8 @@
 import { normalizePath, TFile, TFolder, type Vault } from "obsidian";
+import { handleFileSystemError } from "./fileUtils";
 
-const formattedDate = getFormattedDate();
 let isDebugMode = false;
 
-/**
- * DebugLevel enumeration for controlling the verbosity of debug messages.
- */
 enum DebugLevel {
     NONE = 0,
     INFO = 1,
@@ -13,10 +10,8 @@ enum DebugLevel {
     ERROR = 3,
 }
 
-/**
- * Set the current debug level.
- * @param level - The debug level to set: NONE, ERROR, WARNING, or INFO.
- */
+let currentDebugLevel: DebugLevel = DebugLevel.NONE;
+
 export function setDebugLevel(level: DebugLevel): void {
     currentDebugLevel = level;
 }
@@ -30,19 +25,13 @@ export function setDebugMode(debugMode: boolean) {
     }
 }
 
-/**
- * Logs information messages if the current debug level is INFO.
- */
 export function devLog(...args: unknown[]): void {
-    if (currentDebugLevel >= DebugLevel.INFO) {
+    if (currentDebugLevel === DebugLevel.INFO) {
         console.log(...args.map((arg) => formatMessage(arg)));
         writeLog(args.map((arg) => formatMessage(arg)).join(" "), "INFO");
     }
 }
 
-/**
- * Logs warning messages if the current debug level is WARNING or above.
- */
 export function devWarn(...args: string[]): void {
     if (currentDebugLevel >= DebugLevel.WARNING) {
         console.warn(...args);
@@ -50,9 +39,6 @@ export function devWarn(...args: string[]): void {
     }
 }
 
-/**
- * Logs error messages if the current debug level is ERROR or above.
- */
 export function devError(...args: unknown[]): void {
     if (currentDebugLevel >= DebugLevel.ERROR) {
         console.error(...args.map((arg) => formatMessage(arg)));
@@ -70,9 +56,12 @@ function formatMessage(arg: unknown): string {
     return String(arg);
 }
 
-/* Global variable to store the current debug level.
-   Defaults to NONE so no debug logs are printed. */
-let currentDebugLevel: DebugLevel = DebugLevel.NONE;
+function getFormattedDate(): string {
+    const date = new Date();
+    return date.toISOString()
+        .replace(/[:.]/g, "-") // Replace colons and periods with hyphens
+        .replace("T", "_"); // Replace the 'T' in ISO format with an underscore
+}
 
 export class LogManager {
     private vault: Vault;
@@ -94,16 +83,68 @@ export class LogManager {
         maxAgeDays?: number;
         maxFiles?: number;
     }): Promise<void> {
+        const formattedDate = getFormattedDate();
         try {
-            const folder = this.vault.getAbstractFileByPath(this.logDir);
+            const folderExists = await this.vault.adapter.exists(this.logDir);
 
-            if (!folder || !(folder instanceof TFolder)) {
-                await this.vault.createFolder(this.logDir);
-            } else if (cleanupOptions?.enabled) {
-                await this.cleanupOldLogs(
-                    cleanupOptions.maxAgeDays,
-                    cleanupOptions.maxFiles,
+            if (!folderExists) {
+                devLog(
+                    `Log directory ${this.logDir} does not exist. Creating...`,
                 );
+                try {
+                    await this.vault.createFolder(this.logDir);
+                    devLog(
+                        `Log directory created successfully: ${this.logDir}`,
+                    );
+                } catch (createError) {
+                    console.error(
+                        `LogManager: Failed to create log directory ${this.logDir}:`,
+                        createError,
+                    );
+                    throw new Error(
+                        `Failed to create log directory: ${
+                            createError instanceof Error
+                                ? createError.message
+                                : String(createError)
+                        }`,
+                    );
+                }
+            } else {
+                devLog(
+                    `Log directory ${this.logDir} exists. Verifying type...`,
+                );
+                try {
+                    const folderStat = await this.vault.adapter.stat(
+                        this.logDir,
+                    );
+                    if (!folderStat || folderStat.type !== "folder") {
+                        console.error(
+                            `LogManager: Expected folder at ${this.logDir}, but found type '${folderStat?.type}'. Cannot initialize file logging.`,
+                        );
+                        throw new Error(
+                            `Log path ${this.logDir} exists but is not a folder.`,
+                        );
+                    }
+                    devLog(`Log directory ${this.logDir} verified as folder.`);
+                    if (cleanupOptions?.enabled) {
+                        await this.cleanupOldLogs(
+                            cleanupOptions.maxAgeDays,
+                            cleanupOptions.maxFiles,
+                        );
+                    }
+                } catch (statError) {
+                    console.error(
+                        `LogManager: Failed to verify log directory type ${this.logDir}:`,
+                        statError,
+                    );
+                    throw new Error(
+                        `Failed to access log directory info: ${
+                            statError instanceof Error
+                                ? statError.message
+                                : String(statError)
+                        }`,
+                    );
+                }
             }
 
             const levelName = DebugLevel[currentDebugLevel];
@@ -111,15 +152,32 @@ export class LogManager {
                 `${this.logDir}/koreader-importer_${formattedDate}_${levelName}.md`,
             );
 
-            this.logFile = await this.vault.create(
+            const existingLogFile = await this.vault.getAbstractFileByPath(
                 logFilePath,
-                `[${levelName}] Log initialized at ${
-                    new Date().toISOString()
-                }\n`,
             );
+            if (existingLogFile && existingLogFile instanceof TFile) {
+                this.logFile = existingLogFile;
+                devLog(`Reusing existing log file: ${logFilePath}`);
+            } else {
+                this.logFile = await this.vault.create(
+                    logFilePath,
+                    `[${levelName}] Log initialized at ${
+                        new Date().toISOString()
+                    }\n`,
+                );
+            }
         } catch (error) {
             console.error("Log initialization failed:", error);
-            throw error;
+            handleFileSystemError(
+                "initializing file logging",
+                this.logDir,
+                error,
+                {
+                    shouldThrow: false,
+                    customNoticeMessage:
+                        "File logging setup failed. Logs will only go to console.",
+                },
+            );
         }
     }
 
@@ -142,7 +200,7 @@ export class LogManager {
         }
     }
 
-    private async flush(): Promise<void> {
+    async flush(): Promise<void> {
         if (this.isWriting || this.logBuffer.length === 0) return;
 
         this.isWriting = true;
@@ -169,7 +227,7 @@ export class LogManager {
 
     private async cleanupOldLogs(
         maxAgeDays = 7,
-        maxFiles?: number,
+        maxFileCount?: number,
     ): Promise<void> {
         const folder = this.vault.getAbstractFileByPath(this.logDir);
         if (!folder || !(folder instanceof TFolder)) return;
@@ -178,7 +236,7 @@ export class LogManager {
         const cutoffTime = now - (maxAgeDays * 24 * 60 * 60 * 1000);
         const logFiles: { file: TFile; mtime: number }[] = [];
 
-        // Collect and sort log files
+        // Collect log files
         for (const file of folder.children) {
             if (
                 file instanceof TFile &&
@@ -194,23 +252,26 @@ export class LogManager {
         // Sort by modification time (oldest first)
         logFiles.sort((a, b) => a.mtime - b.mtime);
 
-        // Delete files based on age and count
-        for (const { file, mtime } of logFiles) {
+        // Delete old files
+        let i = 0;
+        while (i < logFiles.length) {
+            const { file, mtime } = logFiles[i];
             if (
-                mtime < cutoffTime || (maxFiles && logFiles.length > maxFiles)
+                mtime < cutoffTime ||
+                (maxFileCount && logFiles.length - i > maxFileCount)
             ) {
                 try {
                     await this.vault.delete(file);
-                    devLog(`Deleted old log file: ${file.name}`);
-                    logFiles.pop(); // Remove from count
+                    logFiles.splice(i, 1); // Remove from array
                 } catch (error) {
-                    devError(
-                        `Failed to delete old log file ${file.name}:`,
+                    console.error(
+                        `Failed to delete log file ${file.name}:`,
                         error,
                     );
+                    i++;
                 }
             } else {
-                break; // Files are sorted, so we can stop checking
+                break;
             }
         }
     }
@@ -223,8 +284,6 @@ export class LogManager {
         maxAgeDays?: number;
         maxFiles?: number;
     }> {
-        // Implementation could use Obsidian's dialog system
-        // For now, we'll return default values
         return {
             enabled: true,
             maxAgeDays: 7,
@@ -252,18 +311,25 @@ export async function initLogging(
     return logFolderPath;
 }
 
+export async function closeLogging(): Promise<void> {
+    if (logManager) {
+        await logManager.flush(); // Ensure buffer is written before unload
+        logManager = null; // Release reference
+        devLog("Logging flushed and closed.");
+    }
+}
+
 export async function writeLog(
     message: string,
     level: "INFO" | "WARNING" | "ERROR",
 ): Promise<void> {
     if (logManager) {
-        await logManager.write(message, level);
+        try {
+            await logManager.write(message, level);
+        } catch (error) {
+            console.error("Error writing log entry:", error);
+        }
+    } else if (currentDebugLevel >= DebugLevel[level]) {
+        console.log(`[LOG FALLBACK - ${level}] ${message}`);
     }
-}
-
-function getFormattedDate(): string {
-    const date = new Date();
-    return date.toISOString()
-        .replace(/[:.]/g, "-") // Replace colons and periods with hyphens
-        .replace("T", "_"); // Replace the 'T' in ISO format with an underscore
 }

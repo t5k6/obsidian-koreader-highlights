@@ -1,13 +1,13 @@
 {
 	"name": "koreader-highlights-importer",
-	"version": "1.0.9",
+	"version": "1.1.0",
 	"description": "Imports highlights and metadata from KoReader into Obsidian notes (https://obsidian.md)",
 	"main": "main.js",
 	"type": "commonjs",
 	"scripts": {
 		"dev": "node esbuild.config.cjs",
-		"build": "node esbuild.config.cjs production",
-		"lint": "biome lint"
+		"build": "cross-env NODE_ENV=production node esbuild.config.cjs",
+		"lint": "biome lint --write"
 	},
 	"keywords": [
 		"obsidian",
@@ -24,15 +24,13 @@
 		"sql.js": "^1.13.0"
 	},
 	"devDependencies": {
-		"@types/jest": "^29.5.14",
 		"@types/luaparse": "^0.2.12",
-		"@types/node": "^22.15.3",
+		"@types/node": "^22.15.18",
 		"@types/sql.js": "^1.4.9",
 		"biome": "^0.3.3",
-		"esbuild": "0.25.0",
-		"jest": "^29.7.0",
-		"ts-jest": "^29.3.2",
+		"cross-env": "^7.0.3",
+		"esbuild": "^0.25.4",
 		"tslib": "2.8.1",
-		"typescript": "5.7.2"
+		"typescript": "^5.8.3"
 	}
 }

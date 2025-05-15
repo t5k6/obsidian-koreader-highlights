@@ -1,6 +1,9 @@
 import { type App, ButtonComponent, Modal, setIcon, Setting } from "obsidian";
-import type { DuplicateMatch } from "../duplicateHandler";
-import type { DuplicateChoice, IDuplicateHandlingModal } from "../types";
+import type {
+    DuplicateChoice,
+    DuplicateMatch,
+    IDuplicateHandlingModal,
+} from "../types";
 
 export class DuplicateHandlingModal extends Modal
     implements IDuplicateHandlingModal {
@@ -107,7 +110,6 @@ export class DuplicateHandlingModal extends Modal
         shortcutsEl.createEl("kbd", { text: "Esc" });
         shortcutsEl.createSpan({ text: " to Skip" });
 
-        // Add keyboard listeners
         contentEl.addEventListener("keydown", this.handleKeydown.bind(this));
     }
 
@@ -155,7 +157,8 @@ export class DuplicateHandlingModal extends Modal
 
         createButton("Replace", "replace", "replace-all", {
             warning: this.match.matchType === "exact",
-            tooltip: "Replace the existing file with the new one, overwriting all content.",
+            tooltip:
+                "Replace the existing file with the new one, overwriting all content.",
         });
 
         createButton("Merge", "merge", "git-merge", {
@@ -165,7 +168,10 @@ export class DuplicateHandlingModal extends Modal
                 : undefined,
         });
 
-        createButton("Keep Both", "keep-both", "copy", {tooltip: "Create a new file for the imported highlights and retain the original.",});
+        createButton("Keep Both", "keep-both", "copy", {
+            tooltip:
+                "Create a new file for the imported highlights and retain the original.",
+        });
 
         createButton("Skip", "skip", "x", { primary: true });
     }

@@ -2,7 +2,7 @@ import path from "node:path";
 import { Modal } from "obsidian";
 
 export class ProgressModal extends Modal {
-    private statusEl!: HTMLElement;
+    public statusEl!: HTMLElement;
     private progressEl: HTMLProgressElement | null = null;
     private total: number | null = null;
 
@@ -32,5 +32,4 @@ export class ProgressModal extends Modal {
             this.statusEl.setText(`Processing: ${path.basename(currentFile)}`);
         }
     }
-
 }

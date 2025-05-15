@@ -1,10 +1,8 @@
-import { readdir, readFile, stat } from "node:fs/promises";
-import { basename, join as node_join } from "node:path";
-import { type Annotation, DEFAULT_SETTINGS, type DocProps } from "../types";
-import { handleDirectoryError } from "./file-utils";
-import { devError, devLog, devWarn } from "./logging";
+import { basename } from "node:path";
+import type { Annotation, DocProps } from "../types";
+import { devLog, devWarn } from "./logging";
 
-const KOReaderHighlightColors: Record<string, string> = {
+export const KOReaderHighlightColors: Record<string, string> = {
     red: "#ff0000",
     orange: "#ff9900",
     yellow: "#ffff00",
@@ -29,6 +27,12 @@ const KOReaderTextColors: Record<string, { light: string; dark: string }> = {
     gray: { light: "#000", dark: "#fff" },
 };
 
+const DEFAULT_AUTHOR = "Unknown Author";
+const DEFAULT_TITLE = "Untitled";
+const FILE_EXTENSION = ".md";
+const AUTHOR_SEPARATOR = " & ";
+const TITLE_SEPARATOR = " - ";
+
 interface CfiParts {
     fullPath: string; // e.g., /6/14[id6]!/4/2/6/2,/1
     offset: number;
@@ -45,138 +49,138 @@ interface CfiParts {
 const CFI_REGEX_COMBINED =
     /epubcfi\(([^!]*!)?([^,]+)(?:,\/(\d+):(\d+)(?:\,\/\d+:\d+)?)?(?:,\/(\d+):(\d+))?\)$/;
 
-export async function findAndReadMetadataFile(
-    directory: string,
-    allowedFileTypes: string[],
-): Promise<string | null> {
-    const isFileTypeFilterEmpty = !allowedFileTypes.length ||
-        (allowedFileTypes.length === 1 && !allowedFileTypes[0]);
-
-    const searchFiles = async (files: string[]) => {
-        for (const file of files) {
-            if (isFileTypeFilterEmpty && /^metadata\..+\.lua$/.test(file)) {
-                const luaFilePath = node_join(directory, file);
-                try {
-                    const stats = await stat(luaFilePath);
-                    if (stats.isFile()) {
-                        devLog(`File found: ${luaFilePath}`);
-                        return await readFile(luaFilePath, "utf-8");
-                    }
-                    devWarn(`Skipping non-file: ${luaFilePath}`);
-                } catch (error) {
-                    const e = error as NodeJS.ErrnoException;
-                    await handleDirectoryError(luaFilePath, e);
-                }
-            } else if (
-                !isFileTypeFilterEmpty &&
-                allowedFileTypes.some((type) => file === `metadata.${type}.lua`)
-            ) {
-                const luaFilePath = node_join(directory, file);
-                try {
-                    const stats = await stat(luaFilePath);
-                    if (stats.isFile()) {
-                        devLog(`File found: ${luaFilePath}`);
-                        return await readFile(luaFilePath, "utf-8");
-                    }
-                    devWarn(`Skipping non-file: ${luaFilePath}`);
-                } catch (error) {
-                    const e = error as NodeJS.ErrnoException;
-                    await handleDirectoryError(luaFilePath, e);
-                }
-            }
-        }
-        return null;
-    };
-
-    try {
-        const files = await readdir(directory);
-        return searchFiles(files);
-    } catch (error) {
-        devError(`Error reading directory ${directory}:`, error);
-        return null;
-    }
-}
-
-export function generateFileName(
+export function generateObsidianFileName(
     docProps: DocProps,
     highlightsFolder: string,
-    originalFileName?: string,
+    originalSdrName?: string,
+    maxTotalPathLength = 255,
 ): string {
-    const DEFAULT_AUTHOR = "Unknown Author";
-    const DEFAULT_TITLE = "Untitled";
-    const FILE_EXTENSION = ".md";
-    const AUTHOR_SEPARATOR = " & ";
-    const TITLE_SEPARATOR = " - ";
+    const effectiveAuthor = docProps.authors?.trim();
+    const effectiveTitle = docProps.title?.trim();
 
-    // Check if both author and title are missing/default
-    const isMissingMetadata =
-        (!docProps.authors || docProps.authors === DEFAULT_AUTHOR) &&
-        (!docProps.title || docProps.title === DEFAULT_TITLE);
+    let baseName: string;
 
-    // Fallback to original filename if metadata is missing
-    if (isMissingMetadata && originalFileName) {
-        const fileNameWithoutExt = getFileNameWithoutExt(originalFileName);
-        return `${fileNameWithoutExt}${FILE_EXTENSION}`;
+    const isAuthorEffectivelyMissing = !effectiveAuthor ||
+        effectiveAuthor === DEFAULT_AUTHOR;
+
+    const isTitleEffectivelyMissing = !effectiveTitle ||
+        effectiveTitle === DEFAULT_TITLE;
+
+    const sdrBaseName = originalSdrName
+        ? normalizeFileNamePiece(getFileNameWithoutExt(originalSdrName))
+        : undefined;
+
+    if (isAuthorEffectivelyMissing && isTitleEffectivelyMissing) {
+        // Case 1: BOTH author and title are missing/default.
+        // Use originalSdrName if available, otherwise DEFAULT_TITLE.
+        baseName = sdrBaseName || DEFAULT_TITLE;
+        devWarn(
+            `Using filename based on SDR name or default (author/title missing): ${baseName}`,
+        );
+    } else if (isAuthorEffectivelyMissing && !isTitleEffectivelyMissing) {
+        // Case 2: Author is missing/default, but title IS known.
+        // Use only the title.
+        baseName = normalizeFileNamePiece(effectiveTitle); // effectiveTitle is guaranteed here
+        devWarn(`Using filename based on title (author missing): ${baseName}`);
+    } else if (!isAuthorEffectivelyMissing && isTitleEffectivelyMissing) {
+        // Case 3: Author IS known, but title is missing/default.
+        // Use "Author(s) - OriginalSdrName" if sdrBaseName is available,
+        // otherwise "Author(s) - DEFAULT_TITLE".
+        const authorArray = (effectiveAuthor || "")
+            .split(",")
+            .map((author) => normalizeFileNamePiece(author.trim()))
+            .filter(Boolean);
+        const authorsString = authorArray.join(AUTHOR_SEPARATOR);
+
+        const titleFallback = sdrBaseName || DEFAULT_TITLE;
+        baseName = `${authorsString}${TITLE_SEPARATOR}${titleFallback}`;
+        devWarn(
+            `Using filename based on author and SDR/default title (title missing): ${baseName}`,
+        );
+    } else {
+        // Case 4: BOTH author and title are known and not default.
+        // Construct "Author(s) - Title String".
+        const authorArray = (effectiveAuthor || "")
+            .split(",")
+            .map((author) => normalizeFileNamePiece(author.trim()))
+            .filter(Boolean);
+        const authorsString = authorArray.join(AUTHOR_SEPARATOR);
+
+        const normalizedTitle = normalizeFileNamePiece(effectiveTitle); // effectiveTitle is guaranteed here
+        baseName = `${authorsString}${TITLE_SEPARATOR}${normalizedTitle}`;
     }
 
-    // Process authors
-    const authors = docProps.authors || DEFAULT_AUTHOR;
-    const normalizedAuthors = normalizeFileName(authors);
-    const authorsString = normalizedAuthors
-        .split(",")
-        .map((author) => author.trim())
-        .filter(Boolean)
-        .join(AUTHOR_SEPARATOR) || DEFAULT_AUTHOR;
+    // Final safety net: if baseName is somehow empty, use DEFAULT_TITLE.
+    if (!baseName?.trim()) {
+        baseName = DEFAULT_TITLE;
+        devWarn(
+            `Filename defaulted to "${DEFAULT_TITLE}" due to empty base after processing.`,
+        );
+    }
+    baseName = normalizeFileNamePiece(baseName);
 
-    // Process title
-    const title = docProps.title || DEFAULT_TITLE;
-    const normalizedTitle = normalizeFileName(title);
+    const FOLDER_PATH_MARGIN = highlightsFolder.length + 1 + 5;
+    const maxLengthForName = maxTotalPathLength - FOLDER_PATH_MARGIN -
+        FILE_EXTENSION.length;
 
-    // Create filename
-    const fileName =
-        `${authorsString}${TITLE_SEPARATOR}${normalizedTitle}${FILE_EXTENSION}`;
+    let finalName = baseName;
+    if (baseName.length > maxLengthForName) {
+        finalName = baseName.slice(0, maxLengthForName);
+        devWarn(
+            `Filename truncated: "${baseName}${FILE_EXTENSION}" -> "${finalName}${FILE_EXTENSION}" due to path length constraints.`,
+        );
+    }
 
-    // Calculate max length considering path constraints
-    const maxPathLength = 260; // Windows MAX_PATH limit
-    const availableLength = maxPathLength - highlightsFolder.length - 1; // -1 for path separator
-    const maxFileNameLength = availableLength - FILE_EXTENSION.length;
-
-    // Truncate if necessary
-    return fileName.length > availableLength
-        ? `${fileName.slice(0, maxFileNameLength)}${FILE_EXTENSION}`
-        : fileName;
+    return `${finalName}${FILE_EXTENSION}`;
 }
 
-function normalizeFileName(fileName: string): string {
-    return fileName.replace(/[\\/:*?"<>|]/g, "_").trim();
+export function normalizeFileNamePiece(
+    piece: string | undefined | null,
+): string {
+    if (!piece) return "";
+    // Remove invalid file system characters, trim, replace multiple spaces/underscores
+    return piece
+        .replace(/[\\/:*?"<>|#%&{}[\]]/g, "_") // More comprehensive removal list
+        .replace(/\s+/g, " ") // Consolidate whitespace
+        .trim();
 }
 
-export function getFileNameWithoutExt(filePath: string): string {
-    const fileName = basename(filePath);
+export function getFileNameWithoutExt(filePath: string | undefined): string {
+    if (!filePath) return "";
+    const fileName = basename(filePath); // Use basename to get just the file part
     const lastDotIndex = fileName.lastIndexOf(".");
-    return lastDotIndex === -1 ? fileName : fileName.slice(0, lastDotIndex);
+    // If no dot, or dot is the first character (hidden file like .git), return full name
+    if (lastDotIndex <= 0) return fileName;
+    return fileName.slice(0, lastDotIndex);
 }
 
 // Utility to parse pos0/pos1
 const positionCache = new Map<string, { node: string; offset: number }>();
-function parsePosition(pos: string | undefined) {
+export function parsePosition(
+    pos: string | undefined,
+): { node: string; offset: number } | null {
     if (!pos) return null;
     const cached = positionCache.get(pos);
     if (cached) return cached;
+
+    // Regex to capture base node path and offset
     const match = pos.match(/^(.+)\.(\d+)$/);
     if (!match) {
-        devWarn(`Invalid position format: ${pos}`);
+        // devWarn(`Invalid position format: ${pos}`); // Keep logging minimal if too noisy
         return null;
     }
+
     const [, node, offsetStr] = match;
     const offset = Number.parseInt(offsetStr, 10);
+
     if (Number.isNaN(offset)) {
-        devWarn(`Invalid offset in position: ${pos}`);
+        // devWarn(`Invalid offset in position: ${pos}`);
         return null;
     }
-    devLog(`Parsed position: ${pos} -> node=${node}, offset=${offset}`);
-    positionCache.set(pos, { node, offset });
-    return { node, offset };
+
+    const result = { node, offset };
+    // positionCache.set(pos, result); // Add caching if needed
+    return result;
 }
 
 export function parseCfi(cfi: string): CfiParts | null {
@@ -220,68 +224,73 @@ export function parseCfi(cfi: string): CfiParts | null {
     };
 }
 
-function areHighlightsSuccessive(
-    h1: Annotation,
-    h2: Annotation,
+export function areHighlightsSuccessive(
+    h1: Annotation | undefined,
+    h2: Annotation | undefined,
     maxGap = 5,
 ): boolean {
-    if (h1.pageno !== h2.pageno || h1.chapter !== h2.chapter) {
-        devLog(
-            `Not successive: different page (${h1.pageno} vs ${h2.pageno}) or chapter (${h1.chapter} vs ${h2.chapter})`,
-        );
+    if (!h1 || !h2) {
         return false;
     }
 
-    const pos1 = parsePosition(h1.pos1);
-    const pos2 = parsePosition(h2.pos0);
-    if (!pos1 || !pos2) {
-        devLog(
-            `Not successive: invalid positions for h1.pos1=${h1.pos1} or h2.pos0=${h2.pos0}`,
-        );
+    // Must be on the same page
+    if (h1.pageno !== h2.pageno) {
+        // devLog(`Not successive: different page (${h1.pageno} vs ${h2.pageno})`);
         return false;
     }
 
-    if (pos1.node !== pos2.node) {
-        devLog(
-            `Not successive: different nodes (${pos1.node} vs ${pos2.node})`,
-        );
+    const chapter1 = h1.chapter ?? ""; // Treat undefined as empty string for comparison
+    const chapter2 = h2.chapter ?? "";
+    if (chapter1 !== chapter2) {
+        // devLog(`Not successive: different chapter ('${chapter1}' vs '${chapter2}')`);
         return false;
     }
 
-    const gap = pos2.offset - pos1.offset;
-    const isSuccessive = gap >= -50 && gap <= maxGap;
-    devLog(
-        `Checking successive: h1.pos1.offset=${pos1.offset}, h2.pos0.offset=${pos2.offset}, gap=${gap}, isSuccessive=${isSuccessive}`,
-    );
-    return isSuccessive;
+    // Parse end position of h1 and start position of h2
+    const pos1_end = parsePosition(h1.pos1);
+    const pos2_start = parsePosition(h2.pos0);
+
+    // If positions are invalid, cannot determine succession based on position
+    if (!pos1_end || !pos2_start) {
+        // devLog(`Not successive: invalid positions h1.pos1=${h1.pos1} or h2.pos0=${h2.pos0}`);
+        return false;
+    }
+
+    // Must be within the same base node (e.g., same paragraph text node)
+    if (pos1_end.node !== pos2_start.node) {
+        // devLog(`Not successive: different nodes (${pos1_end.node} vs ${pos2_start.node})`);
+        return false;
+    }
+
+    // Check if the start of the second highlight is before or slightly after the end of the first.
+    // This handles adjacency (gap=1), exact continuation (gap=0), overlap (gap < 0),
+    // and small gaps (gap <= maxGap).
+    const isPositionalSuccessive =
+        pos2_start.offset <= pos1_end.offset + maxGap;
+
+    // devLog(`Successive Check: h1(end=${pos1_end.offset}) vs h2(start=${pos2_start.offset}). Condition: ${pos2_start.offset} <= ${pos1_end.offset + maxGap}. Result: ${isPositionalSuccessive}`);
+
+    return isPositionalSuccessive;
 }
 
 export function compareAnnotations(a: Annotation, b: Annotation): number {
-    // 1. Compare by pageno first
-    if (a.pageno !== b.pageno) {
-        return a.pageno - b.pageno;
-    }
-    // 2. If page numbers are equal, compare by chapter
-    if (a.chapter !== b.chapter) {
+    if (!a || !b) return 0;
+    if (a.pageno !== b.pageno) return a.pageno - b.pageno;
+    if ((a.chapter ?? "") !== (b.chapter ?? "")) {
         return (a.chapter ?? "").localeCompare(b.chapter ?? "");
     }
-    // 3. If chapters are equal, compare by position (pos0) if available
-    const aPos = a.pos0 ? parseCfi(a.pos0) : null;
-    const bPos = b.pos0 ? parseCfi(b.pos0) : null;
-    if (aPos?.fullPath && bPos?.fullPath) {
-        if (aPos.fullPath !== bPos.fullPath) {
-            return aPos.fullPath.localeCompare(bPos.fullPath);
-        }
-        if (aPos.offset !== bPos.offset) {
-            return aPos.offset - bPos.offset;
-        }
-    } else if (aPos?.fullPath) {
-        return -1;
-    } else if (bPos?.fullPath) {
-        return 1;
-    }
-    // 4. As a final tiebreaker, compare by datetime
-    return new Date(a.datetime).getTime() - new Date(b.datetime).getTime();
+    const aPos0 = a.pos0;
+    const bPos0 = b.pos0;
+    if (aPos0 && bPos0) {
+        if (aPos0 !== bPos0) return aPos0.localeCompare(bPos0);
+    } else if (aPos0) return -1; // Sort annotations with position first
+    else if (bPos0) return 1;
+
+    // Fallback to datetime
+    const dateA = a.datetime ? new Date(a.datetime).getTime() : 0;
+    const dateB = b.datetime ? new Date(b.datetime).getTime() : 0;
+    if (Number.isNaN(dateA) || Number.isNaN(dateB)) return 0;
+    return dateA - dateB;
 }
 
 // Group annotations by paragraph proximity
@@ -391,11 +400,6 @@ function formatHighlightGroup(
     const header = `*${
         formatDate(earliestDate?.toISOString() || deduplicatedGroup[0].datetime)
     } - Page ${pageno}*\n\n`;
-    //    const header = `
-    // <div class="highlight-header">
-    //     <span class="highlight-date">${formatDate(earliestDate?.toISOString() || deduplicatedGroup[0].datetime)}</span>
-    //     <span class="highlight-page">Page ${pageno}</span>
-    // </div>`;
 
     const sortedGroup = [...deduplicatedGroup].sort((a, b) => {
         const posA = parsePosition(a.pos0);
@@ -460,35 +464,43 @@ function formatHighlightGroup(
 }
 
 export function formatAllHighlights(annotations: Annotation[]): string {
-    const settings = DEFAULT_SETTINGS;
-    const groups = groupAnnotationsByParagraph(
-        annotations,
-        settings.maxTimeGapMinutes,
-    );
-    devLog(`Total groups created: ${groups.length}`);
-
-    // Group by chapter first
-    const chapterGroups = new Map<string, Annotation[][]>();
-    for (const group of groups) {
-        const chapter = group[0].chapter || "Unknown Chapter";
-        if (!chapterGroups.has(chapter)) {
-            chapterGroups.set(chapter, []);
+    // Group annotations by chapter
+    const groupedByChapter = annotations.reduce((acc, annotation) => {
+        const chapter = annotation.chapter || "Uncategorized";
+        if (!acc[chapter]) {
+            acc[chapter] = [];
         }
-        chapterGroups.get(chapter)?.push(group);
-    }
+        acc[chapter].push(annotation);
+        return acc;
+    }, {} as Record<string, Annotation[]>);
 
     let result = "";
-    for (const [chapter, chapterAnnotationGroups] of chapterGroups.entries()) {
-        result += `## ${chapter}\n\n`;
-        for (let i = 0; i < chapterAnnotationGroups.length; i++) {
-            const group = chapterAnnotationGroups[i];
-            result += formatHighlightGroup(group, i === 0);
+
+    // Iterate over chapters and format their highlights
+    for (
+        const [chapter, chapterHighlights] of Object.entries(groupedByChapter)
+    ) {
+        // Add chapter header (only once per chapter)
+        if (chapter && chapter !== "Uncategorized") {
+            result += `## ${chapter}\n\n`;
         }
+
+        // Format all highlights under this chapter
+        for (const highlight of chapterHighlights) {
+            result += `- ${highlight.text}\n`;
+            if (highlight.note) {
+                result += `  > ${highlight.note}\n`;
+            }
+        }
+
+        // Add a separator between chapters
+        result += "\n---\n\n";
     }
+
     return result;
 }
 
-function formatDate(dateStr: string): string {
+export function formatDate(dateStr: string): string {
     const date = new Date(dateStr);
     return date.toLocaleDateString("en-US", {
         year: "numeric",
@@ -535,7 +547,10 @@ function luminance([r, g, b]: [number, number, number]): number {
     return 0.2126 * a[0] + 0.7152 * a[1] + 0.0722 * a[2];
 }
 
-function getContrastTextColor(bgColor: string, isDarkTheme: boolean): string {
+export function getContrastTextColor(
+    bgColor: string,
+    isDarkTheme: boolean,
+): string {
     if (!bgColor) return isDarkTheme ? "#fff" : "#222";
 
     const lowerColor = bgColor.toLowerCase();

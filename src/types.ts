@@ -1,27 +1,18 @@
-import type {
-    BooleanLiteral,
-    Expression,
-    Identifier,
-    NumericLiteral,
-    StringLiteral,
-    TableConstructorExpression,
-} from "luaparse";
+import type { Expression } from "luaparse";
+import type { TFile } from "obsidian";
 
-// Common base types
-type BaseLuaExpression = Extract<
-    Expression,
-    StringLiteral | NumericLiteral | BooleanLiteral
->;
-
-type LuaKey = Extract<
-    Expression,
-    Identifier | BaseLuaExpression
->;
-
+// --- Lua Parser Related ---
 export type LuaValue = Extract<
     Expression,
-    BaseLuaExpression | TableConstructorExpression
+    | string
+    | number
+    | boolean
+    | Record<string, unknown>
+    | null
+    | undefined
 >;
+
+// --- Core Data Structures ---
 
 export interface BaseMetadata {
     title: string;
@@ -34,39 +25,6 @@ export interface BaseMetadata {
 
 export interface DocProps extends BaseMetadata {}
 
-export interface ReadingProgress {
-    percentComplete: number;
-    averageTimePerPage: number;
-    firstReadDate: Date | null;
-    lastReadDate: Date;
-    readingStatus: ReadingStatus;
-}
-
-export type ReadingStatus = "ongoing" | "completed" | "unstarted";
-
-export interface ReadingStats {
-    notes: number;
-    highlights: number;
-    pages: number;
-    total_read_time: number;
-    total_read_pages: number;
-}
-
-export interface BookStatistics extends BaseMetadata, ReadingStats {
-    id: number;
-    last_open: number;
-    md5: string;
-}
-
-// Session tracking
-export interface PageStatData {
-    id_book: number;
-    page: number;
-    start_time: number;
-    duration: number;
-    total_pages: number;
-}
-
 export interface Annotation {
     chapter?: string;
     datetime: string;
@@ -76,12 +34,44 @@ export interface Annotation {
     text?: string;
     note?: string;
     color?: string;
-    drawer?: "lighten" | "underscore" | "strikeout" | "invert"; // KOReader drawer styles
+    drawer?: "lighten" | "underscore" | "strikeout" | "invert";
     pos0?: string;
     pos1?: string;
 }
 
-// Metadata structure
+// --- Database Related ---
+
+export type ReadingStatus = "ongoing" | "completed" | "unstarted";
+
+export interface ReadingProgress {
+    percentComplete: number;
+    averageTimePerPage: number;
+    firstReadDate: Date | null;
+    lastReadDate: Date;
+    readingStatus: ReadingStatus;
+}
+
+// Represents data directly from the 'book' table joined with base metadata needs
+export interface BookStatistics extends BaseMetadata {
+    id: number;
+    md5: string;
+    last_open: number;
+    pages: number;
+    total_read_time: number;
+    total_read_pages: number;
+}
+
+// Represents data directly from the 'page_stat_data' table
+export interface PageStatData {
+    id_book: number;
+    page: number;
+    start_time: number;
+    duration: number;
+    total_pages: number;
+}
+
+// --- Combined Metadata Structure (Input for processing) ---
+
 export interface LuaMetadata {
     docProps: DocProps;
     pages?: number | null;
@@ -91,70 +81,79 @@ export interface LuaMetadata {
         readingSessions: PageStatData[];
         derived: ReadingProgress;
     };
-    frontmatter?: Frontmatter;
+    originalFilePath?: string;
 }
 
-// Frontmatter handling
-export interface FrontmatterBase extends BaseMetadata {
+// --- Frontmatter Data Structure ---
+
+export interface FrontmatterData {
+    title: string;
+    authors: string | string[];
+    description?: string;
+    keywords?: string | string[];
+    series?: string;
+    language?: string;
     pages?: number;
-    highlights?: number;
-    notes?: number;
-    progress?: string;
+    highlightCount?: number;
+    noteCount?: number;
     readingStatus?: ReadingStatus;
-}
-
-export interface FrontmatterTiming {
-    totalReadTime?: string;
-    totalReadPages?: number;
+    progress?: string;
     lastRead?: string;
-    averageTimePerPage?: string;
     firstRead?: string;
-}
-
-export interface Frontmatter extends FrontmatterBase, FrontmatterTiming {
+    totalReadTime?: string;
+    averageTimePerPage?: string;
     [key: string]: string | string[] | number | undefined;
 }
 
-// Settings interfaces
+export interface ParsedFrontmatter {
+    [key: string]: unknown;
+}
+
+export interface FrontmatterContent {
+    content: string;
+    frontmatter: ParsedFrontmatter;
+}
+
+// --- Settings Related Types ---
+
 export interface FrontmatterSettings {
     disabledFields: string[];
     customFields: string[];
 }
 
+export interface KoReaderTemplateSettings {
+    useCustomTemplate: boolean;
+    source: "vault" | "external" | string;
+    selectedTemplate: string;
+}
+
+// Main Plugin Settings Interface
 export interface KoReaderHighlightImporterSettings {
     koboMountPoint: string;
     excludedFolders: string[];
     allowedFileTypes: string[];
     highlightsFolder: string;
     debugMode: boolean;
+    debugLevel: 0 | 1 | 2 | 3; // 0=None, 1=Info, 2=Warn, 3=Error
     enableFullDuplicateCheck: boolean;
     frontmatter: FrontmatterSettings;
-    debugLevel: number;
-    maxHighlightGap: number; // Max character gap for successive highlights (default: 5)
-    maxTimeGapMinutes: number; // Max time gap for grouping by session (default: 10)
-    mergeOverlappingHighlights: boolean; // Enable/disable overlap merging (default: true)
+    maxHighlightGap: number;
+    maxTimeGapMinutes: number;
+    mergeOverlappingHighlights: boolean;
+    template: KoReaderTemplateSettings;
 }
 
-// Constants
-export const DEFAULT_SETTINGS: KoReaderHighlightImporterSettings = {
-    koboMountPoint: "",
-    excludedFolders: [".adds", ".kobo"],
-    allowedFileTypes: ["epub", "pdf", "mobi"],
-    highlightsFolder: "KoReader Highlights",
-    debugMode: false,
-    enableFullDuplicateCheck: false,
-    frontmatter: {
-        disabledFields: [],
-        customFields: [],
-    },
-    debugLevel: 0,
-    maxHighlightGap: 5,
-    maxTimeGapMinutes: 10,
-    mergeOverlappingHighlights: true,
-};
+// --- UI / Modal Related Types ---
 
-// Duplicate handling
 export type DuplicateChoice = "replace" | "merge" | "keep-both" | "skip";
+
+export interface DuplicateMatch {
+    file: TFile;
+    matchType: "exact" | "updated" | "divergent";
+    newHighlights: number;
+    modifiedHighlights: number;
+    luaMetadata: LuaMetadata;
+}
 
 export interface IDuplicateHandlingModal {
     openAndGetChoice(): Promise<{

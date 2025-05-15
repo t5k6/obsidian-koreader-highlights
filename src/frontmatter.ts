@@ -1,189 +1,85 @@
-import type {
-    DocProps,
-    Frontmatter,
-    FrontmatterSettings,
-    LuaMetadata,
-} from "./types";
-import {
-    formatPercent,
-    formatUnixTimestamp,
-    secondsToHoursMinutes,
-} from "./utils/format-utils";
-import { devError } from "./utils/logging";
-
-export function createFrontmatterData(
-    metadata: LuaMetadata,
-    settings: FrontmatterSettings,
-): Frontmatter {
-    const { docProps, statistics } = metadata;
-    const frontmatter: Frontmatter = {
-        title: docProps?.title ?? "",
-        authors: docProps?.authors ?? "",
-    };
-    const disabled = new Set(settings?.disabledFields || []);
-
-    // 1. Auto-include DocProps fields
-    for (const [key, value] of Object.entries(docProps || {})) {
-        if (!disabled.has(key) && isValidValue(value)) {
-            frontmatter[key] = formatFieldValue(key, value);
-        }
-    }
-
-    // 2. Add statistics if available and not disabled
-    if (statistics) {
-        const statMappings = {
-            pages: statistics.book.pages,
-            highlights: statistics.book.highlights,
-            notes: statistics.book.notes,
-            lastRead: statistics.book.last_open,
-            totalReadTime: statistics.book.total_read_time,
-            progress: statistics.derived.percentComplete,
-            readingStatus: statistics.derived.readingStatus,
-            averageTimePerPage: statistics.derived.averageTimePerPage,
-        };
-
-        for (const [key, value] of Object.entries(statMappings)) {
-            if (!disabled.has(key) && isValidStatValue(value)) {
-                frontmatter[key] = formatStatValue(key, value);
-            }
-        }
-    }
-
-    // Safe custom fields handling
-    const customFields = Array.isArray(settings?.customFields)
-        ? settings.customFields
-        : [];
-
-    for (const field of customFields) {
-        try {
-            const value = docProps[field as keyof DocProps];
-            if (!disabled.has(field) && isValidFrontmatterValue(value)) {
-                frontmatter[field] = formatFieldValue(field, value as string);
-            }
-        } catch (e) {
-            devError(`Skipping invalid custom field ${field}:`, e);
-        }
-    }
-
-    return frontmatter;
-}
-function isValidFrontmatterValue(value: unknown): boolean {
-    return typeof value === "string" && value.trim().length > 0;
-}
-
-const HTML_TAG_REGEX = /<[^>]+>/g;
-const HTML_ENTITY_REGEX = /&(#39|#x27|amp|quot|lt|gt);/g;
-
-const HTML_ENTITY_MAP: Record<string, string> = {
-    "#39": "'",
-    "#x27": "'",
-    "amp": "&",
-    "quot": '"',
-    "lt": "<",
-    "gt": ">",
-};
-
-function decodeHtmlEntities(str: string): string {
-    return str.replace(
-        HTML_ENTITY_REGEX,
-        (_, entity) => HTML_ENTITY_MAP[entity] || "",
-    );
-}
-
-function formatFieldValue(key: string, value: string): string {
-    switch (key) {
-        case "authors":
-            return `[[${value}]]`;
-        case "description":
-            return decodeHtmlEntities(value.replace(HTML_TAG_REGEX, ""));
-        default:
-            return value;
-    }
-}
-
-function isValidValue(value: unknown): boolean {
-    return typeof value === "string" ? value.trim().length > 0 : !!value;
-}
-
-function isValidStatValue(value: unknown): boolean {
-    return value !== undefined && value !== null;
-}
-
-function formatStatValue(key: string, value: unknown): string | number {
-    switch (key) {
-        case "lastRead":
-            return formatUnixTimestamp(value as number);
-        case "totalReadTime":
-            return secondsToHoursMinutes(value as number);
-        case "averageTimePerPage":
-            return secondsToHoursMinutes((value as number) * 60);
-        case "progress":
-            return formatPercent(value as number);
-        default:
-            return value as string | number;
-    }
-}
-
-/**
- * Mapping from internal field names to friendly frontmatter keys.
- */
-const friendlyKeyMap: Record<string, string> = {
-    title: "Title",
-    authors: "Author(s)",
-    pages: "Page Count",
-    highlights: "Highlights",
-    notes: "Notes",
-    lastRead: "Last Read Date",
-    totalReadTime: "Total Read Duration",
-    progress: "Reading Progress",
-    readingStatus: "Status",
-    averageTimePerPage: "Avg. Time Per Page",
-};
-
-/**
- * Convert a camelCase string to a space-separated string (with title-case).
- */
-function camelToTitle(str: string): string {
-    return str
-        .replace(/([a-z])([A-Z])/g, "$1 $2")
-        .replace(/^./, (c) => c.toUpperCase());
-}
-
-/**
- * Returns a user-friendly key for the frontmatter.
- * Falls back to a title-cased version of the key if not explicitly mapped.
- */
-function getFriendlyKey(key: string): string {
-    return friendlyKeyMap[key] || camelToTitle(key);
-}
-
 export interface ParsedFrontmatter {
     [key: string]: string | string[] | number | undefined;
 }
 
 export function extractFrontmatter(content: string): ParsedFrontmatter {
     const frontmatter: ParsedFrontmatter = {};
-    const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+    // Regex to find frontmatter block (--- block ---)
+    const frontmatterMatch = content.match(
+        /^---\s*[\r\n]([\s\S]*?)[\r\n]---\s*[\r\n]?/,
+    );
 
-    if (!frontmatterMatch) return frontmatter;
+    if (!frontmatterMatch || !frontmatterMatch[1]) {
+        return frontmatter;
+    }
 
-    const lines = frontmatterMatch[1].split("\n");
-    for (const line of lines) {
-        const match = line.match(/^(\w+):\s*(.*)/);
-        if (match) {
-            const key = match[1].trim();
-            let value = match[2].trim();
-            if (/^['"].*['"]$/.test(value)) {
-                value = value.slice(1, -1);
-            }
-            if (value.startsWith("[") && value.endsWith("]")) {
-                frontmatter[key] = value.slice(1, -1).split(",").map((v) =>
-                    v.trim()
-                );
-            } else {
-                frontmatter[key] = value;
-            }
+    const yamlLines = frontmatterMatch[1].split(/[\r\n]+/);
+
+    for (const line of yamlLines) {
+        const trimmedLine = line.trim();
+        if (!trimmedLine || trimmedLine.startsWith("#")) continue;
+
+        const colonIndex = trimmedLine.indexOf(":");
+        if (colonIndex === -1) {
+            continue;
         }
+
+        const key = trimmedLine.substring(0, colonIndex).trim();
+        let valueString = trimmedLine.substring(colonIndex + 1).trim();
+
+        let parsedValue: any;
+
+        // Handle explicit quotes for strings
+        if (
+            (valueString.startsWith('"') && valueString.endsWith('"')) ||
+            (valueString.startsWith("'") && valueString.endsWith("'"))
+        ) {
+            parsedValue = valueString.slice(1, -1)
+                .replace(/\\"/g, '"').replace(/\\'/g, "'"); // Handle escaped quotes within
+        } // Handle lists (simple comma-separated or YAML flow sequence)
+        else if (valueString.startsWith("[") && valueString.endsWith("]")) {
+            try {
+                // Attempt to parse as JSON array, then clean up strings
+                const items = JSON.parse(valueString.replace(/'/g, '"')); // Replace single with double for JSON
+                if (Array.isArray(items)) {
+                    parsedValue = items.map((item) =>
+                        typeof item === "string" ? item.trim() : item
+                    );
+                } else {
+                    parsedValue = valueString; // Fallback to raw string
+                }
+            } catch (e) {
+                // Fallback for simple comma-separated lists if JSON parse fails
+                parsedValue = valueString.slice(1, -1).split(",")
+                    .map((v) => v.trim().replace(/^['"]|['"]$/g, "")); // Trim and remove outer quotes from items
+            }
+        } // Handle booleans
+        else if (valueString.toLowerCase() === "true") {
+            parsedValue = true;
+        } else if (valueString.toLowerCase() === "false") {
+            parsedValue = false;
+        } // Handle null
+        else if (
+            valueString.toLowerCase() === "null" || valueString === "~" ||
+            valueString === ""
+        ) {
+            // Treat empty string value as null for frontmatter
+            parsedValue = null;
+        } // Handle numbers
+        else if (
+            !Number.isNaN(Number(valueString)) && valueString.trim() !== ""
+        ) {
+            // Check if it looks like a date string "YYYY-MM-DD" before parsing as number
+            if (!/^\d{4}-\d{2}-\d{2}/.test(valueString)) {
+                parsedValue = Number(valueString);
+            } else {
+                parsedValue = valueString; // Keep as string if it looks like a date
+            }
+        } // Default to string
+        else {
+            parsedValue = valueString;
+        }
+        frontmatter[key] = parsedValue;
     }
     return frontmatter;
 }
@@ -196,64 +92,23 @@ export interface FrontmatterContent {
 export function parseFrontmatterAndContent(
     content: string,
 ): FrontmatterContent {
-    const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---\n\n/);
+    // Regex to match frontmatter block and the content after it
+    // Allows for optional newlines after the closing '---'
+    const frontmatterMatch = content.match(
+        /^---\s*[\r\n]([\s\S]*?)[\r\n]---\s*([\r\n]{0,2})([\s\S]*)$/,
+    );
+
     if (!frontmatterMatch) {
+        // No frontmatter found, or format is incorrect
         return { content, frontmatter: {} };
     }
-    const frontmatterString = frontmatterMatch[1];
-    const frontmatter = extractFrontmatter(`---\n${frontmatterString}\n---`);
-    return { content: content.slice(frontmatterMatch[0].length), frontmatter };
-}
 
-/**
- * Format the frontmatter YAML. Uses friendly key names.
- */
-export function formatFrontmatter(
-    data: Frontmatter | ParsedFrontmatter,
-    options: {
-        useFriendlyKeys: boolean;
-        sortKeys: boolean;
-        escapeStrings: boolean;
-    } = {
-        useFriendlyKeys: true,
-        sortKeys: true,
-        escapeStrings: true,
-    },
-): string {
-    const yamlLines: string[] = ["---"];
-    const entries = options.sortKeys
-        ? Object.entries(data).sort(([a], [b]) => a.localeCompare(b))
-        : Object.entries(data);
+    // frontmatterMatch[1] is the YAML block
+    // frontmatterMatch[3] is the content after the frontmatter and optional newlines
+    const yamlBlock = frontmatterMatch[1];
+    const bodyContent = frontmatterMatch[3] || ""; // Ensure bodyContent is a string
 
-    for (const [key, value] of entries) {
-        const formattedKey = options.useFriendlyKeys
-            ? getFriendlyKey(key)
-            : key;
+    const frontmatter = extractFrontmatter(`---\n${yamlBlock}\n---`); // Re-add markers for extractFrontmatter
 
-        const safeKey = /[\s:]/.test(formattedKey)
-            ? `"${formattedKey}"`
-            : formattedKey;
-
-        if (Array.isArray(value)) {
-            const items = options.escapeStrings
-                ? value.map((v) => `"${escapeYAMLString(String(v))}"`)
-                : value.map(String);
-            yamlLines.push(`${safeKey}: [${items.join(", ")}]`);
-        } else if (typeof value === "string") {
-            const escaped = options.escapeStrings
-                ? `"${escapeYAMLString(value)}"`
-                : (value.includes(":") || value.includes("\n"))
-                ? `"${value.replace(/"/g, '\\"')}"`
-                : value;
-            yamlLines.push(`${safeKey}: ${escaped}`);
-        } else {
-            yamlLines.push(`${safeKey}: ${value}`);
-        }
-    }
-
-    yamlLines.push("---\n");
-    return yamlLines.join("\n");
-}
-function escapeYAMLString(str: string): string {
-    return str.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    return { content: bodyContent, frontmatter };
 }

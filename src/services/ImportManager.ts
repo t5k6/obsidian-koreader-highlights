@@ -2,6 +2,7 @@ import path from "node:path";
 import { type App, normalizePath, Notice, TFile } from "obsidian";
 import type {
     Annotation,
+    DuplicateChoice,
     KoReaderHighlightImporterSettings,
     LuaMetadata,
 } from "../types";
@@ -37,15 +38,6 @@ export class ImportManager {
     async importHighlights(): Promise<void> {
         devLog("Starting KoReader highlight import process...");
 
-        const isMountPointValid = await this.sdrFinder.checkMountPoint();
-        if (!isMountPointValid) {
-            new Notice(
-                "Mount point is not valid or accessible. Please check settings.",
-            );
-            devError("Import process aborted: Invalid mount point.");
-            return;
-        }
-
         const modal = new ProgressModal(this.app);
         modal.open();
 
@@ -66,6 +58,9 @@ export class ImportManager {
             devLog(`Found ${totalFiles} SDR files to process.`);
             let completed = 0;
             let errors = 0;
+            let created = 0;
+            let merged = 0;
+            let skipped = 0;
 
             // Reset duplicate handler state for this import session
             this.duplicateHandler.resetApplyToAll();
@@ -76,7 +71,7 @@ export class ImportManager {
                 devLog(`Processing SDR: ${sdrPath}`);
 
                 try {
-                    // 1. Parse Metadata (use cache within parser)
+                    // 1. Parse Metadata
                     const luaMetadata = await this.metadataParser.parseFile(
                         sdrPath,
                     );
@@ -85,7 +80,7 @@ export class ImportManager {
                             `Skipping SDR due to parsing error or no metadata: ${sdrPath}`,
                         );
                         errors++;
-                        continue; // Skip this file
+                        continue;
                     }
 
                     // 2. Fetch Statistics
@@ -115,24 +110,25 @@ export class ImportManager {
                         }
                     }
 
-                    // 3. Handle missing Title/Author fallback
-                    if (
-                        !luaMetadata.docProps.authors &&
-                        !luaMetadata.docProps.title
-                    ) {
-                        const fallbackName = getFileNameWithoutExt(sdrPath); // Use base name of SDR folder
-                        luaMetadata.docProps.authors = fallbackName;
+                    // 3. Handle missing Title gracefully (leave authors empty)
+                    if (!luaMetadata.docProps.title) {
+                        const fallbackName = getFileNameWithoutExt(sdrPath);
                         luaMetadata.docProps.title = fallbackName;
                         devLog(
-                            `Using fallback name "${fallbackName}" for title/author.`,
+                            `Metadata was missing a title. Using fallback name "${fallbackName}" for the title.`,
                         );
                     }
 
-                    // 4. Save Highlights (includes generation & duplicate check)
-                    await this.saveHighlightsToFile(
+                    // 4. Save Highlights and get summary
+                    const fileSummary = await this.saveHighlightsToFile(
                         luaMetadata,
                         path.basename(sdrPath),
                     );
+
+                    // Update summary counts
+                    created += fileSummary.created;
+                    merged += fileSummary.merged;
+                    skipped += fileSummary.skipped;
                 } catch (fileError) {
                     this.handleFileError(fileError, sdrPath);
                     errors++;
@@ -142,15 +138,12 @@ export class ImportManager {
                 }
             }
 
-            if (errors > 0) {
-                new Notice(
-                    `KOReader Import: Completed with ${errors} error(s). Check console for details.`,
-                );
-            } else {
-                new Notice(
-                    "KOReader Import: Highlights imported successfully!",
-                );
-            }
+            // ---------- MULTI-LINE SUMMARY NOTICE -------------
+            const noticeMsg = `KOReader Import finished
+${created} new • ${merged} merged • ${skipped} skipped • ${errors} error(s)`;
+            new Notice(noticeMsg);
+            // ------------------------------------------------------
+
             devLog(
                 `Import process finished. Processed: ${completed}, Errors: ${errors}`,
             );
@@ -167,20 +160,22 @@ export class ImportManager {
     private async saveHighlightsToFile(
         luaMetadata: LuaMetadata,
         originalSdrName: string,
-    ): Promise<void> {
+    ): Promise<{ created: number; merged: number; skipped: number }> {
+        const summary = { created: 0, merged: 0, skipped: 0 };
         const annotations = luaMetadata.annotations || [];
         if (annotations.length === 0) {
             devLog(
                 `No annotations found for "${luaMetadata.docProps.title}". Skipping file creation.`,
             );
-            return;
+            summary.skipped++;
+            return summary;
         }
 
         // 1. Generate File Name
         const fileName = generateObsidianFileName(
             luaMetadata.docProps,
             this.settings.highlightsFolder,
-            originalSdrName, // Pass the SDR name for fallback
+            originalSdrName,
         );
         const targetFilePath = normalizePath(
             `${this.settings.highlightsFolder}/${fileName}`,
@@ -199,8 +194,6 @@ export class ImportManager {
         devLog(`Generated content for: ${fileName}`);
 
         // 3. Handle Duplicates & Save
-        let fileCreatedOrModified = false;
-
         const potentialDuplicates = await this.duplicateHandler
             .findPotentialDuplicates(luaMetadata.docProps);
 
@@ -208,31 +201,43 @@ export class ImportManager {
             devLog(
                 `Found ${potentialDuplicates.length} potential duplicate(s) for: ${fileName}`,
             );
-            fileCreatedOrModified = await this.processDuplicates(
+
+            const choice = await this.processDuplicates(
                 potentialDuplicates,
                 annotations,
                 luaMetadata,
                 fullContent,
                 targetFilePath,
             );
-        }
 
-        // If no duplicates were found, or if 'keep-both'/'skip' didn't result in modification/creation of the target path
-        if (!fileCreatedOrModified) {
-            const existingFile = this.app.vault.getAbstractFileByPath(
-                targetFilePath,
-            );
-            if (!existingFile) {
+            // Handle all possible choices explicitly
+            if (choice === "skip") {
                 devLog(
-                    `No duplicates handled file creation for ${targetFilePath}. Creating file.`,
+                    `Skipping file creation for "${luaMetadata.docProps.title}" as per user choice.`,
                 );
-                await this.createOrUpdateFile(targetFilePath, fullContent);
-            } else {
-                devLog(
-                    `Target file ${targetFilePath} already exists and was potentially handled by duplicate process (or skipped).`,
-                );
+                summary.skipped++;
+                return summary;
+            }
+            if (choice === "replace" || choice === "merge") {
+                summary.merged++;
+                return summary;
+            }
+            if (choice === "keep-both") {
+                // File already created by DuplicateHandler
+                summary.created++;
+                return summary;
             }
         }
+
+        // Only create new file if no duplicates were found
+        const outcome = await this.createOrUpdateFile(
+            targetFilePath,
+            fullContent,
+        );
+        if (outcome === "created") summary.created++;
+        else summary.merged++;
+
+        return summary;
     }
 
     private async processDuplicates(
@@ -241,9 +246,7 @@ export class ImportManager {
         luaMetadata: LuaMetadata,
         newContent: string,
         intendedTargetPath: string,
-    ): Promise<boolean> {
-        let fileHandled = false;
-
+    ): Promise<DuplicateChoice | null> {
         for (const existingFile of potentialDuplicates) {
             devLog(`Analyzing duplicate: ${existingFile.path}`);
             const analysis = await this.duplicateHandler.analyzeDuplicate(
@@ -255,34 +258,18 @@ export class ImportManager {
             const { choice, applyToAll } = await this.duplicateHandler
                 .handleDuplicate(analysis, newContent);
 
-            // Determine if this specific choice resulted in handling the file
-            if (choice === "replace" || choice === "merge") {
-                fileHandled = true;
-                devLog(
-                    `Duplicate handled via '${choice}' for: ${existingFile.path}`,
-                );
-            } else if (choice === "keep-both") {
-                fileHandled = true;
-                devLog(`Duplicate handled via '${choice}', new file created.`);
-            } else { // choice === 'skip'
-                devLog(`Duplicate skipped for: ${existingFile.path}`);
-            }
-
-            // If user chose 'Apply to All', we break the loop if a definitive action was taken.
-            // If they chose 'skip' and 'apply to all', we continue skipping.
-            // If they chose 'keep-both' and 'apply to all', new files will be made for remaining duplicates.
-            if (applyToAll && choice !== "skip") {
-                // Let DuplicateHandler manage the applyToAll state internally.
+            // Return all choices including 'keep-both'
+            if (choice) {
+                return choice;
             }
         }
-
-        return fileHandled;
+        return null;
     }
 
     private async createOrUpdateFile(
         filePath: string,
         content: string,
-    ): Promise<void> {
+    ): Promise<"created" | "modified"> {
         try {
             await ensureParentDirectory(this.app.vault, filePath);
             const file = this.app.vault.getAbstractFileByPath(filePath);
@@ -290,6 +277,7 @@ export class ImportManager {
             if (file instanceof TFile) {
                 devLog(`Modifying existing file: ${filePath}`);
                 await this.app.vault.modify(file, content);
+                return "modified";
             } else {
                 const uniqueFilePath = await generateUniqueFilePath(
                     this.app.vault,
@@ -304,6 +292,7 @@ export class ImportManager {
                     devLog(`Creating new file: ${uniqueFilePath}`);
                 }
                 await this.app.vault.create(uniqueFilePath, content);
+                return "created";
             }
         } catch (error) {
             devError(`Error creating/updating file ${filePath}:`, error);

@@ -15,7 +15,7 @@ export async function generateUniqueFilePath(
 
     let counter = 0;
     let currentPath = normalizePath(`${normalizedBaseDir}/${originalFileName}`);
-    const extSeparator = originalFileName.includes(".") ? "." : ""; // Handle files with no extension
+    const extSeparator = originalFileName.includes(".") ? "." : "";
     const baseName = originalFileName.substring(
         0,
         originalFileName.lastIndexOf(extSeparator),
@@ -34,18 +34,37 @@ export async function generateUniqueFilePath(
     return currentPath;
 }
 
+export async function ensureFolderExists(
+    vault: Vault,
+    folderPath: string,
+): Promise<void> {
+    const normalized = normalizePath(folderPath);
+
+    // Fast in-memory check
+    if (vault.getFolderByPath(normalized)) return;
+
+    try {
+        const stat = await vault.adapter.stat(normalized).catch(() => null);
+
+        if (stat) {
+            if (stat.type === "folder") return;
+            throw new Error(`"${normalized}" exists but is not a folder.`);
+        }
+
+        await vault.createFolder(normalized);
+    } catch (err) {
+        handleFileSystemError("creating folder", normalized, err, {
+            shouldThrow: true,
+        });
+    }
+}
+
 export async function ensureParentDirectory(
     vault: Vault,
     filePath: string,
 ): Promise<void> {
-    const dirPath = normalizePath(
-        filePath.substring(0, filePath.lastIndexOf("/")),
-    );
-    const dirExists = vault.getFolderByPath(dirPath);
-
-    if (!dirExists) {
-        await vault.createFolder(dirPath);
-    }
+    const dir = normalizePath(filePath.substring(0, filePath.lastIndexOf("/")));
+    await ensureFolderExists(vault, dir);
 }
 
 export function handleFileSystemError(
@@ -72,7 +91,7 @@ export function handleFileSystemError(
 
     if (errorCode) {
         detailedMessage += ` (Code: ${errorCode})`;
-        switch (errorCode) { 
+        switch (errorCode) {
             case "ENOENT":
                 userMessage = userMessage ?? `Not found: ${filePath}`;
                 detailedMessage =
@@ -100,9 +119,7 @@ export function handleFileSystemError(
     }
 
     userMessage = userMessage ??
-        `Failed to ${
-            operationDescription.split(" ")[0]
-        } ${filePath}. Check console.`;
+        `Failed to ${operationDescription} ${filePath}. Check console.`;
 
     devError(detailedMessage, baseError.stack);
     new Notice(userMessage, 7000);

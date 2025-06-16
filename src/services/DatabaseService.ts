@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import { access } from "node:fs/promises";
 import path from "node:path";
-import initSqlJs from "sql.js";
+import initSqlJs, { SqlJsStatic } from "sql.js";
 import { SQLITE_WASM } from "../binaries/sql-wasm-base64";
 import type {
     BookStatistics,
@@ -19,12 +19,21 @@ type SQLDatabase = InstanceType<
 
 export class DatabaseService {
     private db: SQLDatabase | null = null;
-    private dbPath: string | null = null;
-    private currentMountPoint: string | null = null;
+    private initializing: Promise<void> | null = null;
+    private static sqlJsInstance: SqlJsStatic | null = null;
+    private static sqlJsInit: Promise<SqlJsStatic> | null = null;
+    private get dbPath(): string | null {
+        if (!this.settings.koboMountPoint) return null;
+        return path.join(
+            this.settings.koboMountPoint,
+            ".adds",
+            "koreader",
+            "settings",
+            "statistics.sqlite3",
+        );
+    }
 
     constructor(private settings: KoReaderHighlightImporterSettings) {
-        this.currentMountPoint = this.settings.koboMountPoint;
-        this.updateDbPath();
     }
 
     private async findDeviceRoot(startPath: string): Promise<string | null> {
@@ -59,123 +68,80 @@ export class DatabaseService {
         return null; // Could not find a suitable root
     }
 
-    private async updateDbPath(): Promise<void> {
-        if (this.settings.koboMountPoint) {
-            let deviceRoot: string | null = null;
+    /** Lazily load + cache sql.js, guarding against double-initialisation. */
+    private static async getSqlJs(): Promise<SqlJsStatic> {
+        if (DatabaseService.sqlJsInstance) return DatabaseService.sqlJsInstance;
 
-            if (process.platform === "win32") {
-                // On Windows, use the drive root (e.g., G:\) as the base for finding .adds
-                const parsedPath = path.parse(this.settings.koboMountPoint);
-                const driveRoot = parsedPath.root ||
-                    this.settings.koboMountPoint; // e.g., C:\
-                // We still need to confirm .adds is on this driveRoot for KoReader
-                deviceRoot = await this.findDeviceRoot(driveRoot);
-                if (!deviceRoot) {
-                    // Fallback if findDeviceRoot fails even on Windows drive root
-                    devWarn(
-                        `Could not confirm .adds on Windows drive root ${driveRoot}. Using configured mount point as a fallback for DB path construction.`,
-                    );
-                    deviceRoot = this.settings.koboMountPoint; // Less ideal fallback
-                }
-            } else {
-                // On POSIX (Linux, macOS), try to find the root by traversing upwards
-                // from the configured koboMountPoint.
-                deviceRoot = await this.findDeviceRoot(
-                    this.settings.koboMountPoint,
-                );
-                if (!deviceRoot) {
-                    devWarn(
-                        `Could not find KoReader device root from ${this.settings.koboMountPoint}. Using configured mount point as a fallback for DB path construction.`,
-                    );
-                    // Fallback to using the configured mount point directly if root finding fails.
-                    deviceRoot = this.settings.koboMountPoint;
-                }
-            }
+        // If a previous call is already inflight, await it.
+        if (DatabaseService.sqlJsInit) return DatabaseService.sqlJsInit;
 
-            if (deviceRoot) {
-                this.dbPath = path.join(
-                    deviceRoot,
-                    ".adds",
-                    "koreader",
-                    "settings",
-                    "statistics.sqlite3",
-                );
-                devLog(`Database path set to: ${this.dbPath}`);
-            } else {
-                this.dbPath = null;
-                devError(
-                    "Failed to determine a valid device root for the database path.",
-                );
-            }
-        } else {
-            this.dbPath = null;
-            devWarn(
-                "Database path cannot be determined: KoReader mount point not set.",
-            );
-        }
+        // First caller: start initialisation and remember the promise.
+        const binary = Buffer.from(SQLITE_WASM, "base64");
+        DatabaseService.sqlJsInit = initSqlJs({
+            wasmBinary: binary as Uint8Array,
+        })
+            .then((instance) => {
+                DatabaseService.sqlJsInstance = instance;
+                DatabaseService.sqlJsInit = null; // clear to free memory
+                return instance;
+            })
+            .catch((err) => {
+                // Reset so that a later call can retry after an error
+                DatabaseService.sqlJsInit = null;
+                throw err;
+            });
+
+        return DatabaseService.sqlJsInit;
     }
 
-    private async initializeDatabase(): Promise<void> {
-        if (this.settings.koboMountPoint !== this.currentMountPoint) {
-            devLog("Mount point setting changed, re-evaluating database path.");
-            this.closeDatabase();
-            this.currentMountPoint = this.settings.koboMountPoint;
-            await this.updateDbPath();
-        } else if (!this.dbPath && this.settings.koboMountPoint) {
-            devLog("Database path not set, attempting to update it.");
-            await this.updateDbPath();
-        }
-
-        if (!this.dbPath) {
-            throw new Error("Database path is not configured.");
-        }
-
+    private async openDatabase(): Promise<void> {
         if (this.db) {
             try {
                 this.db.exec("SELECT 1");
                 return;
-            } catch (e) {
-                devWarn(
-                    "Database connection lost or closed, reinitializing...",
-                );
-                this.db = null;
+            } catch {
+                devWarn("Database connection lost, reopening …");
+                this.closeDatabase();
             }
         }
 
-        devLog(`Initializing database from: ${this.dbPath}`);
+        if (!this.settings.koboMountPoint) {
+            throw new Error("KoReader mount point is not configured.");
+        }
+
+        let deviceRoot: string | null;
+        if (process.platform === "win32") {
+            const driveRoot = path.parse(this.settings.koboMountPoint).root ||
+                this.settings.koboMountPoint;
+            deviceRoot = await this.findDeviceRoot(driveRoot) ??
+                this.settings.koboMountPoint;
+        } else {
+            deviceRoot =
+                await this.findDeviceRoot(this.settings.koboMountPoint) ??
+                    this.settings.koboMountPoint;
+        }
+
+        const dbFilePath = path.join(
+            deviceRoot,
+            ".adds",
+            "koreader",
+            "settings",
+            "statistics.sqlite3",
+        );
+        devLog(`Opening statistics database at: ${dbFilePath}`);
+
         try {
-            const binary = Buffer.from(SQLITE_WASM, "base64");
-            const SQL = await initSqlJs({
-                wasmBinary: binary as Uint8Array,
-            });
-
-            if (!fs.existsSync(this.dbPath)) {
-                throw new Error(
-                    `Database file not found at path: ${this.dbPath}`,
-                );
-            }
-
-            const fileBuffer = fs.readFileSync(this.dbPath);
+            const SQL = await DatabaseService.getSqlJs();
+            const fileBuffer = fs.readFileSync(dbFilePath);
             this.db = new SQL.Database(fileBuffer);
-            devLog("Database connection successful");
-
             this.db.exec("SELECT 1");
-            devLog("Database test query successful");
+            devLog("Database connection established.");
         } catch (error) {
-            handleFileSystemError(
-                "initializing database (reading file)",
-                this.dbPath || "Unknown DB Path",
-                error,
-                { shouldThrow: true },
-            );
-            const err = error as Error;
+            handleFileSystemError("opening database", dbFilePath, error, {
+                shouldThrow: true,
+            });
             this.db = null;
-            devError(
-                "Failed to initialize the database:",
-                err.message,
-                err.stack,
-            );
-            throw new Error(`Database initialization failed: ${err.message}`);
+            throw error;
         }
     }
 
@@ -183,73 +149,65 @@ export class DatabaseService {
         authors: string,
         title: string,
     ): Promise<LuaMetadata["statistics"] | null> {
-        if (!this.dbPath) {
-            devWarn("Skipping statistics fetch: Database path not configured.");
+        if (!this.settings.koboMountPoint) {
+            devWarn(
+                "Skipping statistics fetch: KoReader mount point not configured.",
+            );
             return null;
         }
 
-        try {
-            await this.initializeDatabase();
+        await this.ensureReady();
 
-            if (!this.db) {
-                devError(
-                    "Database is not initialized after initialization attempt.",
-                );
-                return null;
-            }
-
-            devLog(
-                `Querying statistics for: Author="${authors}", Title="${title}"`,
-            );
-            const bookQuery = this.db.prepare(
-                "SELECT * FROM book WHERE authors = ? AND title = ?",
-            );
-            bookQuery.bind([authors, title]);
-
-            let bookResult: BookStatistics | null = null;
-            if (bookQuery.step()) {
-                bookResult = bookQuery
-                    .getAsObject() as unknown as BookStatistics;
-            }
-            bookQuery.free();
-
-            if (!bookResult || Object.keys(bookResult).length === 0) {
-                devLog(`No book entry found for: ${authors} - ${title}`);
-                return null; // No matching book found
-            }
-
-            devLog(
-                `Found book entry (ID: ${bookResult.id}), fetching reading sessions...`,
-            );
-            const sessionsQuery = this.db.prepare(
-                "SELECT * FROM page_stat_data WHERE id_book = ? ORDER BY start_time",
-            );
-            sessionsQuery.bind([bookResult.id]);
-
-            const sessions: PageStatData[] = [];
-            while (sessionsQuery.step()) {
-                sessions.push(
-                    sessionsQuery.getAsObject() as unknown as PageStatData,
-                );
-            }
-            sessionsQuery.free();
-
-            devLog(`Found ${sessions.length} reading sessions.`);
-
-            return {
-                book: bookResult,
-                readingSessions: sessions,
-                derived: this.calculateDerivedStatistics(bookResult, sessions),
-            };
-        } catch (error) {
-            const err = error as Error;
+        if (!this.db) {
             devError(
-                `Failed to fetch book statistics for "${title}":`,
-                err.message,
-                err.stack,
+                "Database is not initialized after initialization attempt.",
             );
             return null;
         }
+
+        devLog(
+            `Querying statistics for: Author="${authors}", Title="${title}"`,
+        );
+        const bookQuery = this.db.prepare(
+            "SELECT * FROM book WHERE authors = ? AND title = ?",
+        );
+        bookQuery.bind([authors, title]);
+
+        let bookResult: BookStatistics | null = null;
+        if (bookQuery.step()) {
+            bookResult = bookQuery
+                .getAsObject() as unknown as BookStatistics;
+        }
+        bookQuery.free();
+
+        if (!bookResult || Object.keys(bookResult).length === 0) {
+            devLog(`No book entry found for: ${authors} - ${title}`);
+            return null; // No matching book found
+        }
+
+        devLog(
+            `Found book entry (ID: ${bookResult.id}), fetching reading sessions...`,
+        );
+        const sessionsQuery = this.db.prepare(
+            "SELECT * FROM page_stat_data WHERE id_book = ? ORDER BY start_time",
+        );
+        sessionsQuery.bind([bookResult.id]);
+
+        const sessions: PageStatData[] = [];
+        while (sessionsQuery.step()) {
+            sessions.push(
+                sessionsQuery.getAsObject() as unknown as PageStatData,
+            );
+        }
+        sessionsQuery.free();
+
+        devLog(`Found ${sessions.length} reading sessions.`);
+
+        return {
+            book: bookResult,
+            readingSessions: sessions,
+            derived: this.calculateDerivedStatistics(bookResult, sessions),
+        };
     }
 
     private calculateDerivedStatistics(
@@ -287,20 +245,13 @@ export class DatabaseService {
         };
     }
 
-    public async updateSettings(
-        newSettings: KoReaderHighlightImporterSettings,
-    ): Promise<void> {
-        const oldMountPoint = this.settings.koboMountPoint;
-        this.settings = newSettings;
-
-        if (this.settings.koboMountPoint !== oldMountPoint) {
-            devLog(
-                "Mount point setting potentially changed in updateSettings, re-evaluating database path...",
-            );
-            this.closeDatabase();
-            this.currentMountPoint = this.settings.koboMountPoint;
-            await this.updateDbPath();
+    public setSettings(
+        newSettings: Readonly<KoReaderHighlightImporterSettings>,
+    ) {
+        if (newSettings.koboMountPoint !== this.settings.koboMountPoint) {
+            this.closeDatabase(); // Invalidate connection
         }
+        this.settings = { ...newSettings }; // Store a copy
     }
 
     closeDatabase(): void {
@@ -313,5 +264,17 @@ export class DatabaseService {
                 devError("Error closing database connection:", error);
             }
         }
+    }
+
+    private async ensureReady(): Promise<void> {
+        if (this.db) return;
+        if (this.initializing) return this.initializing;
+
+        this.initializing = (async () => {
+            await this.openDatabase();
+            this.initializing = null;
+        })();
+
+        return this.initializing;
     }
 }

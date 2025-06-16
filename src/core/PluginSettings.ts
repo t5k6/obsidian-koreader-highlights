@@ -33,11 +33,82 @@ export const DEFAULT_SETTINGS: KoReaderHighlightImporterSettings = {
         useCustomTemplate: false,
         source: "vault",
         selectedTemplate: "default",
+        templateDir: "Koreader/templates",
     },
 };
 
 export class PluginSettings {
     constructor(private plugin: Plugin) {}
+
+    private validateType<T>(
+        obj: any,
+        key: string,
+        expectedType: string,
+        defaultValue: T,
+        customMessage?: string,
+    ): T {
+        if (typeof obj[key] !== expectedType) {
+            devWarn(
+                customMessage ||
+                    `Correcting invalid '${key}' (was ${typeof obj[
+                        key
+                    ]}). Resetting to default.`,
+            );
+            return defaultValue;
+        }
+        return obj[key];
+    }
+
+    private validateEnum<T extends number | string>(
+        obj: any,
+        key: string,
+        allowedValues: readonly T[] | T[],
+        defaultValue: T,
+        customMessage?: string,
+    ): T {
+        if (!allowedValues.includes(obj[key] as T)) {
+            devWarn(
+                customMessage ||
+                    `Correcting invalid '${key}' (${
+                        obj[key]
+                    }). Resetting to default (${defaultValue}).`,
+            );
+            return defaultValue;
+        }
+        return obj[key] as T;
+    }
+
+    private validateStringArray(
+        key: string,
+        arr: unknown,
+        defaultArr: string[],
+    ): string[] {
+        if (
+            !Array.isArray(arr) ||
+            !arr.every((item) => typeof item === "string")
+        ) {
+            devWarn(
+                `Correcting invalid string array setting for '${key}'. Resetting to default. Received:`,
+                arr,
+            );
+            return [...defaultArr];
+        }
+        return arr.map((item) => item.trim()).filter(Boolean);
+    }
+
+    private validateNonNegativeNumber(
+        key: string,
+        num: unknown,
+        defaultNum: number,
+    ): number {
+        if (typeof num === "number" && Number.isFinite(num) && num >= 0) {
+            return num;
+        }
+        devWarn(
+            `Correcting invalid number setting for '${key}' (was ${num}). Resetting to default (${defaultNum}).`,
+        );
+        return defaultNum;
+    }
 
     async loadSettings(): Promise<KoReaderHighlightImporterSettings> {
         devLog("Loading KoReader Importer settings...");
@@ -48,139 +119,189 @@ export class PluginSettings {
 
         const settings: KoReaderHighlightImporterSettings = {
             ...DEFAULT_SETTINGS,
-            ...loadedData,
-            frontmatter: {
-                ...DEFAULT_SETTINGS.frontmatter,
-                ...(loadedData.frontmatter ?? {}),
-            },
-            template: {
-                ...DEFAULT_SETTINGS.template,
-                ...(loadedData.template ?? {}),
-            },
+            frontmatter: { ...DEFAULT_SETTINGS.frontmatter },
+            template: { ...DEFAULT_SETTINGS.template },
         };
 
-        // --- Validation and Correction ---
-        settings.koboMountPoint = typeof settings.koboMountPoint === "string"
-            ? settings.koboMountPoint
-            : DEFAULT_SETTINGS.koboMountPoint;
-        settings.highlightsFolder =
-            typeof settings.highlightsFolder === "string"
-                ? settings.highlightsFolder
-                : DEFAULT_SETTINGS.highlightsFolder;
-        settings.debugMode = typeof settings.debugMode === "boolean"
-            ? settings.debugMode
-            : DEFAULT_SETTINGS.debugMode;
-        settings.enableFullDuplicateCheck =
-            typeof settings.enableFullDuplicateCheck === "boolean"
-                ? settings.enableFullDuplicateCheck
-                : DEFAULT_SETTINGS.enableFullDuplicateCheck;
-
-        // Validate array types and their contents
-        const validateStringArray = (
-            arr: unknown,
-            defaultArr: string[],
-        ): string[] => {
-            if (
-                !Array.isArray(arr) ||
-                !arr.every((item) => typeof item === "string")
-            ) {
-                devWarn(
-                    "Correcting invalid string array setting. Resetting to default.",
-                );
-                return [...defaultArr]; // Return a clone of the default
+        // Merge top-level properties from loadedData except 'frontmatter' and 'template'
+        for (const key in loadedData) {
+            if (key === "frontmatter" || key === "template") continue;
+            if (Object.prototype.hasOwnProperty.call(loadedData, key)) {
+                // Only assign if the key is a valid top-level key in settings
+                if (Object.prototype.hasOwnProperty.call(settings, key)) {
+                    (settings as any)[key] = (loadedData as any)[key];
+                }
             }
-            return arr.map((item) => item.trim()).filter(Boolean); // Trim and filter empty strings
-        };
-        settings.excludedFolders = validateStringArray(
+        }
+
+        // --- Validate and Merge `frontmatter` ---
+        if (Object.prototype.hasOwnProperty.call(loadedData, "frontmatter")) {
+            if (
+                typeof loadedData.frontmatter === "object" &&
+                loadedData.frontmatter !== null
+            ) {
+                settings.frontmatter = {
+                    ...DEFAULT_SETTINGS.frontmatter,
+                    ...(loadedData.frontmatter as Partial<FrontmatterSettings>),
+                };
+            } else {
+                devWarn(
+                    "Correcting invalid 'frontmatter' setting (expected object, got " +
+                        typeof loadedData.frontmatter +
+                        "). Resetting to default.",
+                );
+            }
+        }
+
+        // --- Validate and Merge `template` ---
+        if (Object.prototype.hasOwnProperty.call(loadedData, "template")) {
+            if (
+                typeof loadedData.template === "object" &&
+                loadedData.template !== null
+            ) {
+                settings.template = {
+                    ...DEFAULT_SETTINGS.template,
+                    ...(loadedData.template as Partial<
+                        KoReaderTemplateSettings
+                    >),
+                };
+            } else {
+                devWarn(
+                    "Correcting invalid 'template' setting (expected object, got " +
+                        typeof loadedData.template + "). Resetting to default.",
+                );
+                // settings.template is already a deep copy of DEFAULT_SETTINGS.template
+            }
+        }
+
+        // --- detailed validation on all fields of 'settings' object ---
+        settings.koboMountPoint = this.validateType(
+            settings,
+            "koboMountPoint",
+            "string",
+            DEFAULT_SETTINGS.koboMountPoint,
+        );
+
+        settings.highlightsFolder = this.validateType(
+            settings,
+            "highlightsFolder",
+            "string",
+            DEFAULT_SETTINGS.highlightsFolder,
+        );
+
+        settings.debugMode = this.validateType(
+            settings,
+            "debugMode",
+            "boolean",
+            DEFAULT_SETTINGS.debugMode,
+        );
+
+        settings.enableFullDuplicateCheck = this.validateType(
+            settings,
+            "enableFullDuplicateCheck",
+            "boolean",
+            DEFAULT_SETTINGS.enableFullDuplicateCheck,
+        );
+
+        // Validate array properties
+        settings.excludedFolders = this.validateStringArray(
+            "excludedFolders",
             settings.excludedFolders,
             DEFAULT_SETTINGS.excludedFolders,
         );
-        settings.allowedFileTypes = validateStringArray(
-            settings.allowedFileTypes,
-            DEFAULT_SETTINGS.allowedFileTypes,
-        )
-            .map((type) => type.toLowerCase()); // Ensure lowercase
 
-        // Validate frontmatter structure and its arrays
         if (
-            typeof settings.frontmatter !== "object" ||
-            settings.frontmatter === null
+            !Array.isArray(settings.allowedFileTypes) ||
+            !settings.allowedFileTypes.every((item) => typeof item === "string")
         ) {
             devWarn(
-                "Correcting invalid 'frontmatter' setting (expected object). Resetting to default.",
+                `Correcting invalid string array setting for 'allowedFileTypes'. Resetting to default. Received:`,
+                settings.allowedFileTypes,
             );
-            settings.frontmatter = { ...DEFAULT_SETTINGS.frontmatter };
+            settings.allowedFileTypes = [...DEFAULT_SETTINGS.allowedFileTypes];
         } else {
-            const fm = settings.frontmatter as FrontmatterSettings; // Assert type for easier access
-            fm.disabledFields = validateStringArray(
-                fm.disabledFields,
-                DEFAULT_SETTINGS.frontmatter.disabledFields,
-            );
-            fm.customFields = validateStringArray(
-                fm.customFields,
-                DEFAULT_SETTINGS.frontmatter.customFields,
-            );
+            settings.allowedFileTypes = settings.allowedFileTypes
+                .map((type) => type.trim().toLowerCase())
+                .filter(Boolean);
         }
 
-        // Validate template structure
-        if (
-            typeof settings.template !== "object" || settings.template === null
-        ) {
-            devWarn(
-                "Correcting invalid 'template' setting (expected object). Resetting to default.",
-            );
-            settings.template = { ...DEFAULT_SETTINGS.template };
-        } else {
-            const tmpl = settings.template as KoReaderTemplateSettings; // Type assertion
-            tmpl.useCustomTemplate = typeof tmpl.useCustomTemplate === "boolean"
-                ? tmpl.useCustomTemplate
-                : DEFAULT_SETTINGS.template.useCustomTemplate;
-            tmpl.source = typeof tmpl.source === "string" &&
-                    ["vault", "external"].includes(tmpl.source)
-                ? tmpl.source
-                : DEFAULT_SETTINGS.template.source;
-            tmpl.selectedTemplate = typeof tmpl.selectedTemplate === "string"
-                ? tmpl.selectedTemplate.trim()
-                : DEFAULT_SETTINGS.template.selectedTemplate;
+        // Validate frontmatter sub-fields
+        const fm = settings.frontmatter as FrontmatterSettings;
+        fm.disabledFields = this.validateStringArray(
+            "frontmatter.disabledFields",
+            fm.disabledFields,
+            DEFAULT_SETTINGS.frontmatter.disabledFields,
+        );
+        fm.customFields = this.validateStringArray(
+            "frontmatter.customFields",
+            fm.customFields,
+            DEFAULT_SETTINGS.frontmatter.customFields,
+        );
+
+        // Validate template sub-fields
+        const tmpl = settings.template as KoReaderTemplateSettings;
+        tmpl.useCustomTemplate = this.validateType(
+            tmpl,
+            "useCustomTemplate",
+            "boolean",
+            DEFAULT_SETTINGS.template.useCustomTemplate,
+        );
+
+        tmpl.source = this.validateEnum(
+            tmpl,
+            "source",
+            ["vault", "external"],
+            DEFAULT_SETTINGS.template.source,
+            `Correcting invalid 'template.source' (was ${tmpl.source}). Resetting to default.`,
+        );
+
+        tmpl.selectedTemplate = this.validateType(
+            tmpl,
+            "selectedTemplate",
+            "string",
+            DEFAULT_SETTINGS.template.selectedTemplate,
+        );
+
+        if (typeof tmpl.selectedTemplate === "string") {
+            tmpl.selectedTemplate = tmpl.selectedTemplate.trim();
         }
 
-        // Validate debugLevel (ensure it's one of the defined levels)
-        const validLevels = [0, 1, 2, 3];
-        if (
-            typeof settings.debugLevel !== "number" ||
-            !validLevels.includes(settings.debugLevel as 0 | 1 | 2 | 3)
-        ) {
-            devWarn(
-                `Correcting invalid 'debugLevel' (${settings.debugLevel}). Resetting to default (${DEFAULT_SETTINGS.debugLevel}).`,
-            );
-            settings.debugLevel = DEFAULT_SETTINGS.debugLevel;
-        }
+        tmpl.templateDir = this.validateType(
+            tmpl,
+            "templateDir",
+            "string",
+            DEFAULT_SETTINGS.template.templateDir,
+        );
 
-        // Validate number types for highlight processing settings (ensure non-negative)
-        const validateNonNegativeNumber = (
-            num: unknown,
-            defaultNum: number,
-        ): number => {
-            if (typeof num === "number" && Number.isFinite(num) && num >= 0) {
-                return num;
-            }
-            devWarn(
-                `Correcting invalid number setting (${num}). Resetting to default (${defaultNum}).`,
-            );
-            return defaultNum;
-        };
-        settings.maxHighlightGap = validateNonNegativeNumber(
+        // Validate debugLevel with enum validation
+        const validLevels = [0, 1, 2, 3] as const;
+        settings.debugLevel = this.validateEnum<0 | 1 | 2 | 3>(
+            settings,
+            "debugLevel",
+            validLevels,
+            DEFAULT_SETTINGS.debugLevel,
+            `Correcting invalid 'debugLevel' (${settings.debugLevel}). Resetting to default (${DEFAULT_SETTINGS.debugLevel}).`,
+        );
+
+        // Validate numeric properties
+        settings.maxHighlightGap = this.validateNonNegativeNumber(
+            "maxHighlightGap",
             settings.maxHighlightGap,
             DEFAULT_SETTINGS.maxHighlightGap,
         );
-        settings.maxTimeGapMinutes = validateNonNegativeNumber(
+
+        settings.maxTimeGapMinutes = this.validateNonNegativeNumber(
+            "maxTimeGapMinutes",
             settings.maxTimeGapMinutes,
             DEFAULT_SETTINGS.maxTimeGapMinutes,
         );
-        settings.mergeOverlappingHighlights =
-            typeof settings.mergeOverlappingHighlights === "boolean"
-                ? settings.mergeOverlappingHighlights
-                : DEFAULT_SETTINGS.mergeOverlappingHighlights;
+
+        settings.mergeOverlappingHighlights = this.validateType(
+            settings,
+            "mergeOverlappingHighlights",
+            "boolean",
+            DEFAULT_SETTINGS.mergeOverlappingHighlights,
+        );
 
         devLog("Settings loaded and validated:", settings);
         return settings;

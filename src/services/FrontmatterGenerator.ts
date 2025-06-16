@@ -1,3 +1,4 @@
+import { stringifyYaml } from "obsidian";
 import type {
     DocProps,
     FrontmatterData,
@@ -8,9 +9,9 @@ import type {
 import {
     formatDate,
     formatPercent,
-    secondsToHoursMinutes,
+    secondsToHoursMinutesSeconds,
 } from "../utils/formatUtils";
-import { devLog, devWarn } from "../utils/logging";
+import { devWarn } from "../utils/logging";
 
 const FRIENDLY_KEY_MAP: Record<string, string> = {
     title: "Title",
@@ -43,18 +44,6 @@ function toTitleCase(str: string): string {
         .join(" ");
 }
 
-function escapeYAMLString(str: string): string {
-    if (str.includes('"') || str.includes("\\")) {
-        str = str.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-    }
-    // Check if quoting is necessary based on YAML spec
-    const needsQuotes =
-        /[:{}\[\]&*#!|>@`"']|^- |^%|^\? |^\s|\s$|^(true|false|null|on|off|yes|no)$/i
-            .test(str) ||
-        str.includes("\n") || str.length === 0;
-    return needsQuotes ? `"${str}"` : str;
-}
-
 function getFriendlyKey(key: string): string {
     return FRIENDLY_KEY_MAP[key] || toTitleCase(key);
 }
@@ -68,75 +57,44 @@ export class FrontmatterGenerator {
         settings: FrontmatterSettings,
     ): FrontmatterData {
         const { docProps, statistics, annotations } = metadata;
-        // Ensure required fields have defaults, even if empty in docProps
-        const frontmatter: Partial<FrontmatterData> = {
-            title: docProps?.title || "",
-        };
-
-        if (
-            docProps?.authors && !settings.disabledFields?.includes("authors")
-        ) {
-            // Now call formatDocPropValue for authors
-            const formattedAuthors = this.formatDocPropValue(
-                "authors",
-                docProps.authors,
-            );
-            frontmatter.authors = formattedAuthors; // This can be string or string[]
-        } else if (
-            !docProps?.authors && !settings.disabledFields?.includes("authors")
-        ) {
-            frontmatter.authors = ""; // Default to empty string if no authors from docProps
-        }
+        const frontmatter: Partial<FrontmatterData> = {};
 
         const disabled = new Set(settings?.disabledFields || []);
         const customFields = settings?.customFields || [];
 
-        devLog(
-            `Generating frontmatter for: ${docProps?.title}. Disabled fields: ${
-                [...disabled].join(", ")
-            }, Custom fields: ${customFields.join(", ")}`,
-        );
-
-        // 1. Add DocProps fields (excluding title/authors)
+        // --- 1. Add ALL DocProps fields if not disabled ---
         if (docProps) {
             for (const key in docProps) {
                 const typedKey = key as keyof DocProps;
-
                 if (
-                    typedKey !== "title" && typedKey !== "authors" &&
-                    (frontmatter as any)[typedKey] === undefined
+                    !disabled.has(typedKey) &&
+                    this.isValidValue(docProps[typedKey])
                 ) {
-                    if (
-                        Object.prototype.hasOwnProperty.call(docProps, typedKey)
-                    ) {
-                        const value = docProps[typedKey];
-                        if (
-                            !disabled.has(typedKey) && this.isValidValue(value)
-                        ) {
-                            (frontmatter as any)[typedKey] = this
-                                .formatDocPropValue(typedKey, value as string);
-                        }
-                    }
+                    (frontmatter as any)[typedKey] = docProps[typedKey];
                 }
             }
         }
 
-        // --- 2. Calculate Highlight/Note Counts ---
+        // Default title/authors if they weren't in docProps
+        if (frontmatter.title === undefined) frontmatter.title = "";
+        if (frontmatter.authors === undefined && !disabled.has("authors")) {
+            frontmatter.authors = "";
+        }
+
+        // --- 2. Calculate and add Highlight/Note Counts ---
         const highlightCount = annotations?.length ?? 0;
         const noteCount =
             annotations?.filter((a) => a.note && a.note.trim().length > 0)
                 .length ?? 0;
 
-        if (!disabled.has("highlightCount") && highlightCount > 0) {
+        if (!disabled.has("highlightCount")) {
             frontmatter.highlightCount = highlightCount;
         }
-        if (!disabled.has("noteCount") && noteCount > 0) {
-            frontmatter.noteCount = noteCount;
-        }
+        if (!disabled.has("noteCount")) frontmatter.noteCount = noteCount;
 
-        // --- 3. Add statistics fields ---
+        // --- 3. Add RAW statistics fields if not disabled ---
         if (statistics?.derived && statistics.book) {
-            const statsAvailable = {
+            const statsMap = {
                 pages: statistics.book.pages,
                 lastRead: statistics.derived.lastReadDate,
                 totalReadTime: statistics.book.total_read_time,
@@ -146,54 +104,32 @@ export class FrontmatterGenerator {
                 firstRead: statistics.derived.firstReadDate,
             };
 
-            for (const key in statsAvailable) {
-                const typedKey = key as keyof typeof statsAvailable;
+            for (const key in statsMap) {
+                const typedKey = key as keyof typeof statsMap;
                 if (
-                    Object.prototype.hasOwnProperty.call(
-                        statsAvailable,
-                        typedKey,
-                    )
+                    !disabled.has(typedKey) &&
+                    this.isValidStatValue(statsMap[typedKey])
                 ) {
-                    const value = statsAvailable[typedKey];
-                    // Special check for 'pages' to avoid adding it twice if it was in docProps
-                    if (
-                        typedKey === "pages" &&
-                        frontmatter.pages !== undefined &&
-                        !customFields.includes("pages")
-                    ) continue;
-
-                    if (
-                        !disabled.has(typedKey) && this.isValidStatValue(value)
-                    ) {
-                        frontmatter[typedKey] = this.formatStatValue(
-                            typedKey,
-                            value,
-                        ) as any; // Use 'as any'
-                    }
+                    // Assign the RAW value, do not format it here.
+                    (frontmatter as any)[typedKey] = statsMap[typedKey];
                 }
             }
-        } else {
-            devLog("No full statistics data available for frontmatter.");
         }
 
-        // 4. Add explicitly requested custom fields (if they exist in docProps and are valid)
+        // --- 4. Add custom fields ---
         if (docProps) {
             for (const field of customFields) {
                 if (
                     !disabled.has(field) &&
-                    Object.prototype.hasOwnProperty.call(docProps, field) &&
-                    (frontmatter as any)[field] === undefined
+                    (frontmatter as any)[field] === undefined &&
+                    this.isValidValue(docProps[field as keyof DocProps])
                 ) {
-                    const value = docProps[field as keyof DocProps];
-                    if (this.isValidValue(value)) {
-                        (frontmatter as any)[field] = this.formatDocPropValue(
-                            field,
-                            value as string,
-                        );
-                    }
+                    (frontmatter as any)[field] =
+                        docProps[field as keyof DocProps];
                 }
             }
         }
+
         return frontmatter as FrontmatterData;
     }
 
@@ -252,11 +188,22 @@ export class FrontmatterGenerator {
                         ? formatDate(value)
                         : "");
             case "totalReadTime":
-                return secondsToHoursMinutes(value as number);
+                return secondsToHoursMinutesSeconds(value as number);
             case "averageTimePerPage":
-                return secondsToHoursMinutes((value as number) * 60); // value is in minutes
-            case "progress":
-                return formatPercent(value as number);
+                return secondsToHoursMinutesSeconds((value as number) * 60);
+
+            // value is in minutes
+            case "progress": {
+                const numericValue = parseInt(String(value), 10);
+                if (Number.isNaN(numericValue)) {
+                    devWarn(
+                        `Could not parse numeric value for progress: ${value}`,
+                    );
+                    return "0%"; // Return a sensible default on failure
+                }
+                return formatPercent(numericValue);
+            }
+
             case "pages":
             case "highlightCount":
             case "noteCount":
@@ -296,48 +243,51 @@ export class FrontmatterGenerator {
         } = {},
     ): string {
         const { useFriendlyKeys = true, sortKeys = true } = options;
-        const yamlLines: string[] = [];
+        const finalObject: Record<string, any> = {};
 
         let entries = Object.entries(data);
+
         if (sortKeys) {
-            entries = entries.sort(([aKey], [bKey]) =>
-                aKey.localeCompare(bKey)
-            );
+            entries.sort(([aKey], [bKey]) => aKey.localeCompare(bKey));
         }
 
-        for (const [key, value] of entries) {
-            if (value === undefined || value === null) continue;
+        for (const [key, rawValue] of entries) {
+            if (rawValue === undefined || rawValue === null) continue;
+            if (
+                useFriendlyKeys &&
+                (key === "highlightCount" || key === "noteCount") &&
+                rawValue === 0
+            ) continue;
 
             const formattedKey = useFriendlyKeys ? getFriendlyKey(key) : key;
-            // Keys with special characters or spaces need quoting in YAML
-            const safeKey = /[:\s-]|^[0-9]/.test(formattedKey)
-                ? `"${formattedKey}"`
-                : formattedKey;
 
-            let formattedValue: string;
-            if (Array.isArray(value)) {
-                const items = value.map((item) =>
-                    escapeYAMLString(String(item))
-                ).join(", ");
-                formattedValue = `[${items}]`;
-            } else if (typeof value === "object" && value !== null) {
-                try {
-                    formattedValue = escapeYAMLString(JSON.stringify(value));
-                } catch {
-                    devWarn(
-                        `Skipping complex object in frontmatter key "${key}" during YAML formatting.`,
-                    );
-                    continue;
-                }
-            } else {
-                formattedValue = escapeYAMLString(String(value));
+            let finalValue = rawValue;
+            if (
+                [
+                    "lastRead",
+                    "firstRead",
+                    "totalReadTime",
+                    "averageTimePerPage",
+                    "progress",
+                    "readingStatus",
+                ].includes(key)
+            ) {
+                finalValue = this.formatStatValue(key, rawValue);
+            } else if (["authors", "description", "keywords"].includes(key)) {
+                finalValue = this.formatDocPropValue(key, String(rawValue));
             }
-            yamlLines.push(`${safeKey}: ${formattedValue}`);
+
+            if (finalValue === "" && key !== "authors") continue;
+
+            finalObject[formattedKey] = finalValue;
         }
 
-        if (yamlLines.length === 0) {
+        if (Object.keys(finalObject).length === 0) {
             return "";
         }
-        return `---\n${yamlLines.join("\n")}\n---`;
+
+        const yamlString = stringifyYaml(finalObject);
+
+        return `---\n${yamlString}---`;
     }
 }

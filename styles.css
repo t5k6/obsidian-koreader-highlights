@@ -28,17 +28,17 @@
 
 .duplicate-badge-exact {
     background-color: var(--color-green);
-    color: var(--color-base-100);
+    color: var(--text-on-accent);
 }
 
 .duplicate-badge-updated {
     background-color: var(--color-yellow);
-    color: var(--color-base-100);
+    color: #000000;
 }
 
 .duplicate-badge-divergent {
     background-color: var(--color-orange);
-    color: var(--color-base-100);
+    color: var(--text-on-accent);
 }
 
 /* Message and File Path */
@@ -94,18 +94,22 @@
 /* Action Buttons */
 .duplicate-buttons {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 12px;
     margin-top: 24px;
+    width: 100%;
 }
 
 .button-container {
     display: flex;
     flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
 }
 
 .duplicate-buttons .mod-button {
-    flex: 1;
+    width: 100%;
     padding: 12px;
     border-radius: 6px;
     display: flex;
@@ -113,10 +117,13 @@
     align-items: center;
     gap: 8px;
     transition: all 0.2s ease;
+    box-sizing: border-box;
 }
 
 .button-icon {
-    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .duplicate-buttons .mod-cta {

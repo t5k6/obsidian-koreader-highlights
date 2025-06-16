@@ -1,7 +1,7 @@
-import { Notice, type Plugin } from "obsidian";
+import { type Plugin } from "obsidian";
 import type { ImportManager } from "../services/ImportManager";
 import type { ScanManager } from "../services/ScanManager";
-import { devError } from "../utils/logging";
+import { runPluginAction } from "../utils/actionUtils";
 
 export class PluginCommands {
     constructor(
@@ -24,31 +24,21 @@ export class PluginCommands {
         });
     }
 
-    private async handleImportCommand(): Promise<void> {
-        try {
-            await this.importManager.importHighlights();
-        } catch (error) {
-            devError(
-                'Error executing "Import KoReader Highlights" command:',
-                error,
-            );
-            new Notice(
-                "KOReader Importer: Failed to import highlights. Check console for details.",
-            );
-        }
+    public async handleImportCommand(): Promise<void> {
+        await runPluginAction(
+            () => this.importManager.importHighlights(),
+            {
+                failureNotice: "Failed to import highlights",
+            },
+        );
     }
 
-    private async handleScanCommand(): Promise<void> {
-        try {
-            await this.scanManager.scanForHighlights();
-        } catch (error) {
-            devError(
-                'Error executing "Scan KoReader for Highlights" command:',
-                error,
-            );
-            new Notice(
-                "KOReader Importer: Failed to scan for highlights. Check console for details.",
-            );
-        }
+    public async handleScanCommand(): Promise<void> {
+        await runPluginAction(
+            () => this.scanManager.scanForHighlights(),
+            {
+                failureNotice: "Failed to scan for highlights",
+            },
+        );
     }
 }

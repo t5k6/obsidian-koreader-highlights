@@ -7,9 +7,6 @@ import {
     areHighlightsSuccessive,
     compareAnnotations,
     formatDate,
-    getContrastTextColor,
-    KOReaderHighlightColors,
-    parsePosition,
 } from "../utils/formatUtils";
 import type { TemplateManager } from "./TemplateManager";
 
@@ -91,19 +88,14 @@ export class ContentGenerator {
                     finalContent += this.templateManager.renderHighlight(
                         templateString,
                         data,
-                        highlight.color,
-                        highlight.drawer,
+                        highlightGroup,
                     );
                 } else {
                     const representativeHighlight = highlightGroup[0];
-                    const combinedStyledText = this.combineGroupedHighlightText(
-                        highlightGroup,
-                    );
-
                     const data = {
                         pageno: representativeHighlight.pageno ?? 0,
                         date: formatDate(representativeHighlight.datetime),
-                        highlight: combinedStyledText,
+                        highlight: "",
                         note: representativeHighlight.note ?? "",
                         chapter: chapter !== "Chapter Unknown" ? chapter : "",
                         isFirstInChapter: isFirstHighlightInChapter,
@@ -111,6 +103,7 @@ export class ContentGenerator {
                     finalContent += this.templateManager.renderHighlight(
                         templateString,
                         data,
+                        highlightGroup,
                     );
                 }
 
@@ -150,82 +143,5 @@ export class ContentGenerator {
         }
 
         return groups;
-    }
-
-    private combineGroupedHighlightText(group: Annotation[]): string {
-        if (!group || group.length === 0) return "";
-
-        const sortedGroup = [...group].sort((a, b) => {
-            const posA = parsePosition(a.pos0);
-            const posB = parsePosition(b.pos0);
-            if (!posA && !posB) return 0;
-            if (!posA) return -1;
-            if (!posB) return 1;
-            return posA.offset - posB.offset;
-        });
-
-        let combinedText = "";
-        const isDark = document.body.classList.contains("theme-dark");
-
-        for (let i = 0; i < sortedGroup.length; i++) {
-            const h = sortedGroup[i];
-            let segmentText = h.text || "";
-
-            if (i > 0) {
-                const prev = sortedGroup[i - 1];
-                const posPrev = parsePosition(prev.pos1);
-                const posCurr = parsePosition(h.pos0);
-
-                const gap =
-                    (posPrev && posCurr && posPrev.node === posCurr.node)
-                        ? posCurr.offset - posPrev.offset
-                        : 1;
-
-                if (gap > 0 && gap <= (this.settings.maxHighlightGap * 2)) {
-                    combinedText += " ";
-                } else if (gap > (this.settings.maxHighlightGap * 2)) {
-                    combinedText += " [...] ";
-                }
-            }
-
-            // Apply styling based on this segment's color/drawer
-            const lowerColor = h.color?.toLowerCase().trim();
-            const colorHex = lowerColor
-                ? (KOReaderHighlightColors[lowerColor] || h.color)
-                : null;
-
-            switch (h.drawer) {
-                case "underscore":
-                    segmentText = `<u>${segmentText}</u>`;
-                    break;
-                case "strikeout":
-                    segmentText = `<s>${segmentText}</s>`;
-                    break;
-                case "invert":
-                    if (colorHex && lowerColor !== "gray") {
-                        const textColor = getContrastTextColor(
-                            colorHex,
-                            isDark,
-                        );
-                        segmentText =
-                            `<mark style="background-color: ${textColor}; color: ${colorHex}">${segmentText}</mark>`;
-                    }
-                    break;
-                default: // lighten or default
-                    if (colorHex && lowerColor !== "gray") {
-                        const textColor = getContrastTextColor(
-                            colorHex,
-                            isDark,
-                        );
-                        segmentText =
-                            `<mark style="background-color: ${colorHex}; color: ${textColor}">${segmentText}</mark>`;
-                    }
-                    break;
-            }
-
-            combinedText += segmentText;
-        }
-
-        return combinedText;
     }
 }

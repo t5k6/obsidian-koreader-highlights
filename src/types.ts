@@ -106,7 +106,7 @@ export interface FrontmatterData {
 }
 
 export interface ParsedFrontmatter {
-    [key: string]: unknown;
+    [key: string]: string | string[] | number | undefined;
 }
 
 export interface FrontmatterContent {
@@ -125,6 +125,7 @@ export interface KoReaderTemplateSettings {
     useCustomTemplate: boolean;
     source: "vault" | "external" | string;
     selectedTemplate: string;
+    templateDir: string;
 }
 
 // Main Plugin Settings Interface

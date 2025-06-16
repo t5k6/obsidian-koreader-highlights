@@ -145,7 +145,9 @@ export class DuplicateHandlingModal extends Modal
                 .setButtonText(text)
                 .onClick(() => this.handleChoice(choice));
 
-            setIcon(button.buttonEl.createSpan({ cls: "button-icon" }), icon);
+            const iconSpan = button.buttonEl.createSpan({ cls: "button-icon" });
+            setIcon(iconSpan, icon);
+            iconSpan.style.marginLeft = "4px";
 
             if (options.warning) button.setClass("mod-warning");
             if (options.disabled) {
@@ -155,25 +157,25 @@ export class DuplicateHandlingModal extends Modal
             if (options.primary) button.setCta();
         };
 
-        createButton("Replace", "replace", "replace-all", {
+        createButton("Replace ", "replace", "replace-all", {
             warning: this.match.matchType === "exact",
             tooltip:
                 "Replace the existing file with the new one, overwriting all content.",
         });
 
-        createButton("Merge", "merge", "git-merge", {
+        createButton("Merge ", "merge", "git-merge", {
             disabled: this.match.matchType === "exact",
             tooltip: this.match.matchType === "exact"
                 ? "No new content to merge"
                 : undefined,
         });
 
-        createButton("Keep Both", "keep-both", "copy", {
+        createButton("Keep Both ", "keep-both", "copy", {
             tooltip:
                 "Create a new file for the imported highlights and retain the original.",
         });
 
-        createButton("Skip", "skip", "x", { primary: true });
+        createButton("Skip ", "skip", "x", { primary: true });
     }
 
     private handleChoice(choice: DuplicateChoice) {

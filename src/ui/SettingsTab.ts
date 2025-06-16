@@ -12,14 +12,16 @@ import {
 } from "obsidian";
 import type KoReaderImporterPlugin from "../core/KoReaderImporterPlugin";
 import type { FrontmatterSettings } from "../types";
+import { runPluginAction } from "../utils/actionUtils";
+import { ensureFolderExists } from "../utils/fileUtils";
 import { setDebugLevel } from "../utils/logging";
 
 class FolderInputSuggest extends AbstractInputSuggest<string> {
     constructor(
         app: App,
         private inputEl: HTMLInputElement,
-        private plugin: KoReaderImporterPlugin, // Pass plugin for saving on selection
-        private onSubmit: (result: string) => void, // Callback to update the input field's value
+        private plugin: KoReaderImporterPlugin,
+        private onSubmit: (result: string) => void,
     ) {
         super(app, inputEl);
     }
@@ -44,14 +46,15 @@ class FolderInputSuggest extends AbstractInputSuggest<string> {
         el.createDiv({ text: suggestion });
     }
 
-    async onChooseSuggestion(
+    selectSuggestion(
         suggestion: string,
         evt: MouseEvent | KeyboardEvent,
-    ): Promise<void> {
+    ): void {
         this.onSubmit(suggestion);
 
-        this.plugin.settings.highlightsFolder = normalizePath(suggestion);
-        await this.plugin.saveSettings();
+        const normalized = normalizePath(suggestion);
+        this.plugin.settings.highlightsFolder = normalized;
+        this.plugin.saveSettings();
 
         this.close();
     }
@@ -176,34 +179,8 @@ export class SettingsTab extends PluginSettingTab {
                     this.plugin.settings.highlightsFolder = normalized;
                     await this.plugin.saveSettings();
 
-                    try {
-                        const folder = this.app.vault.getAbstractFileByPath(
-                            normalized,
-                        );
-                        if (!folder) {
-                            await this.app.vault.createFolder(normalized);
-                            new Notice(
-                                `Created highlights folder: ${normalized}`,
-                            );
-                        } else if (!(folder instanceof TFolder)) {
-                            new Notice(
-                                `Error: Path "${normalized}" exists but is not a folder.`,
-                                5000,
-                            );
-                        }
-                    } catch (error) {
-                        const err = error instanceof Error
-                            ? error
-                            : new Error(String(error));
-                        new Notice(
-                            `Error creating folder "${normalized}": ${err.message}`,
-                            5000,
-                        );
-                        console.error(
-                            `Error ensuring highlights folder "${normalized}":`,
-                            error,
-                        );
-                    }
+                    await ensureFolderExists(this.app.vault, normalized);
+                    new Notice(`Created highlights folder: ${normalized}`);
                 });
             });
 
@@ -274,14 +251,17 @@ export class SettingsTab extends PluginSettingTab {
                 "Import highlights from all found and allowed files on the KoReader mount point.",
             )
             .addButton((button) =>
-                button
-                    .setButtonText("Import Now")
-                    .setCta()
-                    .onClick(async () => {
-                        button.setDisabled(true).setButtonText("Importing...");
-                        await this.plugin.triggerImport();
-                        button.setDisabled(false).setButtonText("Import Now");
-                    })
+                button.setButtonText("Import Now").onClick(async () => {
+                    await runPluginAction(
+                        () => this.plugin.triggerImport(),
+                        {
+                            button,
+                            inProgressText: "Importing...",
+                            completedText: "Import Now",
+                            failureNotice: "Failed to import highlights",
+                        },
+                    );
+                })
             );
 
         // --- Formatting & Duplicates ---
@@ -345,8 +325,60 @@ export class SettingsTab extends PluginSettingTab {
                 this.addVaultTemplateSelector(containerEl);
             }
             // else if (this.plugin.settings.template.source === 'external') {
-            //     this.addExternalTemplateSelector(containerEl); // Add this method if external source is implemented
+            //     this.addExternalTemplateSelector(containerEl); // Add this method after external source is implemented
             // }
+
+            if (
+                this.plugin.settings.template.useCustomTemplate &&
+                this.plugin.settings.template.source === "vault"
+            ) {
+                new Setting(containerEl)
+                    .setName("Template directory")
+                    .setDesc("The folder within your vault to store templates.")
+                    .addText((text) => {
+                        text.setPlaceholder("Koreader/templates")
+                            .setValue(this.plugin.settings.template.templateDir)
+                            .onChange(async (value) => {
+                                this.plugin.settings.template.templateDir =
+                                    value.trim() || "Koreader/templates";
+                                await this.plugin.saveSettings();
+                            });
+
+                        // Add folder suggestions
+                        new FolderInputSuggest(
+                            this.app,
+                            text.inputEl,
+                            this.plugin,
+                            (result) => {
+                                text.setValue(result);
+                            },
+                        );
+
+                        // Validate and potentially create folder on blur
+                        text.inputEl.addEventListener("blur", async () => {
+                            let pathValue = text.getValue().trim();
+                            if (!pathValue) {
+                                pathValue = "Koreader/templates";
+                                text.setValue(pathValue);
+                            }
+                            const normalized = normalizePath(pathValue);
+                            this.plugin.settings.template.templateDir =
+                                normalized;
+                            await this.plugin.saveSettings();
+
+                            await ensureFolderExists(
+                                this.app.vault,
+                                normalized,
+                            );
+                            new Notice(
+                                `Created template folder: ${normalized}`,
+                            );
+
+                            // Refresh the template selector to show templates from the new directory
+                            this.display();
+                        });
+                    });
+            }
         }
 
         // --- Advanced/Troubleshooting ---
@@ -416,7 +448,9 @@ export class SettingsTab extends PluginSettingTab {
 
     /** Adds the dropdown to select a template file from the vault */
     private addVaultTemplateSelector(containerEl: HTMLElement): void {
-        const templatesFolder = normalizePath("Koreader/templates");
+        const templatesFolder = normalizePath(
+            this.plugin.settings.template.templateDir,
+        );
         const templateFiles = this.app.vault.getFiles()
             .filter((f) =>
                 f.path.startsWith(`${templatesFolder}/`) &&

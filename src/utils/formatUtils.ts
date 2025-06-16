@@ -1,5 +1,5 @@
-import { basename } from "node:path";
-import type { Annotation, DocProps } from "../types";
+import { parse } from "node:path";
+import type { Annotation } from "../types";
 import { devLog, devWarn } from "./logging";
 
 export const KOReaderHighlightColors: Record<string, string> = {
@@ -33,6 +33,11 @@ const FILE_EXTENSION = ".md";
 const AUTHOR_SEPARATOR = " & ";
 const TITLE_SEPARATOR = " - ";
 
+interface PositionObject {
+    x: number;
+    y: number;
+}
+
 interface CfiParts {
     fullPath: string; // e.g., /6/14[id6]!/4/2/6/2,/1
     offset: number;
@@ -50,7 +55,7 @@ const CFI_REGEX_COMBINED =
     /epubcfi\(([^!]*!)?([^,]+)(?:,\/(\d+):(\d+)(?:\,\/\d+:\d+)?)?(?:,\/(\d+):(\d+))?\)$/;
 
 export function generateObsidianFileName(
-    docProps: DocProps,
+    docProps: { title?: string; authors?: string },
     highlightsFolder: string,
     originalSdrName?: string,
     maxTotalPathLength = 255,
@@ -70,44 +75,39 @@ export function generateObsidianFileName(
         ? normalizeFileNamePiece(getFileNameWithoutExt(originalSdrName))
         : undefined;
 
-    if (isAuthorEffectivelyMissing && isTitleEffectivelyMissing) {
-        // Case 1: BOTH author and title are missing/default.
-        // Use originalSdrName if available, otherwise DEFAULT_TITLE.
-        baseName = sdrBaseName || DEFAULT_TITLE;
-        devWarn(
-            `Using filename based on SDR name or default (author/title missing): ${baseName}`,
-        );
-    } else if (isAuthorEffectivelyMissing && !isTitleEffectivelyMissing) {
-        // Case 2: Author is missing/default, but title IS known.
-        // Use only the title.
-        baseName = normalizeFileNamePiece(effectiveTitle); // effectiveTitle is guaranteed here
-        devWarn(`Using filename based on title (author missing): ${baseName}`);
-    } else if (!isAuthorEffectivelyMissing && isTitleEffectivelyMissing) {
-        // Case 3: Author IS known, but title is missing/default.
-        // Use "Author(s) - OriginalSdrName" if sdrBaseName is available,
-        // otherwise "Author(s) - DEFAULT_TITLE".
+    if (!isAuthorEffectivelyMissing && !isTitleEffectivelyMissing) {
+        // Case 1: BOTH author and title are known and not default.
         const authorArray = (effectiveAuthor || "")
             .split(",")
             .map((author) => normalizeFileNamePiece(author.trim()))
             .filter(Boolean);
         const authorsString = authorArray.join(AUTHOR_SEPARATOR);
-
-        const titleFallback = sdrBaseName || DEFAULT_TITLE;
+        const normalizedTitle = normalizeFileNamePiece(effectiveTitle);
+        baseName = `${authorsString}${TITLE_SEPARATOR}${normalizedTitle}`;
+    } else if (!isAuthorEffectivelyMissing) {
+        // Case 2: Author is known, but title is missing.
+        const authorArray = (effectiveAuthor || "")
+            .split(",")
+            .map((author) => normalizeFileNamePiece(author.trim()))
+            .filter(Boolean);
+        const authorsString = authorArray.join(AUTHOR_SEPARATOR);
+        const titleFallback = sdrBaseName
+            ? simplifySdrName(sdrBaseName)
+            : DEFAULT_TITLE;
         baseName = `${authorsString}${TITLE_SEPARATOR}${titleFallback}`;
         devWarn(
-            `Using filename based on author and SDR/default title (title missing): ${baseName}`,
+            `Using filename based on author and SDR/default title: ${baseName}`,
         );
+    } else if (!isTitleEffectivelyMissing) {
+        // Case 3: Title is known, but author is missing.
+        baseName = normalizeFileNamePiece(effectiveTitle);
+        devWarn(`Using filename based on title (author missing): ${baseName}`);
     } else {
-        // Case 4: BOTH author and title are known and not default.
-        // Construct "Author(s) - Title String".
-        const authorArray = (effectiveAuthor || "")
-            .split(",")
-            .map((author) => normalizeFileNamePiece(author.trim()))
-            .filter(Boolean);
-        const authorsString = authorArray.join(AUTHOR_SEPARATOR);
-
-        const normalizedTitle = normalizeFileNamePiece(effectiveTitle); // effectiveTitle is guaranteed here
-        baseName = `${authorsString}${TITLE_SEPARATOR}${normalizedTitle}`;
+        // Case 4: BOTH are missing. Use ONLY the original SDR name (skip docProps.authors entirely).
+        baseName = sdrBaseName ? simplifySdrName(sdrBaseName) : DEFAULT_TITLE;
+        devWarn(
+            `Using cleaned SDR name (author/title missing): ${baseName}`,
+        );
     }
 
     // Final safety net: if baseName is somehow empty, use DEFAULT_TITLE.
@@ -117,11 +117,17 @@ export function generateObsidianFileName(
             `Filename defaulted to "${DEFAULT_TITLE}" due to empty base after processing.`,
         );
     }
-    baseName = normalizeFileNamePiece(baseName);
 
     const FOLDER_PATH_MARGIN = highlightsFolder.length + 1 + 5;
     const maxLengthForName = maxTotalPathLength - FOLDER_PATH_MARGIN -
         FILE_EXTENSION.length;
+
+    if (maxLengthForName <= 0) {
+        devWarn(
+            `highlightsFolder path is too long; falling back to default file name.`,
+        );
+        return DEFAULT_TITLE + FILE_EXTENSION;
+    }
 
     let finalName = baseName;
     if (baseName.length > maxLengthForName) {
@@ -131,7 +137,71 @@ export function generateObsidianFileName(
         );
     }
 
+    const fullPath = `${highlightsFolder}/${finalName}${FILE_EXTENSION}`;
+    devWarn(`Full path length: ${fullPath.length}, Path: ${fullPath}`);
+
     return `${finalName}${FILE_EXTENSION}`;
+}
+
+/**
+ * Collapse all the Koreader "SDR" to something that looks like
+ * a human filename.                           ─────────────────────────────
+ *
+ * 1.  Removes the leading "(Series-X)" block if it exists.
+ * 2.  Deletes duplicate *tokens* (A – B – C – A   →   A – B – C)
+ * 3.  Deletes duplicate *blocks* (A – B – C – A – B – C   →   A – B – C)
+ *
+ * The whole routine is case-insensitive, keeps the first spelling it
+ * encounters and preserves the original " ⸺  -  " separator.
+ */
+export function simplifySdrName(raw: string, delimiter = " - "): string {
+    if (!raw) {
+        return "";
+    }
+
+    // ── 0. Strip a prepended "(……)" leader
+    raw = raw.replace(/^\([^)]*\)\s*/, "").trim();
+
+    const parts = raw.split(delimiter).map((p) => p.trim()).filter(Boolean);
+
+    // ── 1. Drop REPEATED TOKENS  (case-insensitive)
+    const seen = new Set<string>();
+    const uniq: string[] = [];
+    for (const p of parts) {
+        const key = p.toLowerCase();
+        if (!seen.has(key)) {
+            seen.add(key);
+            uniq.push(p);
+        }
+    }
+
+    // ── 2. Drop REPEATED BLOCKS  (A B C  A B C  →  A B C)
+    let tokens = [...uniq];
+    let changed = true;
+
+    const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
+    while (changed) {
+        changed = false;
+
+        for (let block = Math.floor(tokens.length / 2); block >= 1; block--) {
+            // slide a window over the list; whenever we see  [X…] [X…]  collapse it
+            outer: for (let i = 0; i + 2 * block <= tokens.length; i++) {
+                for (let j = 0; j < block; j++) {
+                    if (!same(tokens[i + j], tokens[i + block + j])) {
+                        continue outer; // not identical → keep looking
+                    }
+                }
+                // Found a duplicate block – delete the second copy
+                tokens.splice(i + block, block);
+                changed = true;
+                break;
+            }
+            if (changed) break; // restart with the (possibly) shorter array
+        }
+    }
+
+    return tokens.join(delimiter) || "Untitled";
 }
 
 export function normalizeFileNamePiece(
@@ -147,40 +217,39 @@ export function normalizeFileNamePiece(
 
 export function getFileNameWithoutExt(filePath: string | undefined): string {
     if (!filePath) return "";
-    const fileName = basename(filePath); // Use basename to get just the file part
-    const lastDotIndex = fileName.lastIndexOf(".");
-    // If no dot, or dot is the first character (hidden file like .git), return full name
-    if (lastDotIndex <= 0) return fileName;
-    return fileName.slice(0, lastDotIndex);
+    return parse(filePath).name;
+}
+
+// Type guard function
+function isPositionObject(obj: any): obj is PositionObject {
+    return obj && typeof obj === "object" && "x" in obj && "y" in obj;
 }
 
 // Utility to parse pos0/pos1
 const positionCache = new Map<string, { node: string; offset: number }>();
 export function parsePosition(
-    pos: string | undefined,
+    pos: string | PositionObject | undefined,
 ): { node: string; offset: number } | null {
     if (!pos) return null;
-    const cached = positionCache.get(pos);
-    if (cached) return cached;
 
-    // Regex to capture base node path and offset
-    const match = pos.match(/^(.+)\.(\d+)$/);
-    if (!match) {
-        // devWarn(`Invalid position format: ${pos}`); // Keep logging minimal if too noisy
-        return null;
+    // Handle the new position format with x/y coordinates
+    if (isPositionObject(pos)) {
+        // Create a unique identifier based on coordinates
+        const node = `coord_${Math.round(pos.x)}_${Math.round(pos.y)}`;
+        return { node, offset: 0 };
     }
 
-    const [, node, offsetStr] = match;
-    const offset = Number.parseInt(offsetStr, 10);
+    // Existing string parsing logic
+    if (typeof pos === "string") {
+        const match = pos.match(/^(.+)\.(\d+)$/);
+        if (!match) return null;
 
-    if (Number.isNaN(offset)) {
-        // devWarn(`Invalid offset in position: ${pos}`);
-        return null;
+        const [, node, offsetStr] = match;
+        const offset = Number.parseInt(offsetStr, 10);
+        return Number.isNaN(offset) ? null : { node, offset };
     }
 
-    const result = { node, offset };
-    // positionCache.set(pos, result); // Add caching if needed
-    return result;
+    return null;
 }
 
 export function parseCfi(cfi: string): CfiParts | null {
@@ -227,70 +296,65 @@ export function parseCfi(cfi: string): CfiParts | null {
 export function areHighlightsSuccessive(
     h1: Annotation | undefined,
     h2: Annotation | undefined,
-    maxGap = 5,
+    maxGap = 250,
 ): boolean {
-    if (!h1 || !h2) {
-        return false;
+    if (!h1 || !h2) return false;
+    if (h1.pageno !== h2.pageno) return false;
+
+    // Handle coordinate-based positions
+    if (isPositionObject(h1.pos0) && isPositionObject(h2.pos0)) {
+        // Simple vertical proximity check
+        return Math.abs(h1.pos0.y - h2.pos0.y) < 50;
     }
 
-    // Must be on the same page
-    if (h1.pageno !== h2.pageno) {
-        // devLog(`Not successive: different page (${h1.pageno} vs ${h2.pageno})`);
-        return false;
-    }
-
-    const chapter1 = h1.chapter ?? ""; // Treat undefined as empty string for comparison
-    const chapter2 = h2.chapter ?? "";
-    if (chapter1 !== chapter2) {
-        // devLog(`Not successive: different chapter ('${chapter1}' vs '${chapter2}')`);
-        return false;
-    }
-
-    // Parse end position of h1 and start position of h2
+    // Existing string-based position logic
     const pos1_end = parsePosition(h1.pos1);
     const pos2_start = parsePosition(h2.pos0);
 
-    // If positions are invalid, cannot determine succession based on position
-    if (!pos1_end || !pos2_start) {
-        // devLog(`Not successive: invalid positions h1.pos1=${h1.pos1} or h2.pos0=${h2.pos0}`);
+    if (!pos1_end || !pos2_start || pos1_end.node !== pos2_start.node) {
         return false;
     }
 
-    // Must be within the same base node (e.g., same paragraph text node)
-    if (pos1_end.node !== pos2_start.node) {
-        // devLog(`Not successive: different nodes (${pos1_end.node} vs ${pos2_start.node})`);
-        return false;
-    }
-
-    // Check if the start of the second highlight is before or slightly after the end of the first.
-    // This handles adjacency (gap=1), exact continuation (gap=0), overlap (gap < 0),
-    // and small gaps (gap <= maxGap).
-    const isPositionalSuccessive =
-        pos2_start.offset <= pos1_end.offset + maxGap;
-
-    // devLog(`Successive Check: h1(end=${pos1_end.offset}) vs h2(start=${pos2_start.offset}). Condition: ${pos2_start.offset} <= ${pos1_end.offset + maxGap}. Result: ${isPositionalSuccessive}`);
-
-    return isPositionalSuccessive;
+    return pos2_start.offset - pos1_end.offset <= maxGap;
 }
 
 export function compareAnnotations(a: Annotation, b: Annotation): number {
     if (!a || !b) return 0;
-    if (a.pageno !== b.pageno) return a.pageno - b.pageno;
-    if ((a.chapter ?? "") !== (b.chapter ?? "")) {
-        return (a.chapter ?? "").localeCompare(b.chapter ?? "");
-    }
-    const aPos0 = a.pos0;
-    const bPos0 = b.pos0;
-    if (aPos0 && bPos0) {
-        if (aPos0 !== bPos0) return aPos0.localeCompare(bPos0);
-    } else if (aPos0) return -1; // Sort annotations with position first
-    else if (bPos0) return 1;
 
-    // Fallback to datetime
-    const dateA = a.datetime ? new Date(a.datetime).getTime() : 0;
-    const dateB = b.datetime ? new Date(b.datetime).getTime() : 0;
-    if (Number.isNaN(dateA) || Number.isNaN(dateB)) return 0;
-    return dateA - dateB;
+    // Primary sort: page number
+    if (a.pageno !== b.pageno) {
+        return a.pageno - b.pageno;
+    }
+
+    // Secondary sort: character position on the page.
+    const posA = parsePosition(a.pos0);
+    const posB = parsePosition(b.pos0);
+
+    if (posA && posB) {
+        if (posA.node !== posB.node) {
+            return posA.node.localeCompare(posB.node);
+        }
+        if (posA.offset !== posB.offset) {
+            return posA.offset - posB.offset;
+        }
+    } else if (posA) {
+        return -1;
+    } else if (posB) {
+        return 1;
+    }
+
+    // Fallback sort: datetime, for identical positions.
+    try {
+        const dateA = new Date(a.datetime).getTime();
+        const dateB = new Date(b.datetime).getTime();
+        if (!isNaN(dateA) && !isNaN(dateB)) {
+            return dateA - dateB;
+        }
+    } catch (e) {
+        // ignore invalid date formats
+    }
+
+    return 0;
 }
 
 // Group annotations by paragraph proximity
@@ -451,12 +515,13 @@ function formatHighlightGroup(
     // Combine notes
     const noteSection = sortedGroup
         .filter((h) => h.note)
-        .map((highlight) =>
-            `\n\n> [!NOTE] Note\n${
-                highlight.note?.split("\n").map((line) => `> ${line.trim()}`)
-                    .join("\n")
-            }`
-        )
+        .map((highlight) => {
+            const noteLines = highlight.note
+                ?.split("\n")
+                .map((line) => `> ${line}`) // do NOT trim, preserve spaces
+                .join("\n");
+            return `\n\n> [!NOTE] Note\n${noteLines}`;
+        })
         .join("\n");
 
     devLog(`Formatted group: ${highlightedText}`);
@@ -507,6 +572,30 @@ export function formatDate(dateStr: string): string {
         month: "short",
         day: "numeric",
     });
+}
+
+export function secondsToHoursMinutesSeconds(totalSeconds: number): string {
+    if (totalSeconds < 0) totalSeconds = 0;
+
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = Math.floor(totalSeconds % 60);
+
+    let result = "";
+    if (hours > 0) {
+        result += `${hours}h `;
+    }
+    if (minutes > 0 || hours > 0) { // Show minutes if hours are present or minutes > 0
+        result += `${minutes}m `;
+    }
+
+    if (seconds > 0 || result === "") { // If result is empty, means 0h 0m, so just show seconds.
+        result += `${seconds}s`;
+    }
+
+    result = result.trim(); // Remove trailing space if seconds is 0 and others are present
+
+    return result === "" ? "0s" : result; // Handle case of exactly 0 seconds
 }
 
 export function secondsToHoursMinutes(seconds: number): string {
@@ -568,4 +657,74 @@ export function getContrastTextColor(
 
     const lum = luminance(rgb);
     return lum > 0.5 ? "#222" : "#fff";
+}
+
+export function styleHighlight(
+    text: string,
+    color?: string,
+    drawer?: Annotation["drawer"],
+    isDarkTheme = false,
+): string {
+    if (!text || text.trim() === "") {
+        devWarn("Skipping empty highlight text");
+        return "";
+    }
+
+    const lowerColor = color?.toLowerCase().trim();
+    const colorHex: string | null = lowerColor != null
+        ? KOReaderHighlightColors[lowerColor] ?? color ?? null
+        : null;
+
+    // ───────────────────────────── drawers ──────────────────────────────
+    switch (drawer) {
+        case "underscore":
+            return `<u>${text}</u>`;
+
+        case "strikeout":
+            return `<s>${text}</s>`;
+
+        case "invert":
+            return createInvertedHighlight(text, colorHex, isDarkTheme);
+
+        case "lighten":
+            // Only bypass styling for grey color
+            if (colorHex === "#808080" || lowerColor === "gray") {
+                return text;
+            }
+            return createStandardHighlight(text, colorHex, isDarkTheme);
+
+        default:
+            return createStandardHighlight(text, colorHex, isDarkTheme);
+    }
+}
+
+function createInvertedHighlight(
+    text: string,
+    colorHex: string | null,
+    isDarkTheme: boolean,
+): string {
+    if (!colorHex) return text;
+
+    const textColor = getContrastTextColor(colorHex, isDarkTheme);
+    // Swap fg/bg compared to "standard" highlight
+    return createStyledMark(text, "transparent", textColor);
+}
+
+function createStandardHighlight(
+    text: string,
+    colorHex: string | null,
+    isDarkTheme: boolean,
+): string {
+    if (!colorHex) return text; // grey or unknown colours remain raw
+
+    const textColor = getContrastTextColor(colorHex, isDarkTheme);
+    return createStyledMark(text, colorHex, textColor);
+}
+
+function createStyledMark(
+    text: string,
+    backgroundColor: string,
+    textColor: string,
+): string {
+    return `<mark style="background-color: ${backgroundColor}; color: ${textColor};">${text}</mark>`;
 }

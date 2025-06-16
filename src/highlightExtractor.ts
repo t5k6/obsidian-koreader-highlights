@@ -1,49 +1,28 @@
 import type { Annotation } from "./types";
+import { compareAnnotations } from "./utils/formatUtils";
 
 export function extractHighlights(content: string): Annotation[] {
   const highlights: Annotation[] = [];
-  const lines = content.split("\n");
-  let currentHighlight: Partial<Annotation> | null = null;
-  let collectingText = false;
-  let currentText: string[] = [];
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (i === 0 && line === "---") {
-      while (i < lines.length && lines[i] !== "---") i++;
-      continue;
-    }
+  // This regex finds all highlight blocks in the text.
+  const highlightBlockRegex =
+    /(?:### Chapter:\s*(.+)\r?\n)?\(\*Date:\s*(.+?)\s*-\s*Page:\s*(.+?)\s*\*\)\r?\n([\s\S]*?)(?=---|$)/g;
 
-    const chapterMatch = line.match(/^### Chapter: (.+)$/);
-    if (chapterMatch) {
-      finalizeHighlight(currentHighlight, currentText, highlights);
-      currentHighlight = { chapter: chapterMatch[1] };
-      currentText = [];
-      continue;
-    }
+  const matches = content.matchAll(highlightBlockRegex);
 
-    const metadataMatch = line.match(/^\(\*Date: (.+) - Page: (\d+)\*\)$/);
-    if (metadataMatch && currentHighlight) {
-      currentHighlight.datetime = metadataMatch[1];
-      currentHighlight.pageno = Number.parseInt(metadataMatch[2], 10);
-      collectingText = true;
-      continue;
-    }
+  for (const match of matches) {
+    const [, chapter, datetime, pageStr, textBlock] = match;
 
-    if (line === "---") {
-      finalizeHighlight(currentHighlight, currentText, highlights);
-      currentHighlight = null;
-      collectingText = false;
-      currentText = [];
-      continue;
-    }
+    const pageNum = Number.parseInt(pageStr, 10);
 
-    if (collectingText && currentHighlight && line.trim()) {
-      currentText.push(line);
-    }
+    highlights.push({
+      chapter: chapter?.trim() || "",
+      datetime: datetime.trim(),
+      pageno: Number.isFinite(pageNum) ? pageNum : 0,
+      text: textBlock.trim(),
+    });
   }
 
-  finalizeHighlight(currentHighlight, currentText, highlights);
   return highlights;
 }
 
@@ -54,27 +33,52 @@ function finalizeHighlight(
 ) {
   if (!highlight) return;
 
+  const text = textLines.join("\n").trim();
+
+  if (!text) {
+    return;
+  }
+
   highlights.push({
-    chapter: highlight.chapter || "",
+    chapter: highlight.chapter?.trim() || "",
     datetime: highlight.datetime || new Date().toISOString(),
-    pageno: highlight.pageno || 0,
-    text: textLines.join("\n").trim(),
+    pageno: (highlight.pageno === undefined || Number.isNaN(highlight.pageno))
+      ? 0
+      : highlight.pageno,
+    text: text,
   });
 }
+
+// Helper to create a consistent key for a highlight
+const getHighlightKey = (h: Annotation): string => {
+  // Use a delimiter that is unlikely to appear in the text itself
+  const keyParts = [
+    h.chapter || "",
+    h.pageno,
+    (h.text || "").trim().replace(/\s+/g, " ").toLowerCase(), // Normalize text for key (trim, collapse whitespace, lowercase)
+  ];
+  return keyParts.join("|||");
+};
 
 export function mergeHighlights(
   existing: Annotation[],
   newHighlights: Annotation[],
-  isTextEqual: (a: string, b: string) => boolean,
+  isTextEqual: (text1: string, text2: string) => boolean,
 ): Annotation[] {
   const merged = [...existing];
+
+  // Create a Set of keys from existing highlights for O(1) lookup.
+  const existingKeys = new Set<string>(existing.map(getHighlightKey));
+
   for (const newHighlight of newHighlights) {
-    const exists = merged.some((eh) =>
-      eh.chapter === newHighlight.chapter &&
-      eh.pageno === newHighlight.pageno &&
-      isTextEqual(eh.text || "", newHighlight.text || "")
-    );
-    if (!exists) merged.push(newHighlight);
+    const key = getHighlightKey(newHighlight);
+    if (!existingKeys.has(key)) {
+      merged.push(newHighlight);
+      // Add the new key to the set to handle duplicates within newHighlights itself
+      existingKeys.add(key);
+    }
   }
-  return merged.sort((a, b) => a.pageno - b.pageno);
+
+  // Sort the merged array using compareAnnotations (assuming it exists)
+  return merged.sort(compareAnnotations);
 }

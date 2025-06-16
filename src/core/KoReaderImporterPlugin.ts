@@ -1,20 +1,12 @@
-import { type App, Notice, Plugin } from "obsidian";
-import { ContentGenerator } from "../services/ContentGenerator";
+import { Notice, Plugin } from "obsidian";
 import { DatabaseService } from "../services/DatabaseService";
-import { DuplicateHandler } from "../services/DuplicateHandler";
-import { FrontmatterGenerator } from "../services/FrontmatterGenerator";
 import { ImportManager } from "../services/ImportManager";
-import { MetadataParser } from "../services/MetadataParser";
 import { SDRFinder } from "../services/SDRFinder";
 import { ScanManager } from "../services/ScanManager";
 import { TemplateManager } from "../services/TemplateManager";
-import type {
-    DuplicateMatch,
-    IDuplicateHandlingModal,
-    KoReaderHighlightImporterSettings,
-} from "../types";
-import { DuplicateHandlingModal } from "../ui/DuplicateModal";
+import type { KoReaderHighlightImporterSettings } from "../types";
 import { SettingsTab } from "../ui/SettingsTab";
+import { runPluginAction } from "../utils/actionUtils";
 import {
     closeLogging,
     devError,
@@ -24,24 +16,18 @@ import {
     setDebugLevel,
     setDebugMode,
 } from "../utils/logging";
+import { DIContainer } from "./DIContainer";
 import { PluginCommands } from "./PluginCommands";
 import { PluginSettings } from "./PluginSettings";
+import { ServiceInitializer } from "./ServiceInitializer";
 
 export default class KoReaderImporterPlugin extends Plugin {
     public settings!: KoReaderHighlightImporterSettings;
     private pluginSettings!: PluginSettings;
-
-    private sdrFinder!: SDRFinder;
-    private databaseService!: DatabaseService;
-    private metadataParser!: MetadataParser;
-    private templateManager!: TemplateManager;
-    private frontmatterGenerator!: FrontmatterGenerator;
-    private contentGenerator!: ContentGenerator;
-    private duplicateHandler!: DuplicateHandler;
+    private diContainer = new DIContainer();
+    private servicesInitialized = false;
     private importManager!: ImportManager;
     private scanManager!: ScanManager;
-
-    private servicesInitialized = false;
 
     async onload() {
         console.log("KoReader Importer Plugin: Loading...");
@@ -91,50 +77,18 @@ export default class KoReaderImporterPlugin extends Plugin {
 
         // Initialize Services
         try {
-            this.sdrFinder = new SDRFinder(this.settings);
-            this.databaseService = new DatabaseService(this.settings);
-            this.templateManager = new TemplateManager(
-                this.app.vault,
-                this.settings,
-            );
-            this.frontmatterGenerator = new FrontmatterGenerator();
-            this.metadataParser = new MetadataParser(
-                this.settings,
-                this.sdrFinder,
-            );
-            this.contentGenerator = new ContentGenerator(
-                this.templateManager,
-                this.settings,
-            );
-            const modalFactory = (
-                app: App,
-                match: DuplicateMatch,
-                message: string,
-            ): IDuplicateHandlingModal => {
-                return new DuplicateHandlingModal(app, match, message);
-            };
-            this.duplicateHandler = new DuplicateHandler(
-                this.app.vault,
+            ServiceInitializer.init(
+                this.diContainer,
+                this,
                 this.app,
-                modalFactory,
                 this.settings,
-                this.frontmatterGenerator,
             );
 
-            this.importManager = new ImportManager(
-                this.app,
-                this.settings,
-                this.sdrFinder,
-                this.metadataParser,
-                this.databaseService,
-                this.frontmatterGenerator,
-                this.contentGenerator,
-                this.duplicateHandler,
+            this.importManager = this.diContainer.resolve<ImportManager>(
+                ImportManager,
             );
-            this.scanManager = new ScanManager(
-                this.app,
-                this.settings,
-                this.sdrFinder,
+            this.scanManager = this.diContainer.resolve<ScanManager>(
+                ScanManager,
             );
 
             this.servicesInitialized = true;
@@ -171,7 +125,10 @@ export default class KoReaderImporterPlugin extends Plugin {
 
         // Ensure Templates
         try {
-            await this.templateManager.ensureTemplates();
+            const templateManager = this.diContainer.resolve<TemplateManager>(
+                TemplateManager,
+            );
+            await templateManager.ensureTemplates();
             devLog("Default templates ensured.");
         } catch (error) {
             devError("Failed to ensure default templates:", error);
@@ -183,7 +140,18 @@ export default class KoReaderImporterPlugin extends Plugin {
 
     onunload() {
         console.log("KoReader Importer Plugin: Unloading...");
-        this.databaseService?.closeDatabase();
+
+        try {
+            const dbService = this.diContainer.resolve<DatabaseService>(
+                DatabaseService,
+            );
+            dbService.closeDatabase();
+        } catch (error) {
+            devWarn(
+                "DatabaseService not found during unload, may have failed to initialize.",
+            );
+        }
+
         closeLogging();
         this.servicesInitialized = false;
         devLog("KoReader Importer resources cleaned up.");
@@ -207,51 +175,55 @@ export default class KoReaderImporterPlugin extends Plugin {
         return true;
     }
 
+    private async ensureValidMountPoint(): Promise<boolean> {
+        const sdrFinder = this.diContainer.resolve<SDRFinder>(SDRFinder);
+        const ok = await sdrFinder.checkMountPoint();
+        if (!ok) {
+            new Notice(
+                "Mount point is not valid or accessible. Please check settings.",
+            );
+            devError("Operation aborted: Invalid mount point.");
+        }
+        return ok;
+    }
+
     // --- Methods Called by SettingsTab ---
     async triggerImport(): Promise<void> {
         devLog("Import triggered from settings tab.");
         if (!this.checkServiceStatus("import")) return;
+        if (!await this.ensureValidMountPoint()) return;
 
-        try {
-            await this.importManager.importHighlights();
-        } catch (error) {
-            devError("Unhandled error during triggered import:", error);
-            new Notice(
-                "An unexpected error occurred during import. Check console.",
-                5000,
-            );
-        }
+        await runPluginAction(
+            () => this.importManager.importHighlights(),
+            {
+                failureNotice: "An unexpected error occurred during import",
+            },
+        );
     }
 
     async triggerScan(): Promise<void> {
         devLog("Scan triggered from settings tab.");
         if (!this.checkServiceStatus("scan")) return;
+        if (!await this.ensureValidMountPoint()) return;
 
-        try {
-            await this.scanManager.scanForHighlights();
-        } catch (error) {
-            devError("Unhandled error during triggered scan:", error);
-            new Notice(
-                "An unexpected error occurred during scan. Check console.",
-                5000,
-            );
-        }
+        await runPluginAction(
+            () => this.scanManager.scanForHighlights(),
+            {
+                failureNotice: "An unexpected error occurred during scan",
+            },
+        );
     }
 
     async clearCaches(): Promise<void> {
         devLog("Cache clear triggered from settings tab.");
         if (!this.checkServiceStatus("cache clearing")) return;
 
-        try {
-            await this.importManager.clearCaches();
-            new Notice("KoReader Importer caches cleared.");
-        } catch (error) {
-            devError("Error clearing caches:", error);
-            new Notice(
-                "Failed to clear caches. See console for details.",
-                5000,
-            );
-        }
+        await runPluginAction(
+            () => this.importManager.clearCaches(),
+            {
+                failureNotice: "Failed to clear caches",
+            },
+        );
     }
 
     async saveSettings(): Promise<void> {
@@ -267,9 +239,20 @@ export default class KoReaderImporterPlugin extends Plugin {
 
         setDebugLevel(currentSettings.debugLevel);
 
-        this.sdrFinder?.updateSettings(currentSettings);
-        this.databaseService?.updateSettings(currentSettings);
-        this.templateManager?.updateSettings(currentSettings);
+        try {
+            this.diContainer.resolve<SDRFinder>(SDRFinder).updateSettings(
+                currentSettings,
+            );
+            this.diContainer.resolve<DatabaseService>(DatabaseService)
+                .setSettings(currentSettings);
+            this.diContainer.resolve<TemplateManager>(TemplateManager)
+                .updateSettings(currentSettings);
+        } catch (error) {
+            devError(
+                "Failed to update settings in one or more services",
+                error,
+            );
+        }
 
         devLog("Settings saved. Services notified of potential changes.");
     }

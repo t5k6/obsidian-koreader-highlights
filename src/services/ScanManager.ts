@@ -21,15 +21,6 @@ export class ScanManager {
     async scanForHighlights(): Promise<void> {
         devLog("Starting KoReader SDR scan process...");
 
-        const isMountPointValid = await this.sdrFinder.checkMountPoint();
-        if (!isMountPointValid) {
-            new Notice(
-                "Mount point is not valid or accessible. Please check settings.",
-            );
-            devError("Scan process aborted: Invalid mount point.");
-            return;
-        }
-
         const modal = new ProgressModal(this.app);
         modal.open();
         modal.statusEl.setText("Scanning for KoReader highlight files...");

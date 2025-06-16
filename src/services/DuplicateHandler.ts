@@ -2,14 +2,12 @@ import {
     type App,
     type CachedMetadata,
     Notice,
+    parseYaml,
+    Plugin,
     type TAbstractFile,
     TFile,
     type Vault,
 } from "obsidian";
-import {
-    type ParsedFrontmatter,
-    parseFrontmatterAndContent,
-} from "../frontmatter";
 import { extractHighlights, mergeHighlights } from "../highlightExtractor";
 import type {
     Annotation,
@@ -19,6 +17,7 @@ import type {
     IDuplicateHandlingModal,
     KoReaderHighlightImporterSettings,
     LuaMetadata,
+    ParsedFrontmatter,
 } from "../types";
 import { generateUniqueFilePath } from "../utils/fileUtils";
 import {
@@ -38,6 +37,21 @@ export class DuplicateHandler {
     private applyToAll = false;
     private applyToAllChoice: DuplicateChoice | null = null;
     private potentialDuplicatesCache: PotentialDuplicatesCache = new Map();
+    private globalVaultIndex: Map<CacheKey, Set<TFile>> = new Map();
+    private isGlobalIndexBuilt = false;
+    private fileToKey: Map<string, CacheKey> = new Map();
+
+    /** Normalises a title/author string for comparisons and cache keys. */
+    private static normalizeNamePart(str: string | undefined): string {
+        return normalizeFileNamePiece(str || "").toLowerCase();
+    }
+
+    /** Builds the canonical cache key from document properties. */
+    private static buildCacheKeyFromDocProps(props: DocProps): CacheKey {
+        return `${DuplicateHandler.normalizeNamePart(props.authors)}::${
+            DuplicateHandler.normalizeNamePart(props.title)
+        }`;
+    }
 
     constructor(
         private vault: Vault,
@@ -49,21 +63,28 @@ export class DuplicateHandler {
         ) => IDuplicateHandlingModal,
         private settings: KoReaderHighlightImporterSettings,
         frontmatterGeneratorInstance: FrontmatterGenerator,
+        private plugin: Plugin,
     ) {
         this.registerMetadataCacheEvents();
         this.frontmatterGenerator = frontmatterGeneratorInstance;
+
+        // Register listeners and let Obsidian dispose them automatically
+        this.plugin.registerEvent(
+            this.app.metadataCache.on(
+                "changed",
+                this.handleMetadataChange,
+                this,
+            ),
+        );
+        this.plugin.registerEvent(
+            this.app.metadataCache.on("deleted", this.handleFileDeletion, this),
+        );
+        this.plugin.registerEvent(
+            this.app.vault.on("rename", this.handleFileRename, this),
+        );
     }
 
     private registerMetadataCacheEvents(): void {
-        this.app.metadataCache.on(
-            "changed",
-            this.handleMetadataChange.bind(this),
-        );
-        this.app.metadataCache.on(
-            "deleted",
-            this.handleFileDeletion.bind(this),
-        );
-        this.app.vault.on("rename", this.handleFileRename.bind(this));
         devLog("DuplicateHandler: Registered metadata cache listeners.");
     }
 
@@ -74,97 +95,23 @@ export class DuplicateHandler {
         _data: string,
         cache: CachedMetadata,
     ): void {
-        // Only invalidate if the change is within the highlights folder (or if checking full vault)
-        if (
-            !this.settings.enableFullDuplicateCheck &&
-            !file.path.startsWith(this.settings.highlightsFolder)
-        ) {
-            return;
-        }
+        if (!this.settings.enableFullDuplicateCheck) return;
 
-        const frontmatter = cache.frontmatter;
-        // Invalidate cache based on Title/Author from the *changed* file's metadata
-        if (frontmatter?.title && frontmatter?.authors) {
-            // Reconstruct DocProps from potentially varied frontmatter formats
-            const docProps: DocProps = {
-                title: String(frontmatter.title),
-                authors: Array.isArray(frontmatter.authors)
-                    ? frontmatter.authors.join(", ")
-                    : String(frontmatter.authors || ""),
-            };
-            docProps.authors = docProps.authors.replace(/\[\[(.*?)\]\]/g, "$1");
-
-            const cacheKey = this.getCacheKey(docProps);
-            if (this.potentialDuplicatesCache.has(cacheKey)) {
-                this.potentialDuplicatesCache.delete(cacheKey);
-                devLog(
-                    `Invalidated duplicate cache for key (metadata change): ${cacheKey}`,
-                );
-            }
-        } else {
-            devLog(
-                `Cannot invalidate specific cache key for ${file.path} due to missing title/author in frontmatter after change.`,
-            );
-        }
+        // Update a single file instead of dropping everything
+        this.indexFile(file);
     }
 
     private handleFileDeletion(file: TFile): void {
-        // Remove the deleted file from any cache entry it might be part of
-        let invalidated = false;
-        for (const [key, files] of this.potentialDuplicatesCache.entries()) {
-            const index = files.findIndex((f) => f.path === file.path);
-            if (index !== -1) {
-                files.splice(index, 1);
-                devLog(
-                    `Removed deleted file ${file.path} from duplicate cache key: ${key}`,
-                );
-                invalidated = true;
-            }
-        }
-        if (!invalidated) {
-            // devLog(`Deleted file ${file.path} not found in duplicate cache.`);
-        }
+        if (!this.settings.enableFullDuplicateCheck) return;
+
+        this.unindexFile(file.path);
     }
 
     private handleFileRename(file: TAbstractFile, oldPath: string): void {
-        if (!(file instanceof TFile)) return; // Only handle file renames
+        if (!(file instanceof TFile)) return;
 
-        // Treat rename as a deletion of the old path and potentially an addition of the new path.
-        // We need to invalidate caches related to *both* old and new paths/metadata.
-
-        // Invalidate based on old path (remove it from lists)
-        let invalidatedOld = false;
-        for (const [key, files] of this.potentialDuplicatesCache.entries()) {
-            const index = files.findIndex((f) => f.path === oldPath);
-            if (index !== -1) {
-                files.splice(index, 1);
-                devLog(
-                    `Removed renamed file (old path ${oldPath}) from duplicate cache key: ${key}`,
-                );
-                invalidatedOld = true;
-            }
-        }
-
-        // Invalidate cache based on the *new* metadata of the renamed file
-        // Need to wait briefly for metadata cache to potentially update after rename
-        // Using setTimeout is a common workaround in Obsidian plugins for this
-        setTimeout(async () => {
-            try {
-                const newCache = this.app.metadataCache.getFileCache(file);
-                if (newCache) {
-                    this.handleMetadataChange(file, "", newCache); // Simulate metadata change
-                } else {
-                    devWarn(
-                        `Could not get metadata cache for renamed file: ${file.path}`,
-                    );
-                }
-            } catch (error) {
-                devError(
-                    `Error handling metadata cache after rename for ${file.path}:`,
-                    error,
-                );
-            }
-        }, 500); // Adjust delay if needed
+        // Remove old path from index immediately
+        this.unindexFile(oldPath);
     }
 
     /** Resets the "Apply to All" state. Call before starting a new batch import. */
@@ -221,28 +168,46 @@ export class DuplicateHandler {
 
     async findPotentialDuplicates(docProps: DocProps): Promise<TFile[]> {
         const cacheKey = this.getCacheKey(docProps);
+
+        // First check the session cache
         if (this.potentialDuplicatesCache.has(cacheKey)) {
-            devLog(`Cache hit for potential duplicates: ${cacheKey}`);
+            devLog(`Session cache hit for potential duplicates: ${cacheKey}`);
             return [...(this.potentialDuplicatesCache.get(cacheKey) || [])];
         }
 
-        devLog(
-            `Cache miss for potential duplicates: ${cacheKey}. Searching vault...`,
-        );
+        // If full vault checking is enabled, use or build the global index
+        if (this.settings.enableFullDuplicateCheck) {
+            // Build the index if it's not built yet
+            if (!this.isGlobalIndexBuilt) {
+                await this.buildGlobalVaultIndex();
+            }
 
-        const filesToCheck: TFile[] = this.settings.enableFullDuplicateCheck
-            ? this.app.vault.getMarkdownFiles()
-            : this.app.vault.getFiles().filter(
-                (file): file is TFile =>
-                    file instanceof TFile &&
-                    file.path.startsWith(
-                        `${this.settings.highlightsFolder}/`,
-                    ) &&
-                    file.extension === "md",
-            );
+            // Use the global index for lookup
+            if (this.globalVaultIndex.has(cacheKey)) {
+                const matches = [
+                    ...(this.globalVaultIndex.get(cacheKey) || []),
+                ];
+                // Also update the session cache
+                this.potentialDuplicatesCache.set(cacheKey, [...matches]);
+                devLog(
+                    `Global index hit for potential duplicates: ${cacheKey}`,
+                );
+                return matches;
+            }
 
-        devLog(
-            `Checking ${filesToCheck.length} files for duplicates (Full vault check: ${this.settings.enableFullDuplicateCheck})`,
+            // No matches in global index
+            devLog(`No matches found in global index for: ${cacheKey}`);
+            this.potentialDuplicatesCache.set(cacheKey, []);
+            return [];
+        }
+
+        devLog(`Searching in highlights folder for: ${cacheKey}`);
+
+        const filesToCheck = this.app.vault.getFiles().filter(
+            (file): file is TFile =>
+                file instanceof TFile &&
+                file.path.startsWith(`${this.settings.highlightsFolder}/`) &&
+                file.extension === "md",
         );
 
         const potentialDuplicates: TFile[] = [];
@@ -250,7 +215,6 @@ export class DuplicateHandler {
             const metadata = this.app.metadataCache.getFileCache(file);
             if (this.isMetadataMatch(metadata?.frontmatter, docProps)) {
                 potentialDuplicates.push(file);
-                devLog(`Potential duplicate found: ${file.path}`);
             }
         }
 
@@ -265,9 +229,13 @@ export class DuplicateHandler {
     ): Promise<DuplicateMatch> {
         devLog(`Analyzing duplicate content: ${existingFile.path}`);
         const existingContent = await this.vault.read(existingFile);
-        const { content: existingBody } = parseFrontmatterAndContent(
-            existingContent,
-        );
+        const fileCache = this.app.metadataCache.getFileCache(existingFile);
+
+        // Get body content after frontmatter using Obsidian's metadata
+        const existingBody = fileCache?.frontmatterPosition
+            ? existingContent.slice(fileCache.frontmatterPosition.end.offset)
+            : existingContent;
+
         const existingHighlights = extractHighlights(existingBody);
 
         let newHighlightCount = 0;
@@ -349,25 +317,26 @@ export class DuplicateHandler {
         choice: DuplicateChoice,
         match: DuplicateMatch,
         newContent: string,
-    ): Promise<void> {
+    ): Promise<boolean> {
         try {
             switch (choice) {
                 case "replace":
                     devLog(`Replacing file: ${match.file.path}`);
                     await this.vault.modify(match.file, newContent);
-                    break;
+                    return true;
                 case "merge": {
                     if (match.matchType === "exact") {
                         devLog("Merge skipped for exact match.");
-                        break;
+                        return true;
                     }
                     devLog(`Merging content into file: ${match.file.path}`);
                     const mergedContent = await this.mergeContents(
                         match.file,
                         newContent,
+                        match.luaMetadata,
                     );
                     await this.vault.modify(match.file, mergedContent);
-                    break;
+                    return true;
                 }
                 case "keep-both": {
                     devLog("Keeping both. Creating new file for import...");
@@ -396,13 +365,14 @@ export class DuplicateHandler {
                     );
                     devLog(`Creating unique file at: ${uniqueFilePath}`);
                     await this.vault.create(uniqueFilePath, newContent);
-                    break;
+                    return true;
                 }
                 case "skip":
                     devLog(`Skipping duplicate action for: ${match.file.path}`);
-                    break;
+                    return true;
                 default:
                     devWarn(`Invalid duplicate choice received: ${choice}`);
+                    return false;
             }
         } catch (error) {
             devError(
@@ -412,6 +382,7 @@ export class DuplicateHandler {
             new Notice(
                 `Failed to ${choice} file: ${match.file.path}. Check console.`,
             );
+            return false;
         }
     }
 
@@ -439,59 +410,81 @@ export class DuplicateHandler {
         return `${baseMsg}\n${fileMsg}\n\n${details}\n\nHow would you like to proceed?`;
     }
 
-    private async mergeContents(
-        existingFile: TFile,
-        newContentString: string,
-    ): Promise<string> {
-        devLog(`Starting content merge for: ${existingFile.path}`);
-        const existingContent = await this.vault.read(existingFile);
+    private mergeFrontmatterData(
+        existing: ParsedFrontmatter,
+        newDataFromImport: ParsedFrontmatter,
+    ): ParsedFrontmatter {
+        const merged: ParsedFrontmatter = {};
+        // Create a new merged object with all keys from existing frontmatter normalized to lowercase
+        for (const key in existing) {
+            if (Object.prototype.hasOwnProperty.call(existing, key)) {
+                merged[key.toLowerCase()] = existing[key];
+            }
+        }
 
-        const { frontmatter: existingFrontmatter, content: existingBody } =
-            parseFrontmatterAndContent(existingContent);
-        const { frontmatter: newFrontmatterData, content: newBody } =
-            parseFrontmatterAndContent(newContentString);
+        // Loop over the new data and merge it into our normalized object
+        for (const key in newDataFromImport) {
+            if (!Object.prototype.hasOwnProperty.call(newDataFromImport, key)) {
+                continue;
+            }
 
-        const existingHighlights = extractHighlights(existingBody);
-        const newHighlights = extractHighlights(newBody);
+            const lowerCaseKey = key.toLowerCase();
+            const newValue = newDataFromImport[key];
+            const existingValue = merged[lowerCaseKey];
 
-        devLog(
-            `Existing highlights: ${existingHighlights.length}, New highlights: ${newHighlights.length}`,
-        );
+            // Rule 1: Always prioritize new values for stats-related fields.
+            if (
+                [
+                    "lastread",
+                    "progress",
+                    "readingstatus",
+                    "totalreadtime",
+                    "averagetimeperpage",
+                    "highlightcount",
+                    "notecount",
+                    "pages",
+                    "firstread",
+                ].includes(lowerCaseKey)
+            ) {
+                merged[lowerCaseKey] = newValue;
+            } // Rule 2: For tags/keywords, merge them into a unique array.
+            else if (
+                (lowerCaseKey === "keywords" || lowerCaseKey === "tags") &&
+                (Array.isArray(existingValue) || Array.isArray(newValue))
+            ) {
+                const existingArray = Array.isArray(existingValue)
+                    ? existingValue
+                    : (existingValue
+                        ? String(existingValue).split(",").map((s) => s.trim())
+                        : []);
+                const newArray = Array.isArray(newValue)
+                    ? newValue
+                    : (newValue
+                        ? String(newValue).split(",").map((s) => s.trim())
+                        : []);
+                merged[lowerCaseKey] = Array.from(
+                    new Set([...existingArray, ...newArray]),
+                ).filter(Boolean);
+            } // Rule 3: For description, take the longer one.
+            else if (
+                lowerCaseKey === "description" &&
+                typeof newValue === "string" &&
+                typeof existingValue === "string" &&
+                newValue.length > existingValue.length
+            ) {
+                merged[lowerCaseKey] = newValue;
+            } // Rule 4: If an existing value is completely missing, add the new one.
+            else if (
+                existingValue === undefined || existingValue === null ||
+                existingValue === ""
+            ) {
+                merged[lowerCaseKey] = newValue;
+            }
+            // Default Rule: If none of the above rules apply (e.g., for 'title', 'authors'), the existing value is kept.
+        }
 
-        const mergedAnnotationList: Annotation[] = mergeHighlights(
-            existingHighlights,
-            newHighlights,
-            this.isHighlightTextEqual, // comparison function
-        );
-        devLog(`Total highlights after merge: ${mergedAnnotationList.length}`);
-
-        const mergedFrontmatter = this.mergeFrontmatterData(
-            existingFrontmatter,
-            newFrontmatterData,
-        );
-
-        const mergedBodyContent = this.formatMergedBodySimple(
-            mergedAnnotationList,
-        );
-        devLog("Generated merged body content.");
-
-        const finalFrontmatterString = this.frontmatterGenerator
-            .formatDataToYaml(
-                mergedFrontmatter,
-                {
-                    useFriendlyKeys: true,
-                    sortKeys: true,
-                },
-            );
-
-        const fullMergedContent =
-            (finalFrontmatterString
-                ? `---\n${
-                    finalFrontmatterString.replace(/^---\n|---\n$/g, "")
-                }\n---\n\n`
-                : "") + mergedBodyContent;
-
-        return fullMergedContent;
+        devLog("Merged frontmatter object completed:", merged);
+        return merged;
     }
 
     private formatMergedBodySimple(highlights: Annotation[]): string {
@@ -559,66 +552,101 @@ export class DuplicateHandler {
     }
 
     /** Merges two frontmatter objects. Prioritizes existing values generally, updates specific fields. */
-    private mergeFrontmatterData(
-        existing: ParsedFrontmatter,
-        newDataFromImport: ParsedFrontmatter,
-    ): ParsedFrontmatter {
-        const merged: ParsedFrontmatter = { ...existing };
+    private async mergeContents(
+        existingFile: TFile,
+        newContentString: string,
+        luaMetadata?: LuaMetadata,
+    ): Promise<string> {
+        devLog(`Starting content merge for: ${existingFile.path}`);
 
-        for (const key in newDataFromImport) {
-            if (!Object.prototype.hasOwnProperty.call(newDataFromImport, key)) {
-                continue;
-            }
+        // --- 1. Get existing file data using Obsidian's metadata cache ---
+        const existingFileCache = this.app.metadataCache.getFileCache(
+            existingFile,
+        );
+        const existingFrontmatter = existingFileCache?.frontmatter || {};
+        const existingContent = await this.vault.read(existingFile);
+        const existingBody = existingFileCache?.frontmatterPosition
+            ? existingContent.slice(
+                existingFileCache.frontmatterPosition.end.offset,
+            )
+            : existingContent;
+        const existingHighlights = extractHighlights(existingBody);
 
-            const newValue = newDataFromImport[key];
-            const existingValue = merged[key];
+        // --- 2. Get new file data from luaMetadata or parse if not provided ---
+        let newHighlights: Annotation[];
+        let newFrontmatterData: ParsedFrontmatter;
 
-            // Prioritize new values for stats-related fields from the import
-            if (
-                key === "lastRead" || key === "progress" ||
-                key === "readingStatus" ||
-                key === "totalReadTime" || key === "averageTimePerPage" ||
-                key === "highlightCount" || key === "noteCount" ||
-                key === "pages" ||
-                key === "firstRead"
-            ) {
-                merged[key] = newValue;
-            } // For tags/keywords, merge them
-            else if (
-                (key === "keywords" || key === "tags") &&
-                (Array.isArray(existingValue) || Array.isArray(newValue))
-            ) {
-                const existingArray = Array.isArray(existingValue)
-                    ? existingValue
-                    : (existingValue
-                        ? String(existingValue).split(",").map((s) => s.trim())
-                        : []);
-                const newArray = Array.isArray(newValue)
-                    ? newValue
-                    : (newValue
-                        ? String(newValue).split(",").map((s) => s.trim())
-                        : []);
-                merged[key] = Array.from(
-                    new Set([...existingArray, ...newArray]),
-                ).filter(Boolean);
-            } // If existing value is missing, or new value is "more complete" (e.g. description)
-            else if (
-                existingValue === undefined || existingValue === null ||
-                existingValue === ""
-            ) {
-                merged[key] = newValue;
-            } else if (
-                key === "description" && typeof newValue === "string" &&
-                typeof existingValue === "string" &&
-                newValue.length > existingValue.length
-            ) {
-                merged[key] = newValue; // Keep longer description
-            }
-            // Default: keep existing for other fields (e.g. title, authors, user-added custom fields in existing note)
-            // unless explicitly overwritten by a more specific rule above.
+        if (luaMetadata) {
+            // Use the already parsed luaMetadata
+            newHighlights = luaMetadata.annotations;
+            newFrontmatterData = this.frontmatterGenerator
+                .createFrontmatterData(
+                    luaMetadata,
+                    {
+                        disabledFields: [],
+                        customFields: Object.keys(luaMetadata.docProps),
+                    },
+                );
+        } else {
+            // Fallback to parsing from string if luaMetadata not provided
+            const frontmatterRegex =
+                /^---\s*[\r\n]([\s\S]*?)[\r\n]---\s*[\r\n]?/;
+            const newFrontmatterMatch = newContentString.match(
+                frontmatterRegex,
+            );
+
+            const newBody = newFrontmatterMatch
+                ? newContentString.slice(newFrontmatterMatch[0].length)
+                : newContentString;
+            newHighlights = extractHighlights(newBody);
+
+            const newParsedFrontmatter = newFrontmatterMatch
+                ? parseYaml(newFrontmatterMatch[1])
+                : {};
+
+            // Create a temporary LuaMetadata-like object
+            const tempNewLuaMetadata: LuaMetadata = {
+                docProps: newParsedFrontmatter as DocProps,
+                annotations: newHighlights,
+                statistics: undefined,
+            };
+
+            newFrontmatterData = this.frontmatterGenerator
+                .createFrontmatterData(
+                    tempNewLuaMetadata,
+                    {
+                        disabledFields: [],
+                        customFields: Object.keys(tempNewLuaMetadata.docProps),
+                    },
+                );
         }
-        devLog("Merged frontmatter object completed.");
-        return merged;
+
+        // --- 3. Merge the data and highlights ---
+        const mergedAnnotationList: Annotation[] = mergeHighlights(
+            existingHighlights,
+            newHighlights,
+            this.isHighlightTextEqual,
+        );
+
+        const mergedFrontmatter = this.mergeFrontmatterData(
+            existingFrontmatter,
+            newFrontmatterData,
+        );
+
+        const mergedBodyContent = this.formatMergedBodySimple(
+            mergedAnnotationList,
+        );
+
+        // --- 4. Generate the final content string using the generator ---
+        const finalFrontmatterString = this.frontmatterGenerator
+            .formatDataToYaml(
+                mergedFrontmatter,
+                { useFriendlyKeys: true, sortKeys: true },
+            );
+
+        return finalFrontmatterString
+            ? `${finalFrontmatterString}\n\n${mergedBodyContent}`
+            : mergedBodyContent;
     }
 
     private isMetadataMatch(
@@ -660,13 +688,18 @@ export class DuplicateHandler {
         ])
             .replace(/\[\[(.*?)\]\]/g, "$1"); // Strip Obsidian links
 
-        const normalize = (str: string) =>
-            normalizeFileNamePiece(str || "").toLowerCase();
-
-        const existingTitleNorm = normalize(existingTitleRaw);
-        const existingAuthorsNorm = normalize(existingAuthorsRaw);
-        const newTitleNorm = normalize(newDocProps.title);
-        const newAuthorsNorm = normalize(newDocProps.authors);
+        const existingTitleNorm = DuplicateHandler.normalizeNamePart(
+            existingTitleRaw,
+        );
+        const existingAuthorsNorm = DuplicateHandler.normalizeNamePart(
+            existingAuthorsRaw,
+        );
+        const newTitleNorm = DuplicateHandler.normalizeNamePart(
+            newDocProps.title,
+        );
+        const newAuthorsNorm = DuplicateHandler.normalizeNamePart(
+            newDocProps.authors,
+        );
 
         // Require both title and author to match
         const titleMatch = existingTitleNorm.length > 0 &&
@@ -677,31 +710,27 @@ export class DuplicateHandler {
         return titleMatch && authorMatch;
     }
 
+    /** Normalizes text for comparison (trim, collapse whitespace, lowercase). */
+    private normalizeForComparison(text?: string): string {
+        return text?.trim().replace(/\s+/g, " ").toLowerCase() ?? "";
+    }
+
     /** Checks if two highlight text blocks are functionally equal (ignore whitespace/case). */
     private isHighlightTextEqual(text1: string, text2: string): boolean {
-        const normalize = (text: string) =>
-            text?.trim().replace(/\s+/g, " ").toLowerCase() ?? "";
-        return normalize(text1) === normalize(text2);
+        return this.normalizeForComparison(text1) ===
+            this.normalizeForComparison(text2);
     }
 
     /** Checks if two notes are functionally equal (ignore whitespace/case). */
     private isNoteTextEqual(note1?: string, note2?: string): boolean {
-        // Treat null/undefined/empty strings as equal
-        const normalized1 = note1?.trim().replace(/\s+/g, " ").toLowerCase() ??
-            "";
-        const normalized2 = note2?.trim().replace(/\s+/g, " ").toLowerCase() ??
-            "";
-        return normalized1 === normalized2;
+        return this.normalizeForComparison(note1) ===
+            this.normalizeForComparison(note2);
     }
 
     /** Creates a consistent key for caching potential duplicates. */
+
     private getCacheKey(docProps: DocProps): CacheKey {
-        // Normalize author and title for consistent caching
-        const authorKey = normalizeFileNamePiece(docProps.authors || "")
-            .toLowerCase();
-        const titleKey = normalizeFileNamePiece(docProps.title || "")
-            .toLowerCase();
-        return `${authorKey}::${titleKey}`;
+        return DuplicateHandler.buildCacheKeyFromDocProps(docProps);
     }
 
     private determineMatchType(
@@ -718,5 +747,70 @@ export class DuplicateHandler {
         // Use page number and starting position (if available) for uniqueness
         const posStart = annotation.pos0 || ""; // Fallback to empty string if undefined
         return `p${annotation.pageno}-${posStart}`;
+    }
+
+    private async buildGlobalVaultIndex(): Promise<void> {
+        if (!this.settings.enableFullDuplicateCheck) return;
+
+        this.globalVaultIndex.clear();
+        this.fileToKey.clear();
+
+        const files = this.app.vault.getMarkdownFiles();
+        for (const file of files) {
+            this.indexFile(file); // reuse incremental helper
+        }
+        this.isGlobalIndexBuilt = true;
+        devLog(`Global vault index built with ${this.fileToKey.size} files.`);
+    }
+
+    private indexFile(file: TFile): void {
+        const metadata = this.app.metadataCache.getFileCache(file);
+        const fm = metadata?.frontmatter;
+        if (!fm?.title) return;
+
+        const authorsRaw = fm.authors ?? fm.author;
+        if (!authorsRaw) return;
+
+        const docProps: DocProps = {
+            title: String(fm.title),
+            authors: Array.isArray(authorsRaw)
+                ? authorsRaw.join(", ")
+                : String(authorsRaw),
+        };
+        docProps.authors = docProps.authors.replace(/\[\[(.*?)\]\]/g, "$1");
+        const newKey = this.getCacheKey(docProps);
+        const oldKey = this.fileToKey.get(file.path);
+
+        // Nothing changed
+        if (oldKey === newKey) return;
+
+        // 1. Remove from previous bucket
+        if (oldKey && this.globalVaultIndex.has(oldKey)) {
+            this.globalVaultIndex.get(oldKey)!.delete(file);
+            if (this.globalVaultIndex.get(oldKey)!.size === 0) {
+                this.globalVaultIndex.delete(oldKey);
+            }
+        }
+
+        // 2. Add to new bucket
+        if (!this.globalVaultIndex.has(newKey)) {
+            this.globalVaultIndex.set(newKey, new Set());
+        }
+        this.globalVaultIndex.get(newKey)!.add(file);
+        this.fileToKey.set(file.path, newKey);
+    }
+
+    /** Remove file entirely from the global index. */
+    private unindexFile(filePath: string): void {
+        const key = this.fileToKey.get(filePath);
+        if (!key) return;
+        const bucket = this.globalVaultIndex.get(key);
+        if (bucket) {
+            bucket.forEach((f) => {
+                if (f.path === filePath) bucket.delete(f);
+            });
+            if (bucket.size === 0) this.globalVaultIndex.delete(key);
+        }
+        this.fileToKey.delete(filePath);
     }
 }

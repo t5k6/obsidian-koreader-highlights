@@ -3,7 +3,7 @@ import { type App, normalizePath, Notice, TFile } from "obsidian";
 import type {
     Annotation,
     DuplicateChoice,
-    KoReaderHighlightImporterSettings,
+    KoreaderHighlightImporterSettings,
     LuaMetadata,
 } from "../types";
 import { ProgressModal } from "../ui/ProgressModal";
@@ -26,7 +26,7 @@ import type { SDRFinder } from "./SDRFinder";
 export class ImportManager {
     constructor(
         private app: App,
-        private settings: KoReaderHighlightImporterSettings,
+        private settings: KoreaderHighlightImporterSettings,
         private sdrFinder: SDRFinder,
         private metadataParser: MetadataParser,
         private databaseService: DatabaseService,
@@ -36,17 +36,17 @@ export class ImportManager {
     ) {}
 
     async importHighlights(): Promise<void> {
-        devLog("Starting KoReader highlight import process...");
+        devLog("Starting KOReader highlight import process...");
 
         const modal = new ProgressModal(this.app);
         modal.open();
 
         try {
-            const sdrFilePaths = await this.sdrFinder
-                .findSdrDirectoriesWithMetadata();
+            const sdrFilePaths =
+                await this.sdrFinder.findSdrDirectoriesWithMetadata();
             if (!sdrFilePaths || sdrFilePaths.length === 0) {
                 new Notice(
-                    "No KoReader highlight files (.sdr directories with metadata.lua) found.",
+                    "No KOReader highlight files (.sdr directories with metadata.lua) found.",
                 );
                 devLog("No SDR files found to import.");
                 modal.close();
@@ -72,9 +72,8 @@ export class ImportManager {
 
                 try {
                     // 1. Parse Metadata
-                    const luaMetadata = await this.metadataParser.parseFile(
-                        sdrPath,
-                    );
+                    const luaMetadata =
+                        await this.metadataParser.parseFile(sdrPath);
                     if (!luaMetadata) {
                         devWarn(
                             `Skipping SDR due to parsing error or no metadata: ${sdrPath}`,
@@ -86,8 +85,8 @@ export class ImportManager {
                     // 2. Fetch Statistics
                     if (this.settings.frontmatter) {
                         try {
-                            const stats = await this.databaseService
-                                .getBookStatistics(
+                            const stats =
+                                await this.databaseService.getBookStatistics(
                                     luaMetadata.docProps.authors,
                                     luaMetadata.docProps.title,
                                 );
@@ -182,20 +181,25 @@ ${created} new • ${merged} merged • ${skipped} skipped • ${errors} error(s
         );
 
         // 2. Generate Content
-        const frontmatterString = this.frontmatterGenerator
-            .generateYamlFromLuaMetadata(
+        const frontmatterString =
+            this.frontmatterGenerator.generateYamlFromLuaMetadata(
                 luaMetadata,
                 this.settings.frontmatter,
             );
-        const highlightsContent = await this.contentGenerator
-            .generateHighlightsContent(annotations, luaMetadata);
+        const highlightsContent =
+            await this.contentGenerator.generateHighlightsContent(
+                annotations,
+                luaMetadata,
+            );
         const fullContent = `${frontmatterString}\n\n${highlightsContent}`;
 
         devLog(`Generated content for: ${fileName}`);
 
         // 3. Handle Duplicates & Save
-        const potentialDuplicates = await this.duplicateHandler
-            .findPotentialDuplicates(luaMetadata.docProps);
+        const potentialDuplicates =
+            await this.duplicateHandler.findPotentialDuplicates(
+                luaMetadata.docProps,
+            );
 
         if (potentialDuplicates.length > 0) {
             devLog(
@@ -255,8 +259,11 @@ ${created} new • ${merged} merged • ${skipped} skipped • ${errors} error(s
                 luaMetadata,
             );
 
-            const { choice, applyToAll } = await this.duplicateHandler
-                .handleDuplicate(analysis, newContent);
+            const { choice, applyToAll } =
+                await this.duplicateHandler.handleDuplicate(
+                    analysis,
+                    newContent,
+                );
 
             // Return all choices including 'keep-both'
             if (choice) {

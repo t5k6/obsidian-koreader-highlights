@@ -1,7 +1,7 @@
 {
 	"name": "koreader-highlights-importer",
 	"version": "1.1.1",
-	"description": "Imports highlights and metadata from KoReader into Obsidian notes (https://obsidian.md)",
+	"description": "Imports highlights and metadata from KOReader into Obsidian notes (https://obsidian.md)",
 	"main": "main.js",
 	"type": "commonjs",
 	"scripts": {

@@ -10,7 +10,7 @@ import {
     type TextComponent,
     TFolder,
 } from "obsidian";
-import type KoReaderImporterPlugin from "../core/KoReaderImporterPlugin";
+import type KoreaderImporterPlugin from "../core/KoreaderImporterPlugin";
 import type { FrontmatterSettings } from "../types";
 import { runPluginAction } from "../utils/actionUtils";
 import { ensureFolderExists } from "../utils/fileUtils";
@@ -20,7 +20,7 @@ class FolderInputSuggest extends AbstractInputSuggest<string> {
     constructor(
         app: App,
         private inputEl: HTMLInputElement,
-        private plugin: KoReaderImporterPlugin,
+        private plugin: KoreaderImporterPlugin,
         private onSubmit: (result: string) => void,
     ) {
         super(app, inputEl);
@@ -29,11 +29,12 @@ class FolderInputSuggest extends AbstractInputSuggest<string> {
     getSuggestions(query: string): string[] {
         const lowerCaseQuery = query.toLowerCase();
         // Suggest existing folders
-        return this.app.vault.getAllLoadedFiles()
+        return this.app.vault
+            .getAllLoadedFiles()
             .filter((file): file is TFolder => file instanceof TFolder)
             .map((folder) => folder.path)
             .filter((folderPath) =>
-                folderPath.toLowerCase().includes(lowerCaseQuery)
+                folderPath.toLowerCase().includes(lowerCaseQuery),
             )
             .sort(); // Sort suggestions alphabetically
     }
@@ -63,9 +64,9 @@ class FolderInputSuggest extends AbstractInputSuggest<string> {
 // --- Main Settings Tab Class ---
 export class SettingsTab extends PluginSettingTab {
     // Store a reference to the main plugin class instance
-    private plugin: KoReaderImporterPlugin;
+    private plugin: KoreaderImporterPlugin;
 
-    constructor(app: App, plugin: KoReaderImporterPlugin) {
+    constructor(app: App, plugin: KoreaderImporterPlugin) {
         super(app, plugin);
         this.plugin = plugin;
     }
@@ -80,9 +81,9 @@ export class SettingsTab extends PluginSettingTab {
         let mountPointTextComponent: TextComponent;
 
         new Setting(containerEl)
-            .setName("KoReader mount point")
+            .setName("KOReader mount point")
             .setDesc(
-                "The directory where your KoReader device (or its filesystem dump) is mounted. Example: /Volumes/KOBOeReader or E:/",
+                "The directory where your KOReader device (or its filesystem dump) is mounted. Example: /Volumes/KOBOeReader or E:/",
             )
             .addText((text) => {
                 mountPointTextComponent = text;
@@ -96,14 +97,15 @@ export class SettingsTab extends PluginSettingTab {
                     });
             })
             .addButton((button) => {
-                button.setButtonText("Browse")
-                    .setTooltip("Select KoReader mount point folder")
+                button
+                    .setButtonText("Browse")
+                    .setTooltip("Select KOReader mount point folder")
                     .onClick(async () => {
                         try {
                             const electron = require("electron");
 
-                            const dialog = electron.remote?.dialog ??
-                                electron.dialog;
+                            const dialog =
+                                electron.remote?.dialog ?? electron.dialog;
                             if (!dialog) {
                                 throw new Error(
                                     "Electron dialog module not available.",
@@ -115,11 +117,12 @@ export class SettingsTab extends PluginSettingTab {
                                     "openDirectory",
                                     "showHiddenFiles",
                                 ],
-                                title: "Select KoReader Mount Point",
+                                title: "Select KOReader Mount Point",
                             });
 
                             if (
-                                !result.canceled && result.filePaths.length > 0
+                                !result.canceled &&
+                                result.filePaths.length > 0
                             ) {
                                 const selectedPath = normalize(
                                     result.filePaths[0],
@@ -151,7 +154,7 @@ export class SettingsTab extends PluginSettingTab {
                 "The folder within your vault to save imported highlight notes.",
             )
             .addText((text) => {
-                text.setPlaceholder("KoReader Highlights")
+                text.setPlaceholder("KOReader Highlights")
                     .setValue(this.plugin.settings.highlightsFolder)
                     .onChange(async (value) => {
                         this.plugin.settings.highlightsFolder = value;
@@ -172,7 +175,7 @@ export class SettingsTab extends PluginSettingTab {
                 text.inputEl.addEventListener("blur", async () => {
                     let pathValue = text.getValue().trim();
                     if (!pathValue) {
-                        pathValue = "KoReader Highlights";
+                        pathValue = "KOReader Highlights";
                         text.setValue(pathValue);
                     }
                     const normalized = normalizePath(pathValue);
@@ -192,7 +195,8 @@ export class SettingsTab extends PluginSettingTab {
             .setDesc(
                 "Comma-separated list of folder names to ignore during scanning (e.g., .git, .stfolder, $RECYCLE.BIN). Case-sensitive.",
             )
-            .addTextArea((text) => { // Use TextArea for potentially longer lists
+            .addTextArea((text) => {
+                // Use TextArea for potentially longer lists
                 text.setValue(this.plugin.settings.excludedFolders.join(", "))
                     .setPlaceholder(".adds, .kobo, System Volume Information")
                     .onChange(async (value) => {
@@ -214,12 +218,13 @@ export class SettingsTab extends PluginSettingTab {
                     .setValue(this.plugin.settings.allowedFileTypes.join(", "))
                     .setPlaceholder("epub, pdf, mobi, cbz")
                     .onChange(async (value) => {
-                        const types = value.split(",").map((s) =>
-                            s.trim().toLowerCase()
-                        ).filter(Boolean);
+                        const types = value
+                            .split(",")
+                            .map((s) => s.trim().toLowerCase())
+                            .filter(Boolean);
                         this.plugin.settings.allowedFileTypes = types;
                         await this.plugin.saveSettings();
-                    })
+                    }),
             );
 
         // --- Import Actions ---
@@ -232,7 +237,7 @@ export class SettingsTab extends PluginSettingTab {
         new Setting(actionsContainer)
             .setName("Scan for highlights")
             .setDesc(
-                "Scan the KoReader mount point and generate a report listing found highlight files.",
+                "Scan the KOReader mount point and generate a report listing found highlight files.",
             )
             .addButton((button) =>
                 button
@@ -242,26 +247,23 @@ export class SettingsTab extends PluginSettingTab {
                         button.setDisabled(true).setButtonText("Scanning...");
                         await this.plugin.triggerScan();
                         button.setDisabled(false).setButtonText("Scan Now");
-                    })
+                    }),
             );
 
         new Setting(actionsContainer)
             .setName("Import highlights")
             .setDesc(
-                "Import highlights from all found and allowed files on the KoReader mount point.",
+                "Import highlights from all found and allowed files on the KOReader mount point.",
             )
             .addButton((button) =>
                 button.setButtonText("Import Now").onClick(async () => {
-                    await runPluginAction(
-                        () => this.plugin.triggerImport(),
-                        {
-                            button,
-                            inProgressText: "Importing...",
-                            completedText: "Import Now",
-                            failureNotice: "Failed to import highlights",
-                        },
-                    );
-                })
+                    await runPluginAction(() => this.plugin.triggerImport(), {
+                        button,
+                        inProgressText: "Importing...",
+                        completedText: "Import Now",
+                        failureNotice: "Failed to import highlights",
+                    });
+                }),
             );
 
         // --- Formatting & Duplicates ---
@@ -280,7 +282,7 @@ export class SettingsTab extends PluginSettingTab {
                     .onChange(async (value) => {
                         this.plugin.settings.enableFullDuplicateCheck = value;
                         await this.plugin.saveSettings();
-                    })
+                    }),
             );
 
         // --- Template Settings ---
@@ -336,11 +338,11 @@ export class SettingsTab extends PluginSettingTab {
                     .setName("Template directory")
                     .setDesc("The folder within your vault to store templates.")
                     .addText((text) => {
-                        text.setPlaceholder("Koreader/templates")
+                        text.setPlaceholder("KOReader/templates")
                             .setValue(this.plugin.settings.template.templateDir)
                             .onChange(async (value) => {
                                 this.plugin.settings.template.templateDir =
-                                    value.trim() || "Koreader/templates";
+                                    value.trim() || "KOReader/templates";
                                 await this.plugin.saveSettings();
                             });
 
@@ -358,7 +360,7 @@ export class SettingsTab extends PluginSettingTab {
                         text.inputEl.addEventListener("blur", async () => {
                             let pathValue = text.getValue().trim();
                             if (!pathValue) {
-                                pathValue = "Koreader/templates";
+                                pathValue = "KOReader/templates";
                                 text.setValue(pathValue);
                             }
                             const normalized = normalizePath(pathValue);
@@ -395,8 +397,8 @@ export class SettingsTab extends PluginSettingTab {
                     .setWarning()
                     .onClick(async () => {
                         await this.plugin.clearCaches();
-                        new Notice("KoReader Importer caches cleared.");
-                    })
+                        new Notice("KOReader Importer caches cleared.");
+                    }),
             );
 
         new Setting(containerEl)
@@ -427,7 +429,7 @@ export class SettingsTab extends PluginSettingTab {
         new Setting(containerEl)
             .setName("Enable Debug File Logging")
             .setDesc(
-                "Write debug messages to a file in the vault (Koreader/logs). Requires plugin reload to take effect.",
+                "Write debug messages to a file in the vault (KOReader/logs). Requires plugin reload to take effect.",
             )
             .addToggle((toggle) =>
                 toggle
@@ -440,7 +442,7 @@ export class SettingsTab extends PluginSettingTab {
                                 value ? "enabled" : "disabled"
                             }. Reload Obsidian for changes to take effect.`,
                         );
-                    })
+                    }),
             );
     }
 
@@ -451,10 +453,12 @@ export class SettingsTab extends PluginSettingTab {
         const templatesFolder = normalizePath(
             this.plugin.settings.template.templateDir,
         );
-        const templateFiles = this.app.vault.getFiles()
-            .filter((f) =>
-                f.path.startsWith(`${templatesFolder}/`) &&
-                (f.extension === "md" || f.extension === "txt")
+        const templateFiles = this.app.vault
+            .getFiles()
+            .filter(
+                (f) =>
+                    f.path.startsWith(`${templatesFolder}/`) &&
+                    (f.extension === "md" || f.extension === "txt"),
             )
             .map((f) => f.path);
 
@@ -472,7 +476,8 @@ export class SettingsTab extends PluginSettingTab {
                 dropdown.addOption("enhanced", "Enhanced (Built-in)");
                 dropdown.addOption("compact-list", "Compact List (Built-in)");
                 dropdown.addOption("blockquote", "Blockquote (Built-in)");
-                dropdown.addOption("__sep__", "---- Vault Templates ----")
+                dropdown
+                    .addOption("__sep__", "---- Vault Templates ----")
                     .setDisabled(false); // Separator
 
                 for (const file of templateFiles) {
@@ -502,7 +507,8 @@ export class SettingsTab extends PluginSettingTab {
                 `No templates found in "${templatesFolder}". Create files ending in .md or .txt there.`,
             );
             // Ensure selection is cleared if no files exist
-            if (this.plugin.settings.template.selectedTemplate !== "default") { // Keep default if it was selected
+            if (this.plugin.settings.template.selectedTemplate !== "default") {
+                // Keep default if it was selected
                 this.plugin.settings.template.selectedTemplate = "default";
                 this.plugin.saveSettings();
             }
@@ -542,10 +548,9 @@ export class SettingsTab extends PluginSettingTab {
                 "Choose which standard fields to EXCLUDE from the frontmatter. Title and Author(s) are always included.",
             )
             .addButton((button) => {
-                button.setButtonText("Manage Excluded Fields")
-                    .onClick(() => {
-                        this.showFieldSelectionModal(fieldOptions);
-                    });
+                button.setButtonText("Manage Excluded Fields").onClick(() => {
+                    this.showFieldSelectionModal(fieldOptions);
+                });
             });
     }
 
@@ -588,8 +593,8 @@ class FrontmatterFieldModal extends Modal {
         // Initialize temporary state for toggles
         this.fieldStates = {};
         for (const field of this.options) {
-            this.fieldStates[field.id] = this.currentSettings.disabledFields
-                .includes(field.id);
+            this.fieldStates[field.id] =
+                this.currentSettings.disabledFields.includes(field.id);
         }
     }
 
@@ -609,21 +614,18 @@ class FrontmatterFieldModal extends Modal {
 
         // Create toggles for standard fields
         for (const field of this.options) {
-            new Setting(listEl)
-                .setName(field.name)
-                .addToggle((toggle) =>
-                    toggle
-                        .setValue(this.fieldStates[field.id])
-                        .onChange((isDisabled) => {
-                            this.fieldStates[field.id] = isDisabled;
-                        })
-                );
+            new Setting(listEl).setName(field.name).addToggle((toggle) =>
+                toggle
+                    .setValue(this.fieldStates[field.id])
+                    .onChange((isDisabled) => {
+                        this.fieldStates[field.id] = isDisabled;
+                    }),
+            );
         }
 
         contentEl.createEl("h3", { text: "Custom Fields" });
         contentEl.createEl("p", {
-            text:
-                "Add extra fields from KoReader metadata (comma-separated). These will be included unless also excluded above.",
+            text: "Add extra fields from KOReader metadata (comma-separated). These will be included unless also excluded above.",
         });
 
         new Setting(contentEl)
@@ -633,15 +635,18 @@ class FrontmatterFieldModal extends Modal {
                     .setValue(this.currentSettings.customFields.join(", "))
                     .setPlaceholder("e.g., publisher, isbn")
                     .onChange((value) => {
-                        this.currentSettings.customFields = value.split(",")
-                            .map((f) => f.trim()).filter(Boolean);
-                    })
+                        this.currentSettings.customFields = value
+                            .split(",")
+                            .map((f) => f.trim())
+                            .filter(Boolean);
+                    }),
             );
 
         // Save and Cancel buttons
         new Setting(contentEl)
             .addButton((button) =>
-                button.setButtonText("Save")
+                button
+                    .setButtonText("Save")
                     .setCta()
                     .onClick(() => {
                         // Update disabledFields based on toggle states
@@ -653,11 +658,10 @@ class FrontmatterFieldModal extends Modal {
 
                         this.onSave(this.currentSettings); // Pass updated settings back
                         this.close();
-                    })
+                    }),
             )
             .addButton((button) =>
-                button.setButtonText("Cancel")
-                    .onClick(() => this.close())
+                button.setButtonText("Cancel").onClick(() => this.close()),
             );
     }
 

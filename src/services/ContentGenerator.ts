@@ -1,6 +1,6 @@
 import type {
     Annotation,
-    KoReaderHighlightImporterSettings,
+    KoreaderHighlightImporterSettings,
     LuaMetadata,
 } from "../types";
 import {
@@ -23,7 +23,7 @@ function sortChaptersNaturally(a: string, b: string): number {
 export class ContentGenerator {
     constructor(
         private templateManager: TemplateManager,
-        private settings: KoReaderHighlightImporterSettings,
+        private settings: KoreaderHighlightImporterSettings,
     ) {}
 
     async generateHighlightsContent(
@@ -40,14 +40,17 @@ export class ContentGenerator {
         const sortedAnnotations = [...annotations].sort(compareAnnotations);
 
         // 2. Group by chapter
-        const groupedByChapter = sortedAnnotations.reduce((acc, highlight) => {
-            const chapter = highlight.chapter?.trim() || "Chapter Unknown";
-            if (!acc[chapter]) {
-                acc[chapter] = [];
-            }
-            acc[chapter].push(highlight);
-            return acc;
-        }, {} as Record<string, Annotation[]>);
+        const groupedByChapter = sortedAnnotations.reduce(
+            (acc, highlight) => {
+                const chapter = highlight.chapter?.trim() || "Chapter Unknown";
+                if (!acc[chapter]) {
+                    acc[chapter] = [];
+                }
+                acc[chapter].push(highlight);
+                return acc;
+            },
+            {} as Record<string, Annotation[]>,
+        );
 
         let finalContent = "";
         const chapterNames = Object.keys(groupedByChapter);
@@ -65,9 +68,8 @@ export class ContentGenerator {
             let isFirstHighlightInChapter = true;
 
             // 3. Group successive highlights WITHIN the already sorted chapterHighlights
-            const groupedSuccessiveHighlights = this.groupSuccessiveHighlights(
-                chapterHighlights,
-            );
+            const groupedSuccessiveHighlights =
+                this.groupSuccessiveHighlights(chapterHighlights);
 
             // 4. Render each highlight block within the chapter
             for (const highlightGroup of groupedSuccessiveHighlights) {

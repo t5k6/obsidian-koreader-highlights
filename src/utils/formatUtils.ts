@@ -65,11 +65,11 @@ export function generateObsidianFileName(
 
     let baseName: string;
 
-    const isAuthorEffectivelyMissing = !effectiveAuthor ||
-        effectiveAuthor === DEFAULT_AUTHOR;
+    const isAuthorEffectivelyMissing =
+        !effectiveAuthor || effectiveAuthor === DEFAULT_AUTHOR;
 
-    const isTitleEffectivelyMissing = !effectiveTitle ||
-        effectiveTitle === DEFAULT_TITLE;
+    const isTitleEffectivelyMissing =
+        !effectiveTitle || effectiveTitle === DEFAULT_TITLE;
 
     const sdrBaseName = originalSdrName
         ? normalizeFileNamePiece(getFileNameWithoutExt(originalSdrName))
@@ -105,9 +105,7 @@ export function generateObsidianFileName(
     } else {
         // Case 4: BOTH are missing. Use ONLY the original SDR name (skip docProps.authors entirely).
         baseName = sdrBaseName ? simplifySdrName(sdrBaseName) : DEFAULT_TITLE;
-        devWarn(
-            `Using cleaned SDR name (author/title missing): ${baseName}`,
-        );
+        devWarn(`Using cleaned SDR name (author/title missing): ${baseName}`);
     }
 
     // Final safety net: if baseName is somehow empty, use DEFAULT_TITLE.
@@ -119,8 +117,8 @@ export function generateObsidianFileName(
     }
 
     const FOLDER_PATH_MARGIN = highlightsFolder.length + 1 + 5;
-    const maxLengthForName = maxTotalPathLength - FOLDER_PATH_MARGIN -
-        FILE_EXTENSION.length;
+    const maxLengthForName =
+        maxTotalPathLength - FOLDER_PATH_MARGIN - FILE_EXTENSION.length;
 
     if (maxLengthForName <= 0) {
         devWarn(
@@ -144,7 +142,7 @@ export function generateObsidianFileName(
 }
 
 /**
- * Collapse all the Koreader "SDR" to something that looks like
+ * Collapse all the KOReader "SDR" to something that looks like
  * a human filename.                           ─────────────────────────────
  *
  * 1.  Removes the leading "(Series-X)" block if it exists.
@@ -162,7 +160,10 @@ export function simplifySdrName(raw: string, delimiter = " - "): string {
     // ── 0. Strip a prepended "(……)" leader
     raw = raw.replace(/^\([^)]*\)\s*/, "").trim();
 
-    const parts = raw.split(delimiter).map((p) => p.trim()).filter(Boolean);
+    const parts = raw
+        .split(delimiter)
+        .map((p) => p.trim())
+        .filter(Boolean);
 
     // ── 1. Drop REPEATED TOKENS  (case-insensitive)
     const seen = new Set<string>();
@@ -368,11 +369,9 @@ function groupAnnotationsByParagraph(
     const sorted = [...annotations].sort(compareAnnotations);
 
     devLog(
-        `Sorted annotations: ${
-            sorted.map((h) =>
-                `text="${h.text}", pos0=${h.pos0}, pos1=${h.pos1}`
-            ).join(" | ")
-        }`,
+        `Sorted annotations: ${sorted
+            .map((h) => `text="${h.text}", pos0=${h.pos0}, pos1=${h.pos1}`)
+            .join(" | ")}`,
     );
 
     const groups: Annotation[][] = [];
@@ -381,8 +380,10 @@ function groupAnnotationsByParagraph(
     for (let i = 1; i < sorted.length; i++) {
         const prev = currentGroup[currentGroup.length - 1];
         const curr = sorted[i];
-        const timeDiff = (new Date(curr.datetime).getTime() -
-            new Date(prev.datetime).getTime()) / (1000 * 60);
+        const timeDiff =
+            (new Date(curr.datetime).getTime() -
+                new Date(prev.datetime).getTime()) /
+            (1000 * 60);
 
         if (
             areHighlightsSuccessive(prev, curr, 5) &&
@@ -426,8 +427,8 @@ function deduplicateOverlaps(group: Annotation[]): Annotation[] {
         }
 
         // Check if highlight is fully covered by any processed range
-        const isFullyCovered = processedRanges.some((range) =>
-            pos0.offset >= range.start && pos1.offset <= range.end
+        const isFullyCovered = processedRanges.some(
+            (range) => pos0.offset >= range.start && pos1.offset <= range.end,
         );
 
         if (!isFullyCovered) {
@@ -456,14 +457,17 @@ function formatHighlightGroup(
     const deduplicatedGroup = deduplicateOverlaps(group);
 
     // Use earliest datetime, shared page, and consistent chapter
-    const earliestDate = deduplicatedGroup.reduce((min, h) => {
-        const d = new Date(h.datetime);
-        return !min || d < min ? d : min;
-    }, null as Date | null);
+    const earliestDate = deduplicatedGroup.reduce(
+        (min, h) => {
+            const d = new Date(h.datetime);
+            return !min || d < min ? d : min;
+        },
+        null as Date | null,
+    );
     const pageno = deduplicatedGroup[0].pageno;
-    const header = `*${
-        formatDate(earliestDate?.toISOString() || deduplicatedGroup[0].datetime)
-    } - Page ${pageno}*\n\n`;
+    const header = `*${formatDate(
+        earliestDate?.toISOString() || deduplicatedGroup[0].datetime,
+    )} - Page ${pageno}*\n\n`;
 
     const sortedGroup = [...deduplicatedGroup].sort((a, b) => {
         const posA = parsePosition(a.pos0);
@@ -473,7 +477,8 @@ function formatHighlightGroup(
     });
 
     // Combine highlighted text with individual styling
-    const isDarkTheme = typeof document !== "undefined" &&
+    const isDarkTheme =
+        typeof document !== "undefined" &&
         document.documentElement.getAttribute("data-theme") === "dark";
 
     let highlightedText = "";
@@ -481,8 +486,8 @@ function formatHighlightGroup(
         const highlight = sortedGroup[i];
         const drawer = highlight.drawer || "lighten";
         const colorName = highlight.color?.toLowerCase()?.trim() || "";
-        const colorHex = KOReaderHighlightColors[colorName] ||
-            highlight.color || null;
+        const colorHex =
+            KOReaderHighlightColors[colorName] || highlight.color || null;
 
         let text = highlight.text || "";
 
@@ -497,16 +502,14 @@ function formatHighlightGroup(
                 colorName || colorHex,
                 isDarkTheme,
             );
-            highlightedText +=
-                `<mark style="background-color: ${colorHex}; color: ${textColor}">${text}</mark>`;
+            highlightedText += `<mark style="background-color: ${colorHex}; color: ${textColor}">${text}</mark>`;
         } else if (drawer === "underscore") {
             highlightedText += `<u>${text}</u>`;
         } else if (drawer === "strikeout") {
             highlightedText += `<s>${text}</s>`;
         } else if (drawer === "invert" && colorHex) {
             const textColor = getContrastTextColor(colorHex, isDarkTheme);
-            highlightedText +=
-                `<mark style="background-color: ${textColor}; color: ${colorHex}">${text}</mark>`;
+            highlightedText += `<mark style="background-color: ${textColor}; color: ${colorHex}">${text}</mark>`;
         } else {
             highlightedText += text;
         }
@@ -530,21 +533,24 @@ function formatHighlightGroup(
 
 export function formatAllHighlights(annotations: Annotation[]): string {
     // Group annotations by chapter
-    const groupedByChapter = annotations.reduce((acc, annotation) => {
-        const chapter = annotation.chapter || "Uncategorized";
-        if (!acc[chapter]) {
-            acc[chapter] = [];
-        }
-        acc[chapter].push(annotation);
-        return acc;
-    }, {} as Record<string, Annotation[]>);
+    const groupedByChapter = annotations.reduce(
+        (acc, annotation) => {
+            const chapter = annotation.chapter || "Uncategorized";
+            if (!acc[chapter]) {
+                acc[chapter] = [];
+            }
+            acc[chapter].push(annotation);
+            return acc;
+        },
+        {} as Record<string, Annotation[]>,
+    );
 
     let result = "";
 
     // Iterate over chapters and format their highlights
-    for (
-        const [chapter, chapterHighlights] of Object.entries(groupedByChapter)
-    ) {
+    for (const [chapter, chapterHighlights] of Object.entries(
+        groupedByChapter,
+    )) {
         // Add chapter header (only once per chapter)
         if (chapter && chapter !== "Uncategorized") {
             result += `## ${chapter}\n\n`;
@@ -585,11 +591,13 @@ export function secondsToHoursMinutesSeconds(totalSeconds: number): string {
     if (hours > 0) {
         result += `${hours}h `;
     }
-    if (minutes > 0 || hours > 0) { // Show minutes if hours are present or minutes > 0
+    if (minutes > 0 || hours > 0) {
+        // Show minutes if hours are present or minutes > 0
         result += `${minutes}m `;
     }
 
-    if (seconds > 0 || result === "") { // If result is empty, means 0h 0m, so just show seconds.
+    if (seconds > 0 || result === "") {
+        // If result is empty, means 0h 0m, so just show seconds.
         result += `${seconds}s`;
     }
 
@@ -671,9 +679,10 @@ export function styleHighlight(
     }
 
     const lowerColor = color?.toLowerCase().trim();
-    const colorHex: string | null = lowerColor != null
-        ? KOReaderHighlightColors[lowerColor] ?? color ?? null
-        : null;
+    const colorHex: string | null =
+        lowerColor != null
+            ? (KOReaderHighlightColors[lowerColor] ?? color ?? null)
+            : null;
 
     // ───────────────────────────── drawers ──────────────────────────────
     switch (drawer) {

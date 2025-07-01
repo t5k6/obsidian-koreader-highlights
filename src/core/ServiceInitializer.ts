@@ -11,7 +11,7 @@ import { TemplateManager } from "../services/TemplateManager";
 import type {
     DuplicateMatch,
     IDuplicateHandlingModal,
-    KoReaderHighlightImporterSettings,
+    KoreaderHighlightImporterSettings,
 } from "../types";
 import { DuplicateHandlingModal } from "../ui/DuplicateModal";
 import { DIContainer } from "./DIContainer";
@@ -21,7 +21,7 @@ export class ServiceInitializer {
         container: DIContainer,
         plugin: Plugin,
         app: App,
-        settings: KoReaderHighlightImporterSettings,
+        settings: KoreaderHighlightImporterSettings,
     ) {
         // Register core services
         container.register(SDRFinder, new SDRFinder(settings));
@@ -35,18 +35,12 @@ export class ServiceInitializer {
         // Register dependent services
         container.register(
             MetadataParser,
-            new MetadataParser(
-                settings,
-                container.resolve(SDRFinder),
-            ),
+            new MetadataParser(settings, container.resolve(SDRFinder)),
         );
 
         container.register(
             ContentGenerator,
-            new ContentGenerator(
-                container.resolve(TemplateManager),
-                settings,
-            ),
+            new ContentGenerator(container.resolve(TemplateManager), settings),
         );
 
         // Define modal factory (same as original implementation)
@@ -86,11 +80,7 @@ export class ServiceInitializer {
 
         container.register(
             ScanManager,
-            new ScanManager(
-                app,
-                settings,
-                container.resolve(SDRFinder),
-            ),
+            new ScanManager(app, settings, container.resolve(SDRFinder)),
         );
     }
 }

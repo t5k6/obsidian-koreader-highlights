@@ -1,12 +1,12 @@
 import type { Plugin } from "obsidian";
 import type {
     FrontmatterSettings,
-    KoReaderHighlightImporterSettings,
-    KoReaderTemplateSettings,
+    KoreaderHighlightImporterSettings,
+    KoreaderTemplateSettings,
 } from "../types";
 import { devError, devLog, devWarn } from "../utils/logging";
 
-export const DEFAULT_SETTINGS: KoReaderHighlightImporterSettings = {
+export const DEFAULT_SETTINGS: KoreaderHighlightImporterSettings = {
     koboMountPoint: "",
     excludedFolders: [
         ".adds",
@@ -16,9 +16,10 @@ export const DEFAULT_SETTINGS: KoReaderHighlightImporterSettings = {
         ".git",
         ".obsidian",
         ".stfolder",
+        ".stversions",
     ],
     allowedFileTypes: ["epub", "pdf", "mobi", "cbz"],
-    highlightsFolder: "KoReader Highlights",
+    highlightsFolder: "KOReader/highlights",
     debugMode: false,
     debugLevel: 3,
     enableFullDuplicateCheck: false,
@@ -33,7 +34,7 @@ export const DEFAULT_SETTINGS: KoReaderHighlightImporterSettings = {
         useCustomTemplate: false,
         source: "vault",
         selectedTemplate: "default",
-        templateDir: "Koreader/templates",
+        templateDir: "KOReader/templates",
     },
 };
 
@@ -110,14 +111,14 @@ export class PluginSettings {
         return defaultNum;
     }
 
-    async loadSettings(): Promise<KoReaderHighlightImporterSettings> {
-        devLog("Loading KoReader Importer settings...");
-        const loadedData = (await this.plugin.loadData()) as
-            | Partial<KoReaderHighlightImporterSettings>
-            | null ?? {};
+    async loadSettings(): Promise<KoreaderHighlightImporterSettings> {
+        devLog("Loading KOReader Importer settings...");
+        const loadedData =
+            ((await this.plugin.loadData()) as Partial<KoreaderHighlightImporterSettings> | null) ??
+            {};
         devLog("Raw loaded data from vault:", loadedData);
 
-        const settings: KoReaderHighlightImporterSettings = {
+        const settings: KoreaderHighlightImporterSettings = {
             ...DEFAULT_SETTINGS,
             frontmatter: { ...DEFAULT_SETTINGS.frontmatter },
             template: { ...DEFAULT_SETTINGS.template },
@@ -161,14 +162,13 @@ export class PluginSettings {
             ) {
                 settings.template = {
                     ...DEFAULT_SETTINGS.template,
-                    ...(loadedData.template as Partial<
-                        KoReaderTemplateSettings
-                    >),
+                    ...(loadedData.template as Partial<KoreaderTemplateSettings>),
                 };
             } else {
                 devWarn(
                     "Correcting invalid 'template' setting (expected object, got " +
-                        typeof loadedData.template + "). Resetting to default.",
+                        typeof loadedData.template +
+                        "). Resetting to default.",
                 );
                 // settings.template is already a deep copy of DEFAULT_SETTINGS.template
             }
@@ -239,7 +239,7 @@ export class PluginSettings {
         );
 
         // Validate template sub-fields
-        const tmpl = settings.template as KoReaderTemplateSettings;
+        const tmpl = settings.template as KoreaderTemplateSettings;
         tmpl.useCustomTemplate = this.validateType(
             tmpl,
             "useCustomTemplate",
@@ -308,9 +308,9 @@ export class PluginSettings {
     }
 
     async saveSettings(
-        settings: KoReaderHighlightImporterSettings,
+        settings: KoreaderHighlightImporterSettings,
     ): Promise<void> {
-        devLog("Saving KoReader Importer settings...");
+        devLog("Saving KOReader Importer settings...");
         try {
             await this.plugin.saveData(settings);
             devLog("Settings saved successfully.");

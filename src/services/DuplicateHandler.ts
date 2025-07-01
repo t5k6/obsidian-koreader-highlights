@@ -15,7 +15,7 @@ import type {
     DuplicateChoice,
     DuplicateMatch,
     IDuplicateHandlingModal,
-    KoReaderHighlightImporterSettings,
+    KoreaderHighlightImporterSettings,
     LuaMetadata,
     ParsedFrontmatter,
 } from "../types";
@@ -48,9 +48,9 @@ export class DuplicateHandler {
 
     /** Builds the canonical cache key from document properties. */
     private static buildCacheKeyFromDocProps(props: DocProps): CacheKey {
-        return `${DuplicateHandler.normalizeNamePart(props.authors)}::${
-            DuplicateHandler.normalizeNamePart(props.title)
-        }`;
+        return `${DuplicateHandler.normalizeNamePart(props.authors)}::${DuplicateHandler.normalizeNamePart(
+            props.title,
+        )}`;
     }
 
     constructor(
@@ -61,7 +61,7 @@ export class DuplicateHandler {
             match: DuplicateMatch,
             message: string,
         ) => IDuplicateHandlingModal,
-        private settings: KoReaderHighlightImporterSettings,
+        private settings: KoreaderHighlightImporterSettings,
         frontmatterGeneratorInstance: FrontmatterGenerator,
         private plugin: Plugin,
     ) {
@@ -148,8 +148,8 @@ export class DuplicateHandler {
         // Prompt the user
         const promptMessage = this.generatePromptMessage(match);
         const modal = this.modalFactory(this.app, match, promptMessage);
-        const { choice, applyToAll: userChoseApplyToAll } = await modal
-            .openAndGetChoice();
+        const { choice, applyToAll: userChoseApplyToAll } =
+            await modal.openAndGetChoice();
 
         devLog(
             `User chose "${choice}" for duplicate: ${match.file.path}. Apply to all: ${userChoseApplyToAll}`,
@@ -203,12 +203,16 @@ export class DuplicateHandler {
 
         devLog(`Searching in highlights folder for: ${cacheKey}`);
 
-        const filesToCheck = this.app.vault.getFiles().filter(
-            (file): file is TFile =>
-                file instanceof TFile &&
-                file.path.startsWith(`${this.settings.highlightsFolder}/`) &&
-                file.extension === "md",
-        );
+        const filesToCheck = this.app.vault
+            .getFiles()
+            .filter(
+                (file): file is TFile =>
+                    file instanceof TFile &&
+                    file.path.startsWith(
+                        `${this.settings.highlightsFolder}/`,
+                    ) &&
+                    file.extension === "md",
+            );
 
         const potentialDuplicates: TFile[] = [];
         for (const file of filesToCheck) {
@@ -264,9 +268,10 @@ export class DuplicateHandler {
                 ) {
                     modifiedHighlightCount++;
                     devLog(
-                        `Modified highlight found (Page ${newHighlight.pageno}):\n  Old: "${
-                            existingMatch.text?.slice(0, 50)
-                        }..."\n  New: "${newHighlight.text?.slice(0, 50)}..."`,
+                        `Modified highlight found (Page ${newHighlight.pageno}):\n  Old: "${existingMatch.text?.slice(
+                            0,
+                            50,
+                        )}..."\n  New: "${newHighlight.text?.slice(0, 50)}..."`,
                     );
                 }
                 if (
@@ -285,11 +290,13 @@ export class DuplicateHandler {
                         // Text is same, but note differs - count as modified
                         modifiedHighlightCount++;
                         devLog(
-                            `Note differs for existing highlight (Page ${newHighlight.pageno}):\n  Old: "${
-                                existingMatch.note?.slice(0, 50)
-                            }..."\n  New: "${
-                                newHighlight.note?.slice(0, 50)
-                            }..."`,
+                            `Note differs for existing highlight (Page ${newHighlight.pageno}):\n  Old: "${existingMatch.note?.slice(
+                                0,
+                                50,
+                            )}..."\n  New: "${newHighlight.note?.slice(
+                                0,
+                                50,
+                            )}..."`,
                         );
                     }
                 }
@@ -344,8 +351,10 @@ export class DuplicateHandler {
                     let originalSdrNameForFallback: string | undefined =
                         undefined;
                     if (match.luaMetadata.originalFilePath) {
-                        originalSdrNameForFallback = match.luaMetadata
-                            .originalFilePath.split(/[/\\]/).pop();
+                        originalSdrNameForFallback =
+                            match.luaMetadata.originalFilePath
+                                .split(/[/\\]/)
+                                .pop();
                     } else {
                         devWarn(
                             "Original SDR name not available for 'keep-both' filename generation in DuplicateHandler. Filename might be less specific if metadata is missing.",
@@ -387,8 +396,7 @@ export class DuplicateHandler {
     }
 
     private generatePromptMessage(match: DuplicateMatch): string {
-        const baseMsg =
-            `Duplicate note found for "${match.luaMetadata.docProps.title}" by ${match.luaMetadata.docProps.authors}.`;
+        const baseMsg = `Duplicate note found for "${match.luaMetadata.docProps.title}" by ${match.luaMetadata.docProps.authors}.`;
         const fileMsg = `Existing file: "${match.file.path}"`;
         let details = "";
 
@@ -398,12 +406,10 @@ export class DuplicateHandler {
                     "The imported content appears identical to the existing file.";
                 break;
             case "updated":
-                details =
-                    `The import contains ${match.newHighlights} new highlight(s)/note(s).`;
+                details = `The import contains ${match.newHighlights} new highlight(s)/note(s).`;
                 break;
             case "divergent":
-                details =
-                    `The import contains ${match.newHighlights} new highlight(s)/note(s) and ${match.modifiedHighlights} modified one(s).`;
+                details = `The import contains ${match.newHighlights} new highlight(s)/note(s) and ${match.modifiedHighlights} modified one(s).`;
                 break;
         }
 
@@ -454,14 +460,18 @@ export class DuplicateHandler {
             ) {
                 const existingArray = Array.isArray(existingValue)
                     ? existingValue
-                    : (existingValue
-                        ? String(existingValue).split(",").map((s) => s.trim())
-                        : []);
+                    : existingValue
+                      ? String(existingValue)
+                            .split(",")
+                            .map((s) => s.trim())
+                      : [];
                 const newArray = Array.isArray(newValue)
                     ? newValue
-                    : (newValue
-                        ? String(newValue).split(",").map((s) => s.trim())
-                        : []);
+                    : newValue
+                      ? String(newValue)
+                            .split(",")
+                            .map((s) => s.trim())
+                      : [];
                 merged[lowerCaseKey] = Array.from(
                     new Set([...existingArray, ...newArray]),
                 ).filter(Boolean);
@@ -475,7 +485,8 @@ export class DuplicateHandler {
                 merged[lowerCaseKey] = newValue;
             } // Rule 4: If an existing value is completely missing, add the new one.
             else if (
-                existingValue === undefined || existingValue === null ||
+                existingValue === undefined ||
+                existingValue === null ||
                 existingValue === ""
             ) {
                 merged[lowerCaseKey] = newValue;
@@ -495,18 +506,22 @@ export class DuplicateHandler {
             return 0;
         });
 
-        const groupedByChapter = sorted.reduce((acc, h) => {
-            const chapter = h.chapter || "Unknown Chapter";
-            if (!acc[chapter]) acc[chapter] = [];
-            acc[chapter].push(h);
-            return acc;
-        }, {} as Record<string, Annotation[]>);
+        const groupedByChapter = sorted.reduce(
+            (acc, h) => {
+                const chapter = h.chapter || "Unknown Chapter";
+                if (!acc[chapter]) acc[chapter] = [];
+                acc[chapter].push(h);
+                return acc;
+            },
+            {} as Record<string, Annotation[]>,
+        );
 
         let body = "";
         let firstBlockOverall = true;
 
         for (const chapter in groupedByChapter) {
-            if (body.length > 0 && !body.endsWith("\n\n")) { // Ensure enough space before a new chapter heading
+            if (body.length > 0 && !body.endsWith("\n\n")) {
+                // Ensure enough space before a new chapter heading
                 body += "\n\n";
             } else if (body.length > 0 && !body.endsWith("\n")) {
                 body += "\n";
@@ -532,9 +547,9 @@ export class DuplicateHandler {
 
                 if (h.note) {
                     blockParts.push(
-                        `> [!NOTE] Note\n> ${
-                            h.note.replace(/\n/g, "\n> ").trim()
-                        }`,
+                        `> [!NOTE] Note\n> ${h.note
+                            .replace(/\n/g, "\n> ")
+                            .trim()}`,
                     );
                 }
 
@@ -560,15 +575,14 @@ export class DuplicateHandler {
         devLog(`Starting content merge for: ${existingFile.path}`);
 
         // --- 1. Get existing file data using Obsidian's metadata cache ---
-        const existingFileCache = this.app.metadataCache.getFileCache(
-            existingFile,
-        );
+        const existingFileCache =
+            this.app.metadataCache.getFileCache(existingFile);
         const existingFrontmatter = existingFileCache?.frontmatter || {};
         const existingContent = await this.vault.read(existingFile);
         const existingBody = existingFileCache?.frontmatterPosition
             ? existingContent.slice(
-                existingFileCache.frontmatterPosition.end.offset,
-            )
+                  existingFileCache.frontmatterPosition.end.offset,
+              )
             : existingContent;
         const existingHighlights = extractHighlights(existingBody);
 
@@ -579,21 +593,17 @@ export class DuplicateHandler {
         if (luaMetadata) {
             // Use the already parsed luaMetadata
             newHighlights = luaMetadata.annotations;
-            newFrontmatterData = this.frontmatterGenerator
-                .createFrontmatterData(
-                    luaMetadata,
-                    {
-                        disabledFields: [],
-                        customFields: Object.keys(luaMetadata.docProps),
-                    },
-                );
+            newFrontmatterData =
+                this.frontmatterGenerator.createFrontmatterData(luaMetadata, {
+                    disabledFields: [],
+                    customFields: Object.keys(luaMetadata.docProps),
+                });
         } else {
             // Fallback to parsing from string if luaMetadata not provided
             const frontmatterRegex =
                 /^---\s*[\r\n]([\s\S]*?)[\r\n]---\s*[\r\n]?/;
-            const newFrontmatterMatch = newContentString.match(
-                frontmatterRegex,
-            );
+            const newFrontmatterMatch =
+                newContentString.match(frontmatterRegex);
 
             const newBody = newFrontmatterMatch
                 ? newContentString.slice(newFrontmatterMatch[0].length)
@@ -611,8 +621,8 @@ export class DuplicateHandler {
                 statistics: undefined,
             };
 
-            newFrontmatterData = this.frontmatterGenerator
-                .createFrontmatterData(
+            newFrontmatterData =
+                this.frontmatterGenerator.createFrontmatterData(
                     tempNewLuaMetadata,
                     {
                         disabledFields: [],
@@ -633,16 +643,15 @@ export class DuplicateHandler {
             newFrontmatterData,
         );
 
-        const mergedBodyContent = this.formatMergedBodySimple(
-            mergedAnnotationList,
-        );
+        const mergedBodyContent =
+            this.formatMergedBodySimple(mergedAnnotationList);
 
         // --- 4. Generate the final content string using the generator ---
-        const finalFrontmatterString = this.frontmatterGenerator
-            .formatDataToYaml(
-                mergedFrontmatter,
-                { useFriendlyKeys: true, sortKeys: true },
-            );
+        const finalFrontmatterString =
+            this.frontmatterGenerator.formatDataToYaml(mergedFrontmatter, {
+                useFriendlyKeys: true,
+                sortKeys: true,
+            });
 
         return finalFrontmatterString
             ? `${finalFrontmatterString}\n\n${mergedBodyContent}`
@@ -685,15 +694,12 @@ export class DuplicateHandler {
             "author",
             "Author(s)",
             "Author",
-        ])
-            .replace(/\[\[(.*?)\]\]/g, "$1"); // Strip Obsidian links
+        ]).replace(/\[\[(.*?)\]\]/g, "$1"); // Strip Obsidian links
 
-        const existingTitleNorm = DuplicateHandler.normalizeNamePart(
-            existingTitleRaw,
-        );
-        const existingAuthorsNorm = DuplicateHandler.normalizeNamePart(
-            existingAuthorsRaw,
-        );
+        const existingTitleNorm =
+            DuplicateHandler.normalizeNamePart(existingTitleRaw);
+        const existingAuthorsNorm =
+            DuplicateHandler.normalizeNamePart(existingAuthorsRaw);
         const newTitleNorm = DuplicateHandler.normalizeNamePart(
             newDocProps.title,
         );
@@ -702,9 +708,10 @@ export class DuplicateHandler {
         );
 
         // Require both title and author to match
-        const titleMatch = existingTitleNorm.length > 0 &&
-            existingTitleNorm === newTitleNorm;
-        const authorMatch = existingAuthorsNorm.length > 0 &&
+        const titleMatch =
+            existingTitleNorm.length > 0 && existingTitleNorm === newTitleNorm;
+        const authorMatch =
+            existingAuthorsNorm.length > 0 &&
             existingAuthorsNorm === newAuthorsNorm;
 
         return titleMatch && authorMatch;
@@ -717,14 +724,18 @@ export class DuplicateHandler {
 
     /** Checks if two highlight text blocks are functionally equal (ignore whitespace/case). */
     private isHighlightTextEqual(text1: string, text2: string): boolean {
-        return this.normalizeForComparison(text1) ===
-            this.normalizeForComparison(text2);
+        return (
+            this.normalizeForComparison(text1) ===
+            this.normalizeForComparison(text2)
+        );
     }
 
     /** Checks if two notes are functionally equal (ignore whitespace/case). */
     private isNoteTextEqual(note1?: string, note2?: string): boolean {
-        return this.normalizeForComparison(note1) ===
-            this.normalizeForComparison(note2);
+        return (
+            this.normalizeForComparison(note1) ===
+            this.normalizeForComparison(note2)
+        );
     }
 
     /** Creates a consistent key for caching potential duplicates. */

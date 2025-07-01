@@ -13,32 +13,26 @@ export class PluginCommands {
     public registerCommands(): void {
         this.plugin.addCommand({
             id: "import-koreader-highlights",
-            name: "Import KoReader Highlights",
+            name: "Import KOReader Highlights",
             callback: () => this.handleImportCommand(),
         });
 
         this.plugin.addCommand({
             id: "scan-koreader-highlights",
-            name: "Scan KoReader for Highlights",
+            name: "Scan KOReader for Highlights",
             callback: () => this.handleScanCommand(),
         });
     }
 
     public async handleImportCommand(): Promise<void> {
-        await runPluginAction(
-            () => this.importManager.importHighlights(),
-            {
-                failureNotice: "Failed to import highlights",
-            },
-        );
+        await runPluginAction(() => this.importManager.importHighlights(), {
+            failureNotice: "Failed to import highlights",
+        });
     }
 
     public async handleScanCommand(): Promise<void> {
-        await runPluginAction(
-            () => this.scanManager.scanForHighlights(),
-            {
-                failureNotice: "Failed to scan for highlights",
-            },
-        );
+        await runPluginAction(() => this.scanManager.scanForHighlights(), {
+            failureNotice: "Failed to scan for highlights",
+        });
     }
 }

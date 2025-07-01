@@ -1,5 +1,5 @@
 import { type App, Notice, TFile } from "obsidian";
-import type { KoReaderHighlightImporterSettings } from "../types";
+import type { KoreaderHighlightImporterSettings } from "../types";
 import { ProgressModal } from "../ui/ProgressModal";
 import {
     ensureParentDirectory,
@@ -10,28 +10,28 @@ import type { SDRFinder } from "./SDRFinder";
 
 export class ScanManager {
     private static readonly SCAN_REPORT_FILENAME =
-        "KoReader SDR Scan Report.md";
+        "KOReader SDR Scan Report.md";
 
     constructor(
         private app: App,
-        private settings: KoReaderHighlightImporterSettings,
+        private settings: KoreaderHighlightImporterSettings,
         private sdrFinder: SDRFinder,
     ) {}
 
     async scanForHighlights(): Promise<void> {
-        devLog("Starting KoReader SDR scan process...");
+        devLog("Starting KOReader SDR scan process...");
 
         const modal = new ProgressModal(this.app);
         modal.open();
-        modal.statusEl.setText("Scanning for KoReader highlight files...");
+        modal.statusEl.setText("Scanning for KOReader highlight files...");
 
         try {
-            const sdrFilePaths = await this.sdrFinder
-                .findSdrDirectoriesWithMetadata();
+            const sdrFilePaths =
+                await this.sdrFinder.findSdrDirectoriesWithMetadata();
 
             if (!sdrFilePaths || sdrFilePaths.length === 0) {
                 new Notice(
-                    "Scan complete: No KoReader highlight files (.sdr directories with metadata.lua) found.",
+                    "Scan complete: No KOReader highlight files (.sdr directories with metadata.lua) found.",
                 );
                 devLog("Scan complete: No SDR files found.");
                 modal.close();
@@ -74,9 +74,8 @@ export class ScanManager {
 
         try {
             await ensureParentDirectory(this.app.vault, uniqueReportPath);
-            const existingReportFile = this.app.vault.getAbstractFileByPath(
-                uniqueReportPath,
-            );
+            const existingReportFile =
+                this.app.vault.getAbstractFileByPath(uniqueReportPath);
 
             if (existingReportFile instanceof TFile) {
                 devLog(`Updating existing scan report: ${uniqueReportPath}`);
@@ -97,7 +96,7 @@ export class ScanManager {
 
     private generateReportContent(sdrFilePaths: string[]): string {
         const timestamp = new Date().toLocaleString();
-        let content = "# KoReader SDR Scan Report\n\n";
+        let content = "# KOReader SDR Scan Report\n\n";
         content += `*Scan performed on: ${timestamp}*\n`;
         content += `*Mount Point: ${this.settings.koboMountPoint}*\n\n`;
 
@@ -105,13 +104,14 @@ export class ScanManager {
             content +=
                 "No `.sdr` directories containing `metadata.*.lua` files were found matching the current settings.\n";
         } else {
-            content +=
-                `Found ${sdrFilePaths.length} ".sdr" directories with metadata:\n\n`;
+            content += `Found ${sdrFilePaths.length} ".sdr" directories with metadata:\n\n`;
             content += sdrFilePaths
-                .map((filePath) =>
-                    `- \`${
-                        filePath.replace(this.settings.koboMountPoint, "")
-                    }\``
+                .map(
+                    (filePath) =>
+                        `- \`${filePath.replace(
+                            this.settings.koboMountPoint,
+                            "",
+                        )}\``,
                 ) // Show relative path from mount point
                 .join("\n");
         }

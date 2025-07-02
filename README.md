@@ -1,5 +1,10 @@
 # KOReader Highlights Importer Plugin for Obsidian
 
+<!-- Badges -->
+![release](https://img.shields.io/github/v/release/t5k6/obsidian-koreader-highlights)
+![license](https://img.shields.io/github/license/t5k6/obsidian-koreader-highlights)
+![downloads](https://img.shields.io/github/downloads/t5k6/obsidian-koreader-highlights/total)
+
 This plugin imports **highlights and notes** from [KOReader](https://github.com/koreader/koreader) into [Obsidian](https://obsidian.md/) notes. It scans for `.sdr` directories, parses Lua metadata files, and saves both highlights and associated notes into Markdown files within Obsidian.
 
 
@@ -67,11 +72,19 @@ Here's how to use the KOReader Highlights Importer:
 - **Replace {{variables}}**  with your desired fields (e.g., chapter, pageno, highlight, note).
 
 
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `{{highlight}}` | Selected text | “It was the best of times…” |
+| `{{pageno}}` | Page number | `134` |
+| `{{note}}` | Inline note | “Key concept” |
+| ... | | |
+
+
 **Troubleshooting**
 
 * **Error Messages:** If you encounter issues, open the Obsidian Developer Console (`Ctrl/Cmd + Shift + I` on Windows/Linux, `Cmd + Option + I` on macOS) and check for error messages related to the plugin.
-* **Mount Point:** Double-check that you've entered the correct mount point for your KOReader device in the plugin settings.
-* **Permissions:** Ensure that Obsidian has the necessary permissions to access the mounted KOReader device and your specified highlights folder.
+* **Mount Point:** Double-check that you've entered the correct mount point for your KoReader device in the plugin settings.
+* **Permissions:** Ensure that Obsidian has the necessary permissions to access the mounted KoReader device and your specified highlights folder.
 
 ## Development
 - **Install Dependencies** with [pnpm](https://pnpm.io/): `pnpm install`

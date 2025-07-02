@@ -1,493 +1,398 @@
 import { normalizePath, Notice, TFile, type Vault } from "obsidian";
-import type { Annotation, KoreaderHighlightImporterSettings } from "../types";
-import { ensureFolderExists, handleFileSystemError } from "../utils/fileUtils";
-import { parsePosition, styleHighlight } from "../utils/formatUtils";
+import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import type { TemplateData } from "src/types";
+import { styleHighlight } from "src/utils/highlightStyle";
+import type {
+	Annotation,
+	KoreaderHighlightImporterSettings,
+	RenderContext,
+	TemplateDefinition,
+} from "../types";
+import { ensureFolderExists } from "../utils/fileUtils";
+import { formatDate } from "../utils/formatUtils";
 import { devError, devLog, devWarn } from "../utils/logging";
 
-export interface TemplateData {
-    [key: string]: string | boolean | number | undefined;
-    highlight?: string;
-    chapter?: string;
-    pageno?: number;
-    isFirstInChapter?: boolean;
-    note?: string;
-    date?: string;
-}
-
-interface TemplateValidationResult {
-    isValid: boolean;
-    missingVariables: string[];
-    syntaxIssues: string[];
-}
-
-export const BUILT_IN_TEMPLATES: Record<
-    string,
-    { version: string; description: string; content: string }
-> = {
-    default: {
-        version: "1.0",
-        description:
-            "Default style: Chapter heading (optional), metadata, styled highlight, note (optional).",
-        content: `{{#isFirstInChapter}}## {{chapter}}{{/isFirstInChapter}}
-
-*Page {{pageno}} | {{date}}*
-{{highlight}}
-{{#note}}
-> [!NOTE] Note
-> {{note}}{{/note}}`,
-    },
-    enhanced: {
-        version: "1.0",
-        description: "Default style with added CSS classes for customization.",
-        content: `{{#isFirstInChapter}}## {{chapter}}{{/isFirstInChapter}}
-<div class="koreader-highlight-block">
-  <span class="koreader-metadata">Page {{pageno}} • {{date}}</span>
-  <p class="koreader-highlight-text">{{highlight}}</p>
-  {{#note}}
-  > [!NOTE] Note
-  > {{note}}
-  {{/note}}
-</div>`,
-    },
-    "compact-list": {
-        version: "1.0",
-        description: "Uses a definition list for a more compact view.",
-        content: `{{#isFirstInChapter}}### {{chapter}}{{/isFirstInChapter}}
-<dl class="koreader-compact-item">
-  <dt class="koreader-compact-meta">Page {{pageno}} ({{date}})</dt>
-  <dd class="koreader-compact-highlight">{{highlight}}</dd>
-  {{#note}}
-  <dd class="koreader-compact-note">Note: {{note}}</dd>
-  {{/note}}
-</dl>`,
-    },
-    blockquote: {
-        version: "1.0",
-        description: "Formats the highlight as a blockquote.",
-        content: `{{#isFirstInChapter}}### {{chapter}}{{/isFirstInChapter}}
-<div class="koreader-quote-block">
-> {{highlight}}
-> <span class="koreader-quote-meta">— Page {{pageno}}, {{date}}</span>
-{{#note}}
-> [!NOTE] Note
-> {{note}}
-{{/note}}
-</div>`,
-    },
-};
-
-export const FALLBACK_TEMPLATE = BUILT_IN_TEMPLATES.default.content;
-const TEMPLATE_DIR = "KOReader/templates";
+export const FALLBACK_TEMPLATE_ID = "default";
 const DARK_THEME_CLASS = "theme-dark";
 
+export interface TemplateValidationResult {
+	isValid: boolean;
+	errors: string[];
+	warnings: string[];
+	suggestions: string[];
+}
+
 export class TemplateManager {
-    private isDarkTheme: boolean;
-    private templateCache: Map<string, string> = new Map();
-    private readonly REQUIRED_VARIABLES = ["highlight", "pageno"];
+	private isDarkTheme: boolean;
+	private templateCache: Map<string, string> = new Map();
+	public builtInTemplates: Map<string, TemplateDefinition> = new Map();
+	private currentTemplateFlags = {
+		autoInsertDivider: true,
+		autoPrefixNotes: true,
+	};
 
-    constructor(
-        private vault: Vault,
-        private settings: KoreaderHighlightImporterSettings,
-        isDarkTheme?: boolean,
-    ) {
-        this.isDarkTheme =
-            isDarkTheme ?? document.body.classList.contains(DARK_THEME_CLASS);
-        devLog(`TemplateManager initialized. Dark theme: ${this.isDarkTheme}`);
-    }
+	constructor(
+		public plugin: KoreaderImporterPlugin,
+		private vault: Vault,
+		private settings: KoreaderHighlightImporterSettings,
+		isDarkTheme?: boolean,
+	) {
+		this.isDarkTheme =
+			isDarkTheme ?? document.body.classList.contains(DARK_THEME_CLASS);
+		devLog(`TemplateManager initialized. Dark theme: ${this.isDarkTheme}`);
+	}
 
-    updateSettings(newSettings: KoreaderHighlightImporterSettings): void {
-        const templateChanged =
-            this.settings.template.selectedTemplate !==
-                newSettings.template.selectedTemplate ||
-            this.settings.template.useCustomTemplate !==
-                newSettings.template.useCustomTemplate ||
-            this.settings.template.source !== newSettings.template.source;
+	private analyseTemplateFeatures(tpl: string): {
+		autoPrefixNotes: boolean;
+		autoInsertDivider: boolean;
+	} {
+		// ---------- 1. note prefix test ----------
+		// Look at every *line* that contains {{note}}.
+		// If ANY such line starts with '>' (ignoring leading whitespace)
+		// we assume the user is handling the block-quote themselves.
+		const noteLines = tpl.split(/\r?\n/).filter((l) => l.includes("{{note}}"));
+		const userHandlesPrefix = noteLines.some((l) => /^\s*>\s*/.test(l));
+		const autoPrefixNotes = !userHandlesPrefix; // invert
 
-        this.settings = newSettings;
+		// ---------- 2. divider test ----------
+		// If we spot a horizontal rule or <hr> anywhere, we won’t add another.
+		const hasMdRule = /^\s*(-{3,}|_{3,}|\*{3,})\s*$/m.test(tpl);
+		const hasHtmlHr = /<hr\s*\/?>/i.test(tpl);
+		const autoInsertDivider = !(hasMdRule || hasHtmlHr);
 
-        if (templateChanged) {
-            this.clearCache();
-            devLog("Template settings changed, cache cleared.");
-        }
-    }
+		return { autoPrefixNotes, autoInsertDivider };
+	}
 
-    private validateTemplate(content: string): TemplateValidationResult {
-        // 1. Check for required variables
-        const missingVariables = this.REQUIRED_VARIABLES.filter((variable) => {
-            const regex = new RegExp(`{{${variable}}}|{{#${variable}}}`);
-            return !regex.test(content);
-        });
+	public shouldAutoInsertDivider(): boolean {
+		return this.currentTemplateFlags.autoInsertDivider;
+	}
 
-        // 2. Check for syntax issues like unclosed blocks
-        const syntaxIssues: string[] = [];
-        const openTags = content.match(/{{#(\w+)}}/g) || [];
-        const closeTags = content.match(/{{\/\w+}}/g) || [];
+	public async loadBuiltInTemplates(): Promise<void> {
+		if (this.builtInTemplates.size > 0) return;
 
-        if (openTags.length !== closeTags.length) {
-            syntaxIssues.push(
-                `Mismatched conditional blocks. Found ${openTags.length} opening tags (e.g., {{#note}}) but ${closeTags.length} closing tags (e.g., {{/note}}).`,
-            );
-        }
+		try {
+			const rawTemplates: Record<string, string> = JSON.parse(
+				KOREADER_BUILTIN_TEMPLATES,
+			);
 
-        return {
-            isValid: missingVariables.length === 0 && syntaxIssues.length === 0,
-            missingVariables,
-            syntaxIssues,
-        };
-    }
+			for (const id in rawTemplates) {
+				const content = rawTemplates[id];
+				const name = id
+					.replace(/-/g, " ")
+					.replace(/\b\w/g, (l) => l.toUpperCase());
 
-    async loadTemplate(): Promise<string> {
-        const { template: templateSettings } = this.settings;
+				const fmMatch = content.match(/^---\s*description:\s*(.*?)\s*---/s);
+				const description = fmMatch
+					? fmMatch[1].trim()
+					: `The ${name} template.`;
 
-        if (!templateSettings.useCustomTemplate) {
-            devLog("Using built-in default template.");
-            return BUILT_IN_TEMPLATES.default.content;
-        }
+				const templateContent = content.replace(/^---.*?---\s*/s, "");
 
-        const templateId = templateSettings.selectedTemplate;
-        if (!templateId) {
-            devWarn(
-                "Custom template enabled but no template selected. Using default.",
-            );
-            return FALLBACK_TEMPLATE;
-        }
+				this.builtInTemplates.set(id, {
+					id,
+					name,
+					description,
+					content: templateContent,
+				});
+			}
+		} catch (error) {
+			devError("Failed to parse or load embedded built-in templates.", error);
+		}
 
-        // Check cache first
-        const cachedTemplate = this.templateCache.get(templateId);
-        if (cachedTemplate) {
-            devLog(`Using cached template: ${templateId}`);
-            return cachedTemplate;
-        }
+		devLog(
+			`Loaded ${this.builtInTemplates.size} built-in templates from bundle.`,
+		);
+	}
 
-        let templateContent = await this.loadTemplateContent(
-            templateId,
-            templateSettings.source,
-        );
+	updateSettings(newSettings: KoreaderHighlightImporterSettings): void {
+		const templateChanged =
+			this.settings.template.selectedTemplate !==
+				newSettings.template.selectedTemplate ||
+			this.settings.template.useCustomTemplate !==
+				newSettings.template.useCustomTemplate;
 
-        // Validate and fallback if necessary
-        if (templateContent) {
-            const validation = this.validateTemplate(templateContent);
-            if (!validation.isValid) {
-                if (validation.missingVariables.length > 0) {
-                    devWarn(
-                        `Template "${templateId}" missing required variables: ${validation.missingVariables.join(
-                            ", ",
-                        )}.`,
-                    );
-                }
-                if (validation.syntaxIssues.length > 0) {
-                    devWarn(
-                        `Template "${templateId}" has syntax errors: ${validation.syntaxIssues.join(
-                            ", ",
-                        )}.`,
-                    );
-                }
-                templateContent = FALLBACK_TEMPLATE;
-            }
-        } else {
-            templateContent = FALLBACK_TEMPLATE;
-        }
+		this.settings = newSettings;
 
-        this.templateCache.set(templateId, templateContent);
-        return templateContent;
-    }
+		if (templateChanged) {
+			this.clearCache();
+			devLog("Template settings changed, cache cleared.");
+		}
+	}
 
-    private async loadTemplateContent(
-        templateId: string,
-        source: string,
-    ): Promise<string | null> {
-        try {
-            if (source === "vault" || !source) {
-                return await this.loadFromVault(templateId);
-            }
-            // Handle other sources here if needed
-            return null;
-        } catch (error) {
-            handleFileSystemError("loading template", templateId, error);
-            return null;
-        }
-    }
+	public validateTemplate(content: string): TemplateValidationResult {
+		const result: TemplateValidationResult = {
+			isValid: true,
+			errors: [],
+			warnings: [],
+			suggestions: [],
+		};
 
-    private async loadFromVault(templateId: string): Promise<string | null> {
-        if (templateId.match(/[<>:"|?*]/)) {
-            // Check for invalid characters
-            devWarn(`Invalid template path: "${templateId}"`);
-            new Notice(
-                `Invalid template path: ${templateId}. Using default template.`,
-            );
-            return null;
-        }
-        const vaultPath = normalizePath(templateId);
-        const file = this.vault.getAbstractFileByPath(vaultPath);
+		const requiredVars = ["highlight", "pageno"];
+		const foundVars = new Set(
+			[...content.matchAll(/{{([\w]+)}}/g)].map((m) => m[1]),
+		);
 
-        if (file instanceof TFile) {
-            const content = await this.vault.read(file);
-            devLog(`Loaded template from vault: ${vaultPath}`);
-            return content;
-        }
+		requiredVars.forEach((v) => {
+			if (!foundVars.has(v)) {
+				result.errors.push(`Missing required variable: {{${v}}}`);
+				result.isValid = false;
+			}
+		});
 
-        // Fallback to built-in template
-        if (BUILT_IN_TEMPLATES[templateId]) {
-            devLog(`Using built-in template: ${templateId}`);
-            return BUILT_IN_TEMPLATES[templateId].content;
-        }
+		if (content.includes("{{#note}}") && !content.includes("{{/note}}")) {
+			result.errors.push("Unclosed {{#note}} block found.");
+			result.isValid = false;
+		}
 
-        devWarn(`Template not found: "${vaultPath}"`);
-        return null;
-    }
+		if (
+			!content.includes("{{chapter}}") &&
+			!content.includes("{{#isFirstInChapter}}")
+		) {
+			result.suggestions.push(
+				"Consider adding {{chapter}} or {{#isFirstInChapter}} for better organization.",
+			);
+		}
 
-    renderHighlight(
-        template: string,
-        data: TemplateData,
-        annotations: Annotation[],
-    ): string {
-        // Filter out annotations with empty text
-        const validAnnotations = annotations.filter(
-            (ann) => ann.text && ann.text.trim() !== "",
-        );
+		if (/<[a-z][\s\S]*>/i.test(content)) {
+			result.warnings.push(
+				"HTML detected. This is powerful but may require custom CSS for correct styling.",
+			);
+		}
 
-        if (validAnnotations.length === 0) {
-            devLog("No valid annotations to render");
-            return "";
-        }
+		return result;
+	}
 
-        try {
-            // Handle highlight styling and combination
-            if (validAnnotations.length === 1) {
-                const [annotation] = validAnnotations;
-                data.highlight = this.styleSingleHighlight(
-                    annotation.text || "",
-                    annotation.color,
-                    annotation.drawer,
-                );
-            } else {
-                data.highlight = this.combineAndStyleGroup(validAnnotations);
+	async loadTemplate(): Promise<string> {
+		const { useCustomTemplate, selectedTemplate } = this.settings.template;
+		const templateId = selectedTemplate || FALLBACK_TEMPLATE_ID;
 
-                // Fallback if combined highlight is empty
-                if (!data.highlight.trim()) {
-                    devWarn("All highlights in group were empty after styling");
-                    data.highlight = "Highlight content not available";
-                }
-            }
+		const cached = this.templateCache.get(templateId);
+		if (cached) {
+			this.currentTemplateFlags = this.analyseTemplateFeatures(cached);
+			return cached;
+		}
 
-            let output = this.processConditionalBlocks(template, data);
-            output = this.processSimpleVariables(output, data);
-            return this.cleanupOutput(output);
-        } catch (error) {
-            devError(
-                "Error rendering highlight template. Returning unformatted fallback.",
-                error,
-            );
-            // Return a safe, unformatted version of the highlight
-            return `*Page ${data.pageno} | ${data.date}*\n${data.highlight}\n\n`;
-        }
-    }
+		let templateContent: string;
 
-    private processConditionalBlocks(
-        template: string,
-        data: TemplateData,
-    ): string {
-        const innermostRegex = /{{#(\w+)}}(.*?){{\/\1}}/gs;
-        let processedTemplate = template;
-        let lastTemplate: string;
+		if (!useCustomTemplate) {
+			const builtIn = this.builtInTemplates.get(templateId);
+			templateContent =
+				builtIn?.content ??
+				this.builtInTemplates.get(FALLBACK_TEMPLATE_ID)?.content ??
+				"";
+		} else {
+			let loadedFromVault = await this.loadTemplateFromVault(templateId);
+			if (!loadedFromVault) {
+				new Notice(
+					`Custom template "${templateId}" not found. Falling back to Default.`,
+				);
+				loadedFromVault =
+					this.builtInTemplates.get(FALLBACK_TEMPLATE_ID)?.content ?? "";
+			}
+			templateContent = loadedFromVault.replace(/^---.*?---\s*/s, "");
+		}
 
-        do {
-            lastTemplate = processedTemplate;
-            processedTemplate = processedTemplate.replace(
-                innermostRegex,
-                (_, key, content) => {
-                    const value = data[key];
+		const validation = this.validateTemplate(templateContent);
+		if (!validation.isValid) {
+			new Notice(
+				`Custom template "${templateId}" has errors. Falling back to Default. Check console for details.`,
+			);
+			devError("Custom template validation failed:", validation.errors);
+			templateContent =
+				this.builtInTemplates.get(FALLBACK_TEMPLATE_ID)?.content ?? "";
+		}
 
-                    let shouldRender: boolean;
-                    if (typeof value === "boolean") {
-                        shouldRender = value;
-                    } else if (typeof value === "string") {
-                        shouldRender = value.trim() !== ""; // Don't render for empty strings
-                    } else {
-                        shouldRender = value !== null && value !== undefined;
-                    }
+		this.currentTemplateFlags = this.analyseTemplateFeatures(templateContent);
+		this.templateCache.set(templateId, templateContent);
+		return templateContent;
+	}
 
-                    if (key === "isFirstInChapter" && !data.chapter?.trim()) {
-                        shouldRender = false;
-                    }
+	public async loadTemplateFromVault(
+		vaultPath: string,
+	): Promise<string | null> {
+		const normalizedPath = normalizePath(vaultPath);
+		const file = this.vault.getAbstractFileByPath(normalizedPath);
 
-                    return shouldRender ? content : "";
-                },
-            );
-        } while (processedTemplate !== lastTemplate); // Loop until no more changes are made.
+		if (file instanceof TFile) {
+			return this.vault.read(file);
+		}
 
-        return processedTemplate;
-    }
+		devWarn(`Custom template file not found in vault: "${vaultPath}"`);
+		return null;
+	}
 
-    private processHighlightStyling(
-        template: string,
-        data: TemplateData,
-        color?: string,
-        drawer?: Annotation["drawer"],
-    ): string {
-        const highlightText = data.highlight?.toString() ?? "";
-        if (!highlightText) {
-            return template.replace("{{highlight}}", "");
-        }
+	public render(templateString: string, data: TemplateData): string {
+		const withConditionals = this.processConditionalBlocks(
+			templateString,
+			data,
+		);
+		const withVariables = this.processSimpleVariables(withConditionals, data);
+		return withVariables.trim();
+	}
 
-        const styledHighlight = styleHighlight(
-            highlightText,
-            color,
-            drawer,
-            this.isDarkTheme,
-        );
-        return template.replace("{{highlight}}", styledHighlight);
-    }
+	private async loadFromVault(templateId: string): Promise<string | null> {
+		const vaultPath = normalizePath(templateId);
+		const file = this.vault.getAbstractFileByPath(vaultPath);
 
-    private processSimpleVariables(
-        template: string,
-        data: TemplateData,
-    ): string {
-        return template.replace(/\{\{((?!#|\/)[\w]+)\}\}/g, (_, key) => {
-            if (key === "note" && typeof data.note === "string") {
-                // Prefix every line with '> ' for blockquote
-                return data.note
-                    .split("\n")
-                    .map((line) => `> ${line}`)
-                    .join("\n");
-            }
-            return data[key]?.toString() ?? "";
-        });
-    }
+		if (file instanceof TFile) {
+			return this.vault.read(file);
+		}
 
-    private cleanupOutput(output: string): string {
-        if (!output.trim()) return "";
+		devWarn(`Template not found in vault: "${vaultPath}"`);
+		return null;
+	}
 
-        // Special handling: preserve blockquotes (lines starting with '> ')
-        const lines = output.split(/\r?\n/);
-        let inBlockquote = false;
-        const cleanedLines: string[] = [];
+	private processConditionalBlocks(
+		template: string,
+		data: TemplateData,
+	): string {
+		const innermostRegex = /{{#(\w+)}}(.*?){{\/\1}}/gs;
+		let processedTemplate = template;
+		let lastTemplate: string;
 
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
-            if (line.startsWith("> ")) {
-                inBlockquote = true;
-                cleanedLines.push(line); // preserve as-is
-            } else if (inBlockquote && line.trim() === "") {
-                // preserve blank lines inside blockquote
-                cleanedLines.push(line);
-            } else {
-                inBlockquote = false;
-                // For non-blockquote, trim and skip multiple blank lines
-                if (
-                    line.trim() !== "" ||
-                    (cleanedLines.length > 0 &&
-                        cleanedLines[cleanedLines.length - 1].trim() !== "")
-                ) {
-                    cleanedLines.push(line.trim());
-                }
-            }
-        }
+		do {
+			lastTemplate = processedTemplate;
+			processedTemplate = processedTemplate.replace(
+				innermostRegex,
+				(_, key, content) => {
+					const value = data[key];
+					let shouldRender: boolean;
+					if (typeof value === "boolean") {
+						shouldRender = value;
+					} else if (typeof value === "string") {
+						shouldRender = value.trim() !== "";
+					} else {
+						shouldRender = value !== null && value !== undefined;
+					}
+					if (key === "isFirstInChapter" && !data.chapter?.trim()) {
+						shouldRender = false;
+					}
+					return shouldRender ? content : "";
+				},
+			);
+		} while (processedTemplate !== lastTemplate);
 
-        // Remove leading/trailing blank lines
-        while (cleanedLines.length && cleanedLines[0].trim() === "") {
-            cleanedLines.shift();
-        }
-        while (
-            cleanedLines.length &&
-            cleanedLines[cleanedLines.length - 1].trim() === ""
-        )
-            cleanedLines.pop();
+		return processedTemplate;
+	}
 
-        return cleanedLines.join("\n") + "\n";
-    }
+	private processSimpleVariables(template: string, data: TemplateData): string {
+		const noteLineHasQuote = /^[ \t]*>[^\n]*\{\{note\}\}/m.test(template);
 
-    async ensureTemplates(): Promise<void> {
-        const templateDir = normalizePath(
-            this.settings.template.templateDir || "KOReader/templates",
-        );
+		return template.replace(/\{\{((?!#|\/)[\w]+)\}\}/g, (_, key) => {
+			if (key === "note" && typeof data.note === "string") {
+				const lines = data.note.split("\n");
 
-        try {
-            await ensureFolderExists(this.vault, templateDir);
-        } catch (err) {
-            // ensureFolderExists already surfaced a Notice; just stop here.
-            return;
-        }
+				// CASE 1 – template already provides the first “> ”  →  prefix only the *next* lines
+				if (noteLineHasQuote) {
+					return lines
+						.map((line, idx) => (idx === 0 ? line : `> ${line}`))
+						.join("\n");
+				}
 
-        await this.createMissingTemplateFiles(templateDir);
-    }
+				// CASE 2 – template has NO block-quote and our auto-detect decided
+				//          to add one for every line
+				if (this.currentTemplateFlags.autoPrefixNotes) {
+					return lines.map((line) => `> ${line}`).join("\n");
+				}
 
-    private async createMissingTemplateFiles(
-        templateDir: string,
-    ): Promise<void> {
-        for (const [name, templateData] of Object.entries(BUILT_IN_TEMPLATES)) {
-            const filePath = normalizePath(`${templateDir}/${name}.md`);
-            const fileExists = await this.vault.adapter.exists(filePath);
+				// CASE 3 – template wants the raw, unprefixed text
+				return data.note;
+			}
 
-            if (!fileExists) {
-                devLog(`Creating template file: ${filePath}`);
-                await this.vault.create(filePath, templateData.content);
-            }
-        }
-    }
+			// … untouched replacement for non-note variables
+			return data[key]?.toString() ?? "";
+		});
+	}
 
-    clearCache(): void {
-        this.templateCache.clear();
-        devLog("TemplateManager cache cleared.");
-    }
+	async ensureTemplates(): Promise<void> {
+		const defaultPluginTemplateDir = normalizePath(
+			this.settings.template.templateDir || "KOReader/templates",
+		);
 
-    private styleSingleHighlight(
-        text: string,
-        color?: string,
-        drawer?: Annotation["drawer"],
-    ): string {
-        return styleHighlight(text, color, drawer, this.isDarkTheme);
-    }
+		try {
+			await ensureFolderExists(this.vault, defaultPluginTemplateDir);
+		} catch (err) {
+			return;
+		}
 
-    private combineAndStyleGroup(annotations: Annotation[]): string {
-        const sorted = [...annotations].sort((a, b) => {
-            const posA = parsePosition(a.pos0);
-            const posB = parsePosition(b.pos0);
-            return (posA?.offset || 0) - (posB?.offset || 0);
-        });
+		if (this.builtInTemplates.size === 0) {
+			await this.loadBuiltInTemplates();
+		}
 
-        let combined = "";
-        let lastNonEmptyIndex = -1;
+		for (const template of this.builtInTemplates.values()) {
+			const filePath = normalizePath(
+				`${defaultPluginTemplateDir}/${template.id}.md`,
+			);
+			if (!(await this.vault.adapter.exists(filePath))) {
+				devLog(`Creating built-in template file: ${filePath}`);
+				const fileContent = `---
+description: ${template.description}
+---
+${template.content}`;
+				await this.vault.create(filePath, fileContent);
+			}
+		}
+	}
 
-        for (let i = 0; i < sorted.length; i++) {
-            const current = sorted[i];
-            const text = current.text || "";
+	clearCache(): void {
+		this.templateCache.clear();
+		devLog("TemplateManager cache cleared.");
+	}
 
-            // Skip empty highlights
-            if (!text.trim()) continue;
+	public renderGroup(
+		templateStr: string,
+		group: Annotation[],
+		ctx: RenderContext,
+	): string {
+		const head = group[0];
 
-            const styled = this.styleSingleHighlight(
-                text,
-                current.color,
-                current.drawer,
-            );
+		const data: TemplateData = {
+			pageno: head.pageno ?? 0,
+			date: formatDate(head.datetime),
+			chapter: head.chapter?.trim() || "",
+			isFirstInChapter: (ctx as any).isFirstInChapter ?? false,
+			highlight: this.mergeHighlightText(
+				group,
+				ctx.separators ?? new Array(group.length - 1).fill(" "),
+			),
+			note: this.mergeNotes(group),
+			notes: group
+				.map((g) => g.note)
+				.filter((note): note is string => typeof note === "string"),
+		};
 
-            // Skip if styling returned empty
-            if (!styled.trim()) continue;
+		return this.render(templateStr, data);
+	}
 
-            // Add separator if needed
-            if (lastNonEmptyIndex >= 0) {
-                const prev = sorted[lastNonEmptyIndex];
-                const gap = this.calculateGap(prev, current);
-                if (gap > 5) combined += " [...] ";
-                else if (gap > 0) combined += " ";
-            }
+	private mergeHighlightText(
+		group: Annotation[],
+		separators: (" " | " [...] ")[],
+	): string {
+		if (group.length === 1) {
+			const h = group[0];
+			return styleHighlight(h.text ?? "", h.color, h.drawer, this.isDarkTheme);
+		}
 
-            // Add current highlight
-            combined += styled;
-            lastNonEmptyIndex = i;
-        }
+		return group
+			.map((h, idx) => {
+				const styled = styleHighlight(
+					h.text ?? "",
+					h.color,
+					h.drawer,
+					this.isDarkTheme,
+				);
+				if (idx === 0) return styled;
+				const sep = separators[idx - 1] ?? " ";
+				return sep + styled;
+			})
+			.join("");
+	}
 
-        return combined;
-    }
-
-    private calculateGap(prev: Annotation, current: Annotation): number {
-        const posPrev = parsePosition(prev.pos1);
-        const posCurr = parsePosition(current.pos0);
-
-        if (!posPrev || !posCurr) return Infinity;
-        if (posPrev.node !== posCurr.node) return Infinity;
-
-        return posCurr.offset - posPrev.offset;
-    }
+	private mergeNotes(group: Annotation[]): string {
+		const notes = group
+			.map((g) => g.note)
+			.filter((n): n is string => typeof n === "string");
+		if (!notes.length) return "";
+		return notes.join("\n\n---\n\n");
+	}
 }

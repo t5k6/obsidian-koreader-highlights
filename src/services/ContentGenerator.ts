@@ -1,149 +1,141 @@
 import type {
-    Annotation,
-    KoreaderHighlightImporterSettings,
-    LuaMetadata,
+	Annotation,
+	KoreaderHighlightImporterSettings,
+	LuaMetadata,
 } from "../types";
 import {
-    areHighlightsSuccessive,
-    compareAnnotations,
-    formatDate,
+	compareAnnotations,
+	distanceBetweenHighlights,
+	isWithinGap,
 } from "../utils/formatUtils";
 import type { TemplateManager } from "./TemplateManager";
 
-function sortChaptersNaturally(a: string, b: string): number {
-    const strA = a || "";
-    const strB = b || "";
-
-    return strA.localeCompare(strB, undefined, {
-        numeric: true,
-        sensitivity: "base",
-    });
+interface SuccessiveGroup {
+	annotations: Annotation[];
+	separators: (" " | " [...] ")[];
 }
 
 export class ContentGenerator {
-    constructor(
-        private templateManager: TemplateManager,
-        private settings: KoreaderHighlightImporterSettings,
-    ) {}
+	constructor(
+		private templateManager: TemplateManager,
+		private settings: KoreaderHighlightImporterSettings,
+	) {}
 
-    async generateHighlightsContent(
-        annotations: Annotation[],
-        luaMetadata: LuaMetadata,
-    ): Promise<string> {
-        if (!annotations || annotations.length === 0) {
-            return "";
-        }
+	async generateHighlightsContent(
+		annotations: Annotation[],
+		luaMetadata: LuaMetadata,
+	): Promise<string> {
+		if (!annotations || annotations.length === 0) {
+			return "";
+		}
 
-        const templateString = await this.templateManager.loadTemplate();
+		const templateString = await this.templateManager.loadTemplate();
 
-        // 1. Sort annotations first by page, then position/date (using the existing compareAnnotations)
-        const sortedAnnotations = [...annotations].sort(compareAnnotations);
+		// 1. Group all annotations by chapter name.
+		const groupedByChapter = annotations.reduce(
+			(acc, highlight) => {
+				const chapter = highlight.chapter?.trim() || "Chapter Unknown";
+				if (!acc[chapter]) {
+					acc[chapter] = [];
+				}
+				acc[chapter].push(highlight);
+				return acc;
+			},
+			{} as Record<string, Annotation[]>,
+		);
 
-        // 2. Group by chapter
-        const groupedByChapter = sortedAnnotations.reduce(
-            (acc, highlight) => {
-                const chapter = highlight.chapter?.trim() || "Chapter Unknown";
-                if (!acc[chapter]) {
-                    acc[chapter] = [];
-                }
-                acc[chapter].push(highlight);
-                return acc;
-            },
-            {} as Record<string, Annotation[]>,
-        );
+		// 2. Create a sortable array of chapters, finding the starting page for each.
+		const chaptersToSort = Object.entries(groupedByChapter).map(
+			([chapterName, chapterAnnotations]) => {
+				const sortedHighlights = [...chapterAnnotations].sort(
+					compareAnnotations,
+				);
 
-        let finalContent = "";
-        const chapterNames = Object.keys(groupedByChapter);
-        const sortedChapterNames = chapterNames.sort(sortChaptersNaturally);
+				// Sort the highlights within this chapter to find the earliest one.
+				sortedHighlights.forEach((ann) => {
+					ann.chapter = chapterName;
+				});
+				// The chapter's order is determined by its first highlight's page number.
+				const startPage = sortedHighlights[0]?.pageno ?? 0;
 
-        let isFirstChapterProcessed = true;
-        for (const chapter of sortedChapterNames) {
-            const chapterHighlights = groupedByChapter[chapter];
-            if (!chapterHighlights || chapterHighlights.length === 0) continue;
+				return {
+					name: chapterName,
+					startPage: startPage,
+					annotations: sortedHighlights,
+				};
+			},
+		);
 
-            if (!isFirstChapterProcessed) {
-                finalContent += "\n\n";
-            }
+		// 3. Sort the chapters themselves based on their starting page number.
+		chaptersToSort.sort((a, b) => a.startPage - b.startPage);
 
-            let isFirstHighlightInChapter = true;
+		// 4. Render the chapters in the now-correct order.
+		let finalContent = "";
+		let isFirstChapterProcessed = true;
+		for (const chapterData of chaptersToSort) {
+			const chapterHighlights = chapterData.annotations;
+			if (!chapterHighlights || chapterHighlights.length === 0) continue;
 
-            // 3. Group successive highlights WITHIN the already sorted chapterHighlights
-            const groupedSuccessiveHighlights =
-                this.groupSuccessiveHighlights(chapterHighlights);
+			if (!isFirstChapterProcessed) {
+				finalContent += "\n\n";
+			}
 
-            // 4. Render each highlight block within the chapter
-            for (const highlightGroup of groupedSuccessiveHighlights) {
-                if (!isFirstHighlightInChapter) {
-                    finalContent += "\n\n---\n";
-                }
+			let isFirstHighlightInChapter = true;
 
-                if (highlightGroup.length === 1) {
-                    const highlight = highlightGroup[0];
-                    const data = {
-                        pageno: highlight.pageno ?? 0,
-                        date: formatDate(highlight.datetime),
-                        highlight: highlight.text ?? "",
-                        note: highlight.note ?? "",
-                        chapter: chapter !== "Chapter Unknown" ? chapter : "",
-                        isFirstInChapter: isFirstHighlightInChapter,
-                    };
-                    finalContent += this.templateManager.renderHighlight(
-                        templateString,
-                        data,
-                        highlightGroup,
-                    );
-                } else {
-                    const representativeHighlight = highlightGroup[0];
-                    const data = {
-                        pageno: representativeHighlight.pageno ?? 0,
-                        date: formatDate(representativeHighlight.datetime),
-                        highlight: "",
-                        note: representativeHighlight.note ?? "",
-                        chapter: chapter !== "Chapter Unknown" ? chapter : "",
-                        isFirstInChapter: isFirstHighlightInChapter,
-                    };
-                    finalContent += this.templateManager.renderHighlight(
-                        templateString,
-                        data,
-                        highlightGroup,
-                    );
-                }
+			// Group successive highlights within the already sorted chapter.
+			const groupedSuccessiveHighlights =
+				this.groupSuccessiveHighlights(chapterHighlights);
 
-                isFirstHighlightInChapter = false;
-            }
+			// Render each highlight block within the chapter.
+			for (const highlightGroup of groupedSuccessiveHighlights) {
+				finalContent += this.templateManager.renderGroup(
+					templateString,
+					highlightGroup.annotations,
+					{
+						separators: highlightGroup.separators,
+						isFirstInChapter: isFirstHighlightInChapter,
+					},
+				);
+				isFirstHighlightInChapter = false;
 
-            isFirstChapterProcessed = false;
-        }
+				// divider between groups inside the chapter
+				if (!isFirstHighlightInChapter) {
+					if (this.templateManager.shouldAutoInsertDivider()) {
+						finalContent += "\n\n---\n\n";
+					} else {
+						// If the template has its own divider, we still add spacing.
+						finalContent += "\n\n";
+					}
+				}
+			}
 
-        return finalContent.replace(/\n{3,}/g, "\n\n").trim();
-    }
+			isFirstChapterProcessed = false;
+		}
 
-    private groupSuccessiveHighlights(
-        chapterHighlights: Annotation[],
-    ): Annotation[][] {
-        if (!chapterHighlights || chapterHighlights.length === 0) return [];
+		return finalContent.replace(/\n{3,}/g, "\n\n").trim();
+	}
 
-        const groups: Annotation[][] = [];
-        let currentGroup: Annotation[] = [];
+	private groupSuccessiveHighlights(anno: Annotation[]): SuccessiveGroup[] {
+		const groups: SuccessiveGroup[] = [];
+		let current: Annotation[] = [];
+		let seps: (" " | " [...] ")[] = [];
 
-        for (let i = 0; i < chapterHighlights.length; i++) {
-            const current = chapterHighlights[i];
-            currentGroup.push(current);
+		for (let i = 0; i < anno.length; i++) {
+			const h = anno[i];
+			if (current.length) {
+				const prev = current[current.length - 1];
+				const gap = distanceBetweenHighlights(prev, h);
+				seps.push(gap <= this.settings.maxHighlightGap ? " " : " [...] ");
+			}
+			current.push(h);
 
-            const next = chapterHighlights[i + 1];
-            if (
-                !next ||
-                !areHighlightsSuccessive(
-                    current,
-                    next,
-                    this.settings.maxHighlightGap,
-                )
-            ) {
-                groups.push([...currentGroup]);
-                currentGroup = [];
-            }
-        }
-
-        return groups;
-    }
+			const next = anno[i + 1];
+			if (!next || !isWithinGap(h, next, this.settings.maxHighlightGap)) {
+				groups.push({ annotations: current, separators: seps });
+				current = [];
+				seps = [];
+			}
+		}
+		return groups;
+	}
 }

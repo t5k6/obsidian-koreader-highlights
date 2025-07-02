@@ -4,12 +4,7 @@ import type { TFile } from "obsidian";
 // --- Lua Parser Related ---
 export type LuaValue = Extract<
     Expression,
-    | string
-    | number
-    | boolean
-    | Record<string, unknown>
-    | null
-    | undefined
+    string | number | boolean | Record<string, unknown> | null | undefined
 >;
 
 // --- Core Data Structures ---
@@ -121,7 +116,7 @@ export interface FrontmatterSettings {
     customFields: string[];
 }
 
-export interface KoReaderTemplateSettings {
+export interface KoreaderTemplateSettings {
     useCustomTemplate: boolean;
     source: "vault" | "external" | string;
     selectedTemplate: string;
@@ -129,7 +124,7 @@ export interface KoReaderTemplateSettings {
 }
 
 // Main Plugin Settings Interface
-export interface KoReaderHighlightImporterSettings {
+export interface KoreaderHighlightImporterSettings {
     koboMountPoint: string;
     excludedFolders: string[];
     allowedFileTypes: string[];
@@ -141,7 +136,7 @@ export interface KoReaderHighlightImporterSettings {
     maxHighlightGap: number;
     maxTimeGapMinutes: number;
     mergeOverlappingHighlights: boolean;
-    template: KoReaderTemplateSettings;
+    template: KoreaderTemplateSettings;
 }
 
 // --- UI / Modal Related Types ---

@@ -4,7 +4,7 @@ import { ImportManager } from "../services/ImportManager";
 import { SDRFinder } from "../services/SDRFinder";
 import { ScanManager } from "../services/ScanManager";
 import { TemplateManager } from "../services/TemplateManager";
-import type { KoReaderHighlightImporterSettings } from "../types";
+import type { KoreaderHighlightImporterSettings } from "../types";
 import { SettingsTab } from "../ui/SettingsTab";
 import { runPluginAction } from "../utils/actionUtils";
 import {
@@ -21,8 +21,8 @@ import { PluginCommands } from "./PluginCommands";
 import { PluginSettings } from "./PluginSettings";
 import { ServiceInitializer } from "./ServiceInitializer";
 
-export default class KoReaderImporterPlugin extends Plugin {
-    public settings!: KoReaderHighlightImporterSettings;
+export default class KoreaderImporterPlugin extends Plugin {
+    public settings!: KoreaderHighlightImporterSettings;
     private pluginSettings!: PluginSettings;
     private diContainer = new DIContainer();
     private servicesInitialized = false;
@@ -30,7 +30,7 @@ export default class KoReaderImporterPlugin extends Plugin {
     private scanManager!: ScanManager;
 
     async onload() {
-        console.log("KoReader Importer Plugin: Loading...");
+        console.log("KOReader Importer Plugin: Loading...");
         this.servicesInitialized = false;
 
         // Load Settings
@@ -39,11 +39,11 @@ export default class KoReaderImporterPlugin extends Plugin {
             this.settings = await this.pluginSettings.loadSettings();
         } catch (error) {
             console.error(
-                "KoReader Importer: CRITICAL ERROR loading settings:",
+                "KOReader Importer: CRITICAL ERROR loading settings:",
                 error,
             );
             new Notice(
-                "Failed to load KoReader Importer settings. Plugin disabled.",
+                "Failed to load KOReader Importer settings. Plugin disabled.",
                 0,
             );
             return;
@@ -58,21 +58,21 @@ export default class KoReaderImporterPlugin extends Plugin {
                 const cleanupOptions = { enabled: true, maxAgeDays: 7 };
                 const logFilePath = await initLogging(
                     this.app.vault,
-                    "KoReader/logs",
+                    "KOReader/logs",
                     cleanupOptions,
                 );
                 devLog("File logging initialized:", logFilePath);
             } catch (error) {
                 console.error(
-                    "KoReader Importer: Failed to initialize file logging:",
+                    "KOReader Importer: Failed to initialize file logging:",
                     error,
                 );
-                new Notice("Failed to initialize KoReader Importer log file.");
+                new Notice("Failed to initialize KOReader Importer log file.");
             }
         }
 
         devLog(
-            "KoReader Importer: Settings loaded, proceeding with service initialization.",
+            "KOReader Importer: Settings loaded, proceeding with service initialization.",
         );
 
         // Initialize Services
@@ -84,23 +84,21 @@ export default class KoReaderImporterPlugin extends Plugin {
                 this.settings,
             );
 
-            this.importManager = this.diContainer.resolve<ImportManager>(
-                ImportManager,
-            );
-            this.scanManager = this.diContainer.resolve<ScanManager>(
-                ScanManager,
-            );
+            this.importManager =
+                this.diContainer.resolve<ImportManager>(ImportManager);
+            this.scanManager =
+                this.diContainer.resolve<ScanManager>(ScanManager);
 
             this.servicesInitialized = true;
             devLog("All services initialized successfully.");
         } catch (error) {
             this.servicesInitialized = false;
             devError(
-                "CRITICAL error initializing KoReader Importer services:",
+                "CRITICAL error initializing KOReader Importer services:",
                 error,
             );
             new Notice(
-                "Error initializing KoReader Importer services. Plugin functionality may be limited. Please check settings or reload.",
+                "Error initializing KOReader Importer services. Plugin functionality may be limited. Please check settings or reload.",
                 15000,
             );
         }
@@ -125,26 +123,24 @@ export default class KoReaderImporterPlugin extends Plugin {
 
         // Ensure Templates
         try {
-            const templateManager = this.diContainer.resolve<TemplateManager>(
-                TemplateManager,
-            );
+            const templateManager =
+                this.diContainer.resolve<TemplateManager>(TemplateManager);
             await templateManager.ensureTemplates();
             devLog("Default templates ensured.");
         } catch (error) {
             devError("Failed to ensure default templates:", error);
-            new Notice("Could not create default KoReader templates.");
+            new Notice("Could not create default KOReader templates.");
         }
 
-        console.log("KoReader Importer Plugin: Loaded successfully.");
+        console.log("KOReader Importer Plugin: Loaded successfully.");
     }
 
     onunload() {
-        console.log("KoReader Importer Plugin: Unloading...");
+        console.log("KOReader Importer Plugin: Unloading...");
 
         try {
-            const dbService = this.diContainer.resolve<DatabaseService>(
-                DatabaseService,
-            );
+            const dbService =
+                this.diContainer.resolve<DatabaseService>(DatabaseService);
             dbService.closeDatabase();
         } catch (error) {
             devWarn(
@@ -154,20 +150,21 @@ export default class KoReaderImporterPlugin extends Plugin {
 
         closeLogging();
         this.servicesInitialized = false;
-        devLog("KoReader Importer resources cleaned up.");
+        devLog("KOReader Importer resources cleaned up.");
     }
 
     // --- Utility Methods ---
     private checkServiceStatus(operation: string): boolean {
         if (
-            !this.servicesInitialized || !this.importManager ||
+            !this.servicesInitialized ||
+            !this.importManager ||
             !this.scanManager
         ) {
             devError(
                 `Cannot trigger ${operation}: Services not fully initialized.`,
             );
             new Notice(
-                "Error: KoReader Importer services not ready. Please check settings or reload the plugin.",
+                "Error: KOReader Importer services not ready. Please check settings or reload the plugin.",
                 7000,
             );
             return false;
@@ -191,39 +188,30 @@ export default class KoReaderImporterPlugin extends Plugin {
     async triggerImport(): Promise<void> {
         devLog("Import triggered from settings tab.");
         if (!this.checkServiceStatus("import")) return;
-        if (!await this.ensureValidMountPoint()) return;
+        if (!(await this.ensureValidMountPoint())) return;
 
-        await runPluginAction(
-            () => this.importManager.importHighlights(),
-            {
-                failureNotice: "An unexpected error occurred during import",
-            },
-        );
+        await runPluginAction(() => this.importManager.importHighlights(), {
+            failureNotice: "An unexpected error occurred during import",
+        });
     }
 
     async triggerScan(): Promise<void> {
         devLog("Scan triggered from settings tab.");
         if (!this.checkServiceStatus("scan")) return;
-        if (!await this.ensureValidMountPoint()) return;
+        if (!(await this.ensureValidMountPoint())) return;
 
-        await runPluginAction(
-            () => this.scanManager.scanForHighlights(),
-            {
-                failureNotice: "An unexpected error occurred during scan",
-            },
-        );
+        await runPluginAction(() => this.scanManager.scanForHighlights(), {
+            failureNotice: "An unexpected error occurred during scan",
+        });
     }
 
     async clearCaches(): Promise<void> {
         devLog("Cache clear triggered from settings tab.");
         if (!this.checkServiceStatus("cache clearing")) return;
 
-        await runPluginAction(
-            () => this.importManager.clearCaches(),
-            {
-                failureNotice: "Failed to clear caches",
-            },
-        );
+        await runPluginAction(() => this.importManager.clearCaches(), {
+            failureNotice: "Failed to clear caches",
+        });
     }
 
     async saveSettings(): Promise<void> {
@@ -240,12 +228,14 @@ export default class KoReaderImporterPlugin extends Plugin {
         setDebugLevel(currentSettings.debugLevel);
 
         try {
-            this.diContainer.resolve<SDRFinder>(SDRFinder).updateSettings(
-                currentSettings,
-            );
-            this.diContainer.resolve<DatabaseService>(DatabaseService)
+            this.diContainer
+                .resolve<SDRFinder>(SDRFinder)
+                .updateSettings(currentSettings);
+            this.diContainer
+                .resolve<DatabaseService>(DatabaseService)
                 .setSettings(currentSettings);
-            this.diContainer.resolve<TemplateManager>(TemplateManager)
+            this.diContainer
+                .resolve<TemplateManager>(TemplateManager)
                 .updateSettings(currentSettings);
         } catch (error) {
             devError(

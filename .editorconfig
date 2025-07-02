@@ -1,0 +1,10 @@
+root = true
+
+[*]
+indent_size = 4
+indent_style = space
+quote_style = double
+trim_trailing_whitespace = true
+
+[*.json]
+indent_style = tab

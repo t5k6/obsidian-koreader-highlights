@@ -1,5 +1,5 @@
 import { normalizePath, Notice, TFile, type Vault } from "obsidian";
-import type { Annotation, KoReaderHighlightImporterSettings } from "../types";
+import type { Annotation, KoreaderHighlightImporterSettings } from "../types";
 import { ensureFolderExists, handleFileSystemError } from "../utils/fileUtils";
 import { parsePosition, styleHighlight } from "../utils/formatUtils";
 import { devError, devLog, devWarn } from "../utils/logging";
@@ -77,7 +77,7 @@ export const BUILT_IN_TEMPLATES: Record<
 };
 
 export const FALLBACK_TEMPLATE = BUILT_IN_TEMPLATES.default.content;
-const TEMPLATE_DIR = "Koreader/templates";
+const TEMPLATE_DIR = "KOReader/templates";
 const DARK_THEME_CLASS = "theme-dark";
 
 export class TemplateManager {
@@ -87,16 +87,17 @@ export class TemplateManager {
 
     constructor(
         private vault: Vault,
-        private settings: KoReaderHighlightImporterSettings,
+        private settings: KoreaderHighlightImporterSettings,
         isDarkTheme?: boolean,
     ) {
-        this.isDarkTheme = isDarkTheme ??
-            document.body.classList.contains(DARK_THEME_CLASS);
+        this.isDarkTheme =
+            isDarkTheme ?? document.body.classList.contains(DARK_THEME_CLASS);
         devLog(`TemplateManager initialized. Dark theme: ${this.isDarkTheme}`);
     }
 
-    updateSettings(newSettings: KoReaderHighlightImporterSettings): void {
-        const templateChanged = this.settings.template.selectedTemplate !==
+    updateSettings(newSettings: KoreaderHighlightImporterSettings): void {
+        const templateChanged =
+            this.settings.template.selectedTemplate !==
                 newSettings.template.selectedTemplate ||
             this.settings.template.useCustomTemplate !==
                 newSettings.template.useCustomTemplate ||
@@ -169,16 +170,16 @@ export class TemplateManager {
             if (!validation.isValid) {
                 if (validation.missingVariables.length > 0) {
                     devWarn(
-                        `Template "${templateId}" missing required variables: ${
-                            validation.missingVariables.join(", ")
-                        }.`,
+                        `Template "${templateId}" missing required variables: ${validation.missingVariables.join(
+                            ", ",
+                        )}.`,
                     );
                 }
                 if (validation.syntaxIssues.length > 0) {
                     devWarn(
-                        `Template "${templateId}" has syntax errors: ${
-                            validation.syntaxIssues.join(", ")
-                        }.`,
+                        `Template "${templateId}" has syntax errors: ${validation.syntaxIssues.join(
+                            ", ",
+                        )}.`,
                     );
                 }
                 templateContent = FALLBACK_TEMPLATE;
@@ -202,17 +203,14 @@ export class TemplateManager {
             // Handle other sources here if needed
             return null;
         } catch (error) {
-            handleFileSystemError(
-                "loading template",
-                templateId,
-                error,
-            );
+            handleFileSystemError("loading template", templateId, error);
             return null;
         }
     }
 
     private async loadFromVault(templateId: string): Promise<string | null> {
-        if (templateId.match(/[<>:"|?*]/)) { // Check for invalid characters
+        if (templateId.match(/[<>:"|?*]/)) {
+            // Check for invalid characters
             devWarn(`Invalid template path: "${templateId}"`);
             new Notice(
                 `Invalid template path: ${templateId}. Using default template.`,
@@ -244,8 +242,8 @@ export class TemplateManager {
         annotations: Annotation[],
     ): string {
         // Filter out annotations with empty text
-        const validAnnotations = annotations.filter((ann) =>
-            ann.text && ann.text.trim() !== ""
+        const validAnnotations = annotations.filter(
+            (ann) => ann.text && ann.text.trim() !== "",
         );
 
         if (validAnnotations.length === 0) {
@@ -348,9 +346,10 @@ export class TemplateManager {
         return template.replace(/\{\{((?!#|\/)[\w]+)\}\}/g, (_, key) => {
             if (key === "note" && typeof data.note === "string") {
                 // Prefix every line with '> ' for blockquote
-                return data.note.split("\n").map((line) => `> ${line}`).join(
-                    "\n",
-                );
+                return data.note
+                    .split("\n")
+                    .map((line) => `> ${line}`)
+                    .join("\n");
             }
             return data[key]?.toString() ?? "";
         });
@@ -392,14 +391,15 @@ export class TemplateManager {
         while (
             cleanedLines.length &&
             cleanedLines[cleanedLines.length - 1].trim() === ""
-        ) cleanedLines.pop();
+        )
+            cleanedLines.pop();
 
         return cleanedLines.join("\n") + "\n";
     }
 
     async ensureTemplates(): Promise<void> {
         const templateDir = normalizePath(
-            this.settings.template.templateDir || "Koreader/templates",
+            this.settings.template.templateDir || "KOReader/templates",
         );
 
         try {
@@ -436,12 +436,7 @@ export class TemplateManager {
         color?: string,
         drawer?: Annotation["drawer"],
     ): string {
-        return styleHighlight(
-            text,
-            color,
-            drawer,
-            this.isDarkTheme,
-        );
+        return styleHighlight(text, color, drawer, this.isDarkTheme);
     }
 
     private combineAndStyleGroup(annotations: Annotation[]): string {

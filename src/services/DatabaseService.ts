@@ -5,7 +5,7 @@ import initSqlJs, { SqlJsStatic } from "sql.js";
 import { SQLITE_WASM } from "../binaries/sql-wasm-base64";
 import type {
     BookStatistics,
-    KoReaderHighlightImporterSettings,
+    KoreaderHighlightImporterSettings,
     LuaMetadata,
     PageStatData,
     ReadingStatus,
@@ -33,15 +33,15 @@ export class DatabaseService {
         );
     }
 
-    constructor(private settings: KoReaderHighlightImporterSettings) {
-    }
+    constructor(private settings: KoreaderHighlightImporterSettings) {}
 
     private async findDeviceRoot(startPath: string): Promise<string | null> {
         let currentPath = path.resolve(startPath);
 
-        for (let i = 0; i < 10; i++) { // Max 10 levels up
+        for (let i = 0; i < 10; i++) {
+            // Max 10 levels up
             try {
-                // Check for a reliable KoReader/Kobo root indicator.
+                // Check for a reliable KOReader/Kobo root indicator.
                 const addsPath = path.join(currentPath, ".adds");
                 await access(addsPath);
 
@@ -63,7 +63,7 @@ export class DatabaseService {
             currentPath = parentPath;
         }
         devWarn(
-            `Could not determine KoReader device root by traversing up from ${startPath}.`,
+            `Could not determine KOReader device root by traversing up from ${startPath}.`,
         );
         return null; // Could not find a suitable root
     }
@@ -106,19 +106,21 @@ export class DatabaseService {
         }
 
         if (!this.settings.koboMountPoint) {
-            throw new Error("KoReader mount point is not configured.");
+            throw new Error("KOReader mount point is not configured.");
         }
 
         let deviceRoot: string | null;
         if (process.platform === "win32") {
-            const driveRoot = path.parse(this.settings.koboMountPoint).root ||
+            const driveRoot =
+                path.parse(this.settings.koboMountPoint).root ||
                 this.settings.koboMountPoint;
-            deviceRoot = await this.findDeviceRoot(driveRoot) ??
+            deviceRoot =
+                (await this.findDeviceRoot(driveRoot)) ??
                 this.settings.koboMountPoint;
         } else {
             deviceRoot =
-                await this.findDeviceRoot(this.settings.koboMountPoint) ??
-                    this.settings.koboMountPoint;
+                (await this.findDeviceRoot(this.settings.koboMountPoint)) ??
+                this.settings.koboMountPoint;
         }
 
         const dbFilePath = path.join(
@@ -151,7 +153,7 @@ export class DatabaseService {
     ): Promise<LuaMetadata["statistics"] | null> {
         if (!this.settings.koboMountPoint) {
             devWarn(
-                "Skipping statistics fetch: KoReader mount point not configured.",
+                "Skipping statistics fetch: KOReader mount point not configured.",
             );
             return null;
         }
@@ -175,8 +177,7 @@ export class DatabaseService {
 
         let bookResult: BookStatistics | null = null;
         if (bookQuery.step()) {
-            bookResult = bookQuery
-                .getAsObject() as unknown as BookStatistics;
+            bookResult = bookQuery.getAsObject() as unknown as BookStatistics;
         }
         bookQuery.free();
 
@@ -218,35 +219,38 @@ export class DatabaseService {
         const bookPages = book.pages ?? 0;
 
         // Ensure pages is not zero to avoid division by zero
-        const percentComplete = (bookPages > 0 && totalReadPages > 0)
-            ? Math.round((totalReadPages / bookPages) * 100)
-            : 0;
+        const percentComplete =
+            bookPages > 0 && totalReadPages > 0
+                ? Math.round((totalReadPages / bookPages) * 100)
+                : 0;
 
         // Ensure total_read_pages is not zero
         const averageTimePerPage =
-            (totalReadPages > 0 && book.total_read_time > 0)
+            totalReadPages > 0 && book.total_read_time > 0
                 ? book.total_read_time / 60 / totalReadPages // Avg time in minutes per page
                 : 0;
 
-        const readingStatus: ReadingStatus = sessions.length === 0
-            ? "unstarted"
-            : (bookPages > 0 && totalReadPages >= bookPages)
-            ? "completed"
-            : "ongoing";
+        const readingStatus: ReadingStatus =
+            sessions.length === 0
+                ? "unstarted"
+                : bookPages > 0 && totalReadPages >= bookPages
+                  ? "completed"
+                  : "ongoing";
 
         return {
             percentComplete: percentComplete,
             averageTimePerPage: averageTimePerPage,
-            firstReadDate: sessions.length > 0
-                ? new Date(sessions[0].start_time * 1000)
-                : null,
+            firstReadDate:
+                sessions.length > 0
+                    ? new Date(sessions[0].start_time * 1000)
+                    : null,
             lastReadDate: new Date(book.last_open * 1000),
             readingStatus: readingStatus,
         };
     }
 
     public setSettings(
-        newSettings: Readonly<KoReaderHighlightImporterSettings>,
+        newSettings: Readonly<KoreaderHighlightImporterSettings>,
     ) {
         if (newSettings.koboMountPoint !== this.settings.koboMountPoint) {
             this.closeDatabase(); // Invalidate connection

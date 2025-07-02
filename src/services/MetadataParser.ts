@@ -8,7 +8,7 @@ import type {
 import type {
     Annotation,
     DocProps,
-    KoReaderHighlightImporterSettings,
+    KoreaderHighlightImporterSettings,
     LuaMetadata,
 } from "../types";
 import { devError, devLog, devWarn } from "../utils/logging";
@@ -54,7 +54,7 @@ const DEFAULT_DOC_PROPS: DocProps = {
 
 export class MetadataParser {
     constructor(
-        private settings: KoReaderHighlightImporterSettings,
+        private settings: KoreaderHighlightImporterSettings,
         private sdrFinder: SDRFinder,
     ) {}
 
@@ -67,9 +67,8 @@ export class MetadataParser {
 
         devLog(`Parsing metadata for: ${sdrDirectoryPath}`);
         try {
-            const luaContent = await this.sdrFinder.readMetadataFileContent(
-                sdrDirectoryPath,
-            );
+            const luaContent =
+                await this.sdrFinder.readMetadataFileContent(sdrDirectoryPath);
             if (!luaContent) {
                 devWarn(
                     `No metadata content found or readable in: ${sdrDirectoryPath}`,
@@ -115,7 +114,8 @@ export class MetadataParser {
             });
 
             if (
-                !ast.body || ast.body.length === 0 ||
+                !ast.body ||
+                ast.body.length === 0 ||
                 ast.body[0].type !== "ReturnStatement"
             ) {
                 devWarn(
@@ -137,7 +137,8 @@ export class MetadataParser {
                 if (
                     field.type !== "TableKey" ||
                     field.key.type !== "StringLiteral"
-                ) continue;
+                )
+                    continue;
                 const key = field.key.raw.slice(1, -1);
 
                 switch (key) {
@@ -145,8 +146,8 @@ export class MetadataParser {
                         result.docProps = this.extractDocProps(field.value);
                         break;
                     case "doc_pages":
-                        result.pages = this.extractNumericValue(field.value) ??
-                            0; // Ensure pages is number
+                        result.pages =
+                            this.extractNumericValue(field.value) ?? 0; // Ensure pages is number
                         break;
                     case "annotations":
                         modernAnnotationsData = field;
@@ -189,7 +190,9 @@ export class MetadataParser {
             return result;
         } catch (error) {
             if (
-                error instanceof Error && "line" in error && "column" in error
+                error instanceof Error &&
+                "line" in error &&
+                "column" in error
             ) {
                 devError(
                     `Lua parsing error at Line ${(error as any).line}, Column ${
@@ -217,17 +220,21 @@ export class MetadataParser {
             if (
                 propField.type !== "TableKey" ||
                 propField.key.type !== "StringLiteral"
-            ) continue;
+            )
+                continue;
             const propKeyRaw = propField.key.raw.slice(1, -1);
             const propKey = propKeyRaw as keyof DocProps;
             let extractedValue = this.extractStringValue(propField.value);
 
             if (extractedValue !== null) {
                 if (propKey === "keywords") {
-                    extractedValue = extractedValue.replace(/\\?\n/g, ", ")
-                        .replace(/,\s*,/g, ",").trim();
+                    extractedValue = extractedValue
+                        .replace(/\\?\n/g, ", ")
+                        .replace(/,\s*,/g, ",")
+                        .trim();
                 }
-                if (propKey in docProps) { // Check against known DocProps keys
+                if (propKey in docProps) {
+                    // Check against known DocProps keys
                     (docProps as any)[propKey] = extractedValue;
                 } else {
                     // devWarn(`Unknown doc_prop key encountered: ${propKey}`); // Optional: be less noisy
@@ -261,9 +268,8 @@ export class MetadataParser {
                     annotationFields = entry.value.fields;
                 }
                 if (annotationFields) {
-                    const annotation = this.createAnnotationFromFields(
-                        annotationFields,
-                    );
+                    const annotation =
+                        this.createAnnotationFromFields(annotationFields);
                     if (annotation) annotations.push(annotation);
                 }
             }
@@ -272,7 +278,8 @@ export class MetadataParser {
                 if (
                     pageField.type !== "TableKey" ||
                     pageField.value.type !== "TableConstructorExpression"
-                ) continue;
+                )
+                    continue;
                 const pageNumStr = this.extractKeyAsString(pageField.key);
                 const pageNum = pageNumStr
                     ? Number.parseInt(pageNumStr, 10)
@@ -288,7 +295,8 @@ export class MetadataParser {
                         highlightGroupField.type !== "TableKey" ||
                         highlightGroupField.value.type !==
                             "TableConstructorExpression"
-                    ) continue;
+                    )
+                        continue;
                     const annotation = this.createAnnotationFromFields(
                         highlightGroupField.value.fields,
                     );
@@ -342,8 +350,9 @@ export class MetadataParser {
                     if (pageNumVal !== null) annotation.page = pageNumVal;
                     break;
                 case "drawer":
-                    const drawerVal = this.extractStringValue(valueNode)
-                        ?.toLowerCase() as Annotation["drawer"];
+                    const drawerVal = this.extractStringValue(
+                        valueNode,
+                    )?.toLowerCase() as Annotation["drawer"];
                     if (drawerVal && allowedDrawers.includes(drawerVal)) {
                         annotation.drawer = drawerVal;
                     } else if (drawerVal) {
@@ -376,9 +385,10 @@ export class MetadataParser {
         }
         if (!annotation.pos0 || !annotation.pos1) {
             devWarn(
-                `Annotation for text "${
-                    annotation.text.slice(0, 20)
-                }..." missing pos0/pos1.`,
+                `Annotation for text "${annotation.text.slice(
+                    0,
+                    20,
+                )}..." missing pos0/pos1.`,
             );
         }
         return annotation as Annotation;

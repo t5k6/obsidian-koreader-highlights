@@ -9,11 +9,12 @@ export class DuplicateHandlingModal
 	extends Modal
 	implements IDuplicateHandlingModal
 {
-	private choice: DuplicateChoice = "skip";
+	private choice: DuplicateChoice | null = "skip";
 	private applyToAll = false;
 	private resolvePromise:
-		| ((value: { choice: DuplicateChoice; applyToAll: boolean }) => void)
+		| ((value: { choice: DuplicateChoice | null; applyToAll: boolean }) => void)
 		| null = null;
+	private boundKeydownHandler: (event: KeyboardEvent) => void; // Add bound handler reference
 
 	constructor(
 		app: App,
@@ -22,10 +23,11 @@ export class DuplicateHandlingModal
 		private title = "Duplicate Highlights Found",
 	) {
 		super(app);
+		this.boundKeydownHandler = this.handleKeydown.bind(this); // Bind once in constructor
 	}
 
 	async openAndGetChoice(): Promise<{
-		choice: DuplicateChoice;
+		choice: DuplicateChoice | null;
 		applyToAll: boolean;
 	}> {
 		return new Promise((resolve) => {
@@ -37,15 +39,21 @@ export class DuplicateHandlingModal
 	onOpen() {
 		const { contentEl } = this;
 		contentEl.empty();
+		contentEl.setAttribute("role", "dialog"); 
+		contentEl.setAttribute("aria-labelledby", "modal-title");
 
 		// Add main container with max width
 		const container = contentEl.createDiv({
 			cls: "duplicate-modal-container",
+			attr: { "aria-modal": "true" },
 		});
 
 		// Header section
 		const headerEl = container.createDiv({ cls: "duplicate-modal-header" });
-		headerEl.createEl("h2", { text: this.title });
+		headerEl.createEl("h2", {
+			text: this.title,
+			attr: { id: "modal-title" }, 
+		});
 
 		// Add match type badge
 		const badgeEl = headerEl.createEl("span", {
@@ -109,7 +117,9 @@ export class DuplicateHandlingModal
 		shortcutsEl.createEl("kbd", { text: "Esc" });
 		shortcutsEl.createSpan({ text: " to Skip" });
 
-		contentEl.addEventListener("keydown", this.handleKeydown.bind(this));
+		contentEl.addEventListener("keydown", this.boundKeydownHandler); // Use stored reference
+
+		container.focus();
 	}
 
 	private getMatchTypeLabel(): string {
@@ -159,7 +169,7 @@ export class DuplicateHandlingModal
 		createButton("Replace ", "replace", "replace-all", {
 			warning: this.match.matchType === "exact",
 			tooltip:
-				"Replace the existing file with the new one, overwriting all content.",
+				"Replace the existing file with the new one. This will overwrite all existing content in the file.",
 		});
 
 		createButton("Merge ", "merge", "git-merge", {
@@ -167,15 +177,18 @@ export class DuplicateHandlingModal
 			tooltip:
 				this.match.matchType === "exact"
 					? "No new content to merge"
-					: undefined,
+					: "Merge new highlights with existing content while preserving existing notes",
 		});
 
 		createButton("Keep Both ", "keep-both", "copy", {
 			tooltip:
-				"Create a new file for the imported highlights and retain the original.",
+				"Create a new file for the imported highlights and retain the original. Useful when you want to keep both versions.",
 		});
 
-		createButton("Skip ", "skip", "x", { primary: true });
+		createButton("Skip ", "skip", "x", {
+			primary: true,
+			tooltip: "Skip importing this file and leave the existing one unchanged",
+		});
 	}
 
 	private handleChoice(choice: DuplicateChoice) {
@@ -205,7 +218,7 @@ export class DuplicateHandlingModal
 	onClose() {
 		const { contentEl } = this;
 		contentEl.empty();
-		contentEl.removeEventListener("keydown", this.handleKeydown.bind(this));
+		contentEl.removeEventListener("keydown", this.boundKeydownHandler); // Remove using same reference
 		if (this.resolvePromise) {
 			this.resolvePromise({ choice: "skip", applyToAll: false });
 			this.resolvePromise = null;

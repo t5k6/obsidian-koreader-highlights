@@ -1,11 +1,7 @@
 import path from "node:path";
-import { type App, normalizePath, Notice, TFile } from "obsidian";
-import type {
-	Annotation,
-	DuplicateChoice,
-	KoreaderHighlightImporterSettings,
-	LuaMetadata,
-} from "../types";
+import { type App, Notice, normalizePath, TFile } from "obsidian";
+import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import type { LuaMetadata } from "../types";
 import { ProgressModal } from "../ui/ProgressModal";
 import {
 	ensureParentDirectory,
@@ -23,315 +19,74 @@ import type { FrontmatterGenerator } from "./FrontmatterGenerator";
 import type { MetadataParser } from "./MetadataParser";
 import type { SDRFinder } from "./SDRFinder";
 
+type Summary = {
+	created: number;
+	merged: number;
+	skipped: number;
+	errors: number;
+};
+
 export class ImportManager {
 	constructor(
-		private app: App,
-		private settings: KoreaderHighlightImporterSettings,
-		private sdrFinder: SDRFinder,
-		private metadataParser: MetadataParser,
-		private databaseService: DatabaseService,
-		private frontmatterGenerator: FrontmatterGenerator,
-		private contentGenerator: ContentGenerator,
-		private duplicateHandler: DuplicateHandler,
+		private readonly app: App,
+		private readonly plugin: KoreaderImporterPlugin,
+		private readonly sdrFinder: SDRFinder,
+		private readonly metadataParser: MetadataParser,
+		private readonly databaseService: DatabaseService,
+		private readonly frontmatterGenerator: FrontmatterGenerator,
+		private readonly contentGenerator: ContentGenerator,
+		private readonly duplicateHandler: DuplicateHandler,
 	) {}
 
 	async importHighlights(): Promise<void> {
-		devLog("Starting KOReader highlight import process...");
+		devLog("Starting KOReader highlight import process…");
+
+		const sdrPaths = await this.sdrFinder.findSdrDirectoriesWithMetadata();
+		if (!sdrPaths?.length) {
+			new Notice("No KOReader highlight files found (.sdr with metadata.lua).");
+			devLog("No SDR files found to import.");
+			return;
+		}
 
 		const modal = new ProgressModal(this.app);
 		modal.open();
+		modal.setTotal(sdrPaths.length);
+
+		this.duplicateHandler.resetApplyToAll();
+
+		const summary: Summary = { created: 0, merged: 0, skipped: 0, errors: 0 };
 
 		try {
-			const sdrFilePaths =
-				await this.sdrFinder.findSdrDirectoriesWithMetadata();
-			if (!sdrFilePaths || sdrFilePaths.length === 0) {
-				new Notice(
-					"No KOReader highlight files (.sdr directories with metadata.lua) found.",
-				);
-				devLog("No SDR files found to import.");
-				modal.close();
-				return;
+			for (let idx = 0; idx < sdrPaths.length; idx++) {
+				if (modal.abortSignal.aborted)
+					throw new DOMException("Aborted by user", "AbortError");
+
+				const sdrPath = sdrPaths[idx];
+				const result = await this.processSdr(sdrPath);
+				summary.created += result.created;
+				summary.merged += result.merged;
+				summary.skipped += result.skipped;
+				summary.errors += result.error ? 1 : 0;
+
+				modal.updateProgress(idx + 1, path.basename(sdrPath));
 			}
 
-			const totalFiles = sdrFilePaths.length;
-			modal.setTotal(totalFiles);
-			devLog(`Found ${totalFiles} SDR files to process.`);
-			let completed = 0;
-			let errors = 0;
-			let created = 0;
-			let merged = 0;
-			let skipped = 0;
-
-			// Reset duplicate handler state for this import session
-			this.duplicateHandler.resetApplyToAll();
-
-			for (const sdrPath of sdrFilePaths) {
-				const baseName = path.basename(sdrPath);
-				modal.updateProgress(completed, baseName);
-				devLog(`Processing SDR: ${sdrPath}`);
-
-				try {
-					// 1. Parse Metadata
-					const luaMetadata = await this.metadataParser.parseFile(sdrPath);
-					if (!luaMetadata) {
-						devWarn(
-							`Skipping SDR due to parsing error or no metadata: ${sdrPath}`,
-						);
-						errors++;
-						continue;
-					}
-
-					// 2. Fetch Statistics
-					if (this.settings.frontmatter) {
-						try {
-							const stats = await this.databaseService.getBookStatistics(
-								luaMetadata.docProps.authors,
-								luaMetadata.docProps.title,
-							);
-							if (stats) {
-								luaMetadata.statistics = stats;
-								devLog(
-									`Successfully fetched statistics for: ${luaMetadata.docProps.title}`,
-								);
-							} else {
-								devLog(
-									`No statistics found for: ${luaMetadata.docProps.title}`,
-								);
-							}
-						} catch (statError) {
-							// Non-critical error, log and continue
-							devError(
-								`Non-critical error fetching stats for ${luaMetadata.docProps.title}:`,
-								statError,
-							);
-						}
-					}
-
-					// 3. Handle missing Title gracefully (leave authors empty)
-					if (!luaMetadata.docProps.title) {
-						const fallbackName = getFileNameWithoutExt(sdrPath);
-						luaMetadata.docProps.title = fallbackName;
-						devLog(
-							`Metadata was missing a title. Using fallback name "${fallbackName}" for the title.`,
-						);
-					}
-
-					// 4. Save Highlights and get summary
-					const fileSummary = await this.saveHighlightsToFile(
-						luaMetadata,
-						path.basename(sdrPath),
-					);
-
-					// Update summary counts
-					created += fileSummary.created;
-					merged += fileSummary.merged;
-					skipped += fileSummary.skipped;
-				} catch (fileError) {
-					this.handleFileError(fileError, sdrPath);
-					errors++;
-				} finally {
-					completed++;
-					modal.updateProgress(completed, baseName); // Update progress even on error
-				}
-			}
-
-			// ---------- MULTI-LINE SUMMARY NOTICE -------------
-			const noticeMsg = `KOReader Import finished
-${created} new • ${merged} merged • ${skipped} skipped • ${errors} error(s)`;
-			new Notice(noticeMsg);
-			// ------------------------------------------------------
-
-			devLog(
-				`Import process finished. Processed: ${completed}, Errors: ${errors}`,
-			);
-		} catch (error) {
-			devError("Critical error during highlight import process:", error);
 			new Notice(
-				"KOReader Importer: Critical error during import. Check console.",
+				`KOReader Import finished\n${summary.created} new • ${summary.merged} merged • ${summary.skipped} skipped • ${summary.errors} error(s)`,
+				10_000,
 			);
+			devLog("Import process finished", summary);
+		} catch (err: any) {
+			if (err?.name === "AbortError") {
+				new Notice("Import cancelled by user.");
+			} else {
+				devError("Critical error during highlight import process:", err);
+				new Notice("KOReader Importer: critical error. Check console.");
+			}
 		} finally {
+			devLog("Flushing database index …");
+			await this.databaseService.flushIndex();
 			modal.close();
-		}
-	}
-
-	private async saveHighlightsToFile(
-		luaMetadata: LuaMetadata,
-		originalSdrName: string,
-	): Promise<{ created: number; merged: number; skipped: number }> {
-		const summary = { created: 0, merged: 0, skipped: 0 };
-		const annotations = luaMetadata.annotations || [];
-		if (annotations.length === 0) {
-			devLog(
-				`No annotations found for "${luaMetadata.docProps.title}". Skipping file creation.`,
-			);
-			summary.skipped++;
-			return summary;
-		}
-
-		// 1. Generate File Name
-		const fileName = generateObsidianFileName(
-			luaMetadata.docProps,
-			this.settings.highlightsFolder,
-			originalSdrName,
-		);
-		const targetFilePath = normalizePath(
-			`${this.settings.highlightsFolder}/${fileName}`,
-		);
-
-		// 2. Generate Content
-		const frontmatterString =
-			this.frontmatterGenerator.generateYamlFromLuaMetadata(
-				luaMetadata,
-				this.settings.frontmatter,
-			);
-		const highlightsContent =
-			await this.contentGenerator.generateHighlightsContent(
-				annotations,
-				luaMetadata,
-			);
-		const fullContent = `${frontmatterString}\n\n${highlightsContent}`;
-
-		devLog(`Generated content for: ${fileName}`);
-
-		// 3. Handle Duplicates & Save
-		const potentialDuplicates =
-			await this.duplicateHandler.findPotentialDuplicates(luaMetadata.docProps);
-
-		if (potentialDuplicates.length > 0) {
-			devLog(
-				`Found ${potentialDuplicates.length} potential duplicate(s) for: ${fileName}`,
-			);
-
-			const choice = await this.processDuplicates(
-				potentialDuplicates,
-				annotations,
-				luaMetadata,
-				fullContent,
-				targetFilePath,
-			);
-
-			// A choice was made by the user or by "Apply to all"
-			if (choice) {
-				switch (choice) {
-					case "replace":
-					case "merge":
-						summary.merged++;
-						break;
-					case "keep-both":
-						summary.created++;
-						break;
-					case "skip":
-						summary.skipped++;
-						break;
-				}
-				devLog(
-					`Action '${choice}' handled by DuplicateHandler. Returning summary.`,
-				);
-				return summary;
-			} else {
-				// No choice was made (e.g., modal was cancelled/closed)
-				devLog(
-					`No choice made for duplicate "${luaMetadata.docProps.title}". Skipping.`,
-				);
-				summary.skipped++;
-				return summary;
-			}
-		}
-
-		// Only create new file if no duplicates were found
-		const outcome = await this.createOrUpdateFile(targetFilePath, fullContent);
-		if (outcome === "created") summary.created++;
-		else summary.merged++;
-
-		return summary;
-	}
-
-	private async processDuplicates(
-		potentialDuplicates: TFile[],
-		newAnnotations: Annotation[],
-		luaMetadata: LuaMetadata,
-		newContent: string,
-		intendedTargetPath: string,
-	): Promise<DuplicateChoice | null> {
-		for (const existingFile of potentialDuplicates) {
-			devLog(`Analyzing duplicate: ${existingFile.path}`);
-			const analysis = await this.duplicateHandler.analyzeDuplicate(
-				existingFile,
-				newAnnotations,
-				luaMetadata,
-			);
-
-			const { choice, applyToAll } =
-				await this.duplicateHandler.handleDuplicate(
-					analysis,
-					newAnnotations,
-					luaMetadata,
-					newContent,
-				);
-
-			// Return all choices including 'keep-both'
-			if (choice) {
-				return choice;
-			}
-		}
-		return null;
-	}
-
-	private async createOrUpdateFile(
-		filePath: string,
-		content: string,
-	): Promise<"created" | "modified"> {
-		try {
-			try {
-				await ensureParentDirectory(this.app.vault, filePath);
-			} catch (error) {
-				devError(
-					`Failed to ensure parent directory for ${filePath}. Aborting file creation.`,
-					error,
-				);
-				new Notice(`Could not create folder for: ${path.basename(filePath)}`);
-				throw error; // Re-throw to be caught by the outer catch block
-			}
-			const file = this.app.vault.getAbstractFileByPath(filePath);
-
-			if (file instanceof TFile) {
-				devLog(`Modifying existing file: ${filePath}`);
-				await this.app.vault.modify(file, content);
-				return "modified";
-			} else {
-				const uniqueFilePath = await generateUniqueFilePath(
-					this.app.vault,
-					this.settings.highlightsFolder,
-					path.basename(filePath),
-				);
-				if (uniqueFilePath !== filePath) {
-					devLog(
-						`Target path ${filePath} existed, saving to unique path: ${uniqueFilePath}`,
-					);
-				} else {
-					devLog(`Creating new file: ${uniqueFilePath}`);
-				}
-				await this.app.vault.create(uniqueFilePath, content);
-				return "created";
-			}
-		} catch (error) {
-			devError(`Error creating/updating file ${filePath}:`, error);
-			new Notice(`Failed to save file: ${path.basename(filePath)}`);
-			throw error;
-		}
-	}
-
-	private handleFileError(error: unknown, filePath: string): void {
-		const baseName = path.basename(filePath);
-		if (error instanceof Error) {
-			devError(
-				`Error processing file ${baseName}: ${error.message}`,
-				error.stack,
-			);
-			new Notice(`Error processing ${baseName}. See console.`);
-		} else {
-			devError(`Unknown error processing file ${baseName}:`, error);
-			new Notice(`Unknown error processing ${baseName}. See console.`);
 		}
 	}
 
@@ -340,5 +95,196 @@ ${created} new • ${merged} merged • ${skipped} skipped • ${errors} error(s
 		this.metadataParser.clearCache();
 		this.duplicateHandler.clearCache();
 		devLog("Import-related caches cleared.");
+	}
+
+	/* ------------------------------------------------------------------ */
+	/*                             PRIVATE                                */
+	/* ------------------------------------------------------------------ */
+
+	private async processSdr(
+		sdrPath: string,
+	): Promise<Summary & { error?: any }> {
+		const summary: Summary & { error?: any } = {
+			created: 0,
+			merged: 0,
+			skipped: 0,
+			errors: 0,
+		};
+
+		try {
+			/* 1 ──────────────────  Parse metadata  ───────────────────────── */
+			const luaMetadata = await this.metadataParser.parseFile(sdrPath);
+			if (!luaMetadata?.annotations?.length) {
+				devWarn(`Skipping – no annotations: ${sdrPath}`);
+				summary.skipped++;
+				return summary;
+			}
+
+			/* 2 ───────────────────── Stats lookup  ───────────────────────── */
+			await this.enrichWithStatistics(luaMetadata, sdrPath);
+
+			/* 3 ───────────────────  Missing title  ───────────────────────── */
+			if (!luaMetadata.docProps.title) {
+				luaMetadata.docProps.title = getFileNameWithoutExt(sdrPath);
+			}
+
+			/* 4 ─────────────────  Save highlights  ───────────────────────── */
+			const bookKey = this.databaseService.bookKeyFromDocProps(
+				luaMetadata.docProps,
+			);
+
+			const fileSummary = await this.saveHighlightsToFile(luaMetadata, bookKey);
+			Object.assign(summary, {
+				created: fileSummary.created,
+				merged: fileSummary.merged,
+				skipped: fileSummary.skipped,
+			});
+		} catch (err) {
+			devError(`Error processing ${sdrPath}`, err);
+			summary.error = err;
+			summary.errors = 1;
+		}
+
+		return summary;
+	}
+
+	/* ---------------------- helper: statistics ------------------------ */
+	private async enrichWithStatistics(
+		luaMetadata: LuaMetadata,
+		sdrPath: string,
+	): Promise<void> {
+		const { md5, docProps } = luaMetadata;
+		const { authors, title } = docProps;
+
+		// Use the new, more robust statistics finder
+		const stats = await this.databaseService.findBookStatistics(
+			title,
+			authors,
+			md5,
+		);
+
+		if (!stats) return;
+
+		luaMetadata.statistics = stats;
+		luaMetadata.docProps.title = stats.book.title;
+		if (
+			stats.book.authors &&
+			stats.book.authors.trim().toLowerCase() !== "n/a"
+		) {
+			luaMetadata.docProps.authors = stats.book.authors;
+		}
+		devLog(`Corrected metadata for “${sdrPath}” from stats DB.`);
+	}
+
+	/* ---------------------- helper: save/merge ------------------------ */
+	private async saveHighlightsToFile(
+		luaMetadata: LuaMetadata,
+		bookKey: string,
+	): Promise<{ created: number; merged: number; skipped: number }> {
+		const result = { created: 0, merged: 0, skipped: 0 };
+
+		const potentialDuplicates =
+			await this.duplicateHandler.findPotentialDuplicates(luaMetadata.docProps);
+
+		let targetPath: string | null = null;
+		let content: string | null = null; // lazily generated
+
+		/* ── Case A: duplicates found ─────────────────────── */
+		if (potentialDuplicates.length) {
+			devLog(`Found ${potentialDuplicates.length} potential duplicate(s).`);
+
+			const duplicateFile = potentialDuplicates[0];
+			const analysis = await this.duplicateHandler.analyzeDuplicate(
+				duplicateFile,
+				luaMetadata.annotations,
+				luaMetadata,
+			);
+
+			// content might be needed depending on choice, so defer creation until then
+			const { choice, file } = await this.duplicateHandler.handleDuplicate(
+				analysis,
+				luaMetadata.annotations,
+				luaMetadata,
+				async () => {
+					content ??= await this.generateFileContent(luaMetadata);
+					return content;
+				},
+			);
+
+			switch (choice) {
+				case "merge":
+				case "replace":
+					result.merged++;
+					targetPath = file!.path;
+					break;
+				case "skip":
+					result.skipped++;
+					break;
+				case "keep-both":
+					// fall through to new-file path
+					break;
+			}
+		}
+
+		/* ── Case B: need to create a new file ────────────── */
+		if (!targetPath && result.skipped === 0) {
+			content ??= await this.generateFileContent(luaMetadata);
+
+			const fileName = generateObsidianFileName(
+				luaMetadata.docProps,
+				this.plugin.settings.highlightsFolder,
+				luaMetadata.originalFilePath,
+			);
+			targetPath = await generateUniqueFilePath(
+				this.app.vault,
+				this.plugin.settings.highlightsFolder,
+				fileName,
+			);
+
+			await this.createOrUpdateFile(targetPath, content);
+			result.created++;
+		}
+
+		/* ── Update DB if something was actually written ─── */
+		if (targetPath) {
+			await this.databaseService.upsertBook(
+				luaMetadata.statistics?.book.id ?? null,
+				bookKey,
+				luaMetadata.docProps.title,
+				luaMetadata.docProps.authors,
+				targetPath,
+			);
+		}
+
+		return result;
+	}
+
+	/* ---------------------- helper: content gen ----------------------- */
+	private async generateFileContent(luaMetadata: LuaMetadata): Promise<string> {
+		const fm = this.frontmatterGenerator.generateYamlFromLuaMetadata(
+			luaMetadata,
+			this.plugin.settings.frontmatter,
+		);
+		const highlights = await this.contentGenerator.generateHighlightsContent(
+			luaMetadata.annotations,
+			luaMetadata,
+		);
+
+		return `${fm}\n\n${highlights.trim()}`;
+	}
+
+	/* ---------------------- helper: write file ------------------------ */
+	private async createOrUpdateFile(
+		filePath: string,
+		content: string,
+	): Promise<void> {
+		await ensureParentDirectory(this.app.vault, filePath);
+
+		const existing = this.app.vault.getAbstractFileByPath(filePath);
+		if (existing instanceof TFile) {
+			await this.app.vault.modify(existing, content);
+		} else {
+			await this.app.vault.create(filePath, content);
+		}
 	}
 }

@@ -1,4 +1,4 @@
-import { normalizePath, Notice, TFile, type Vault } from "obsidian";
+import { Notice, normalizePath, TFile, type Vault } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import type { TemplateData } from "src/types";
 import { styleHighlight } from "src/utils/highlightStyle";
@@ -15,6 +15,22 @@ import { devError, devLog, devWarn } from "../utils/logging";
 export const FALLBACK_TEMPLATE_ID = "default";
 const DARK_THEME_CLASS = "theme-dark";
 
+const MD_RULE_REGEX = /^\s*(-{3,}|_{3,}|\*{3,})\s*$/m;
+const HTML_HR_REGEX = /<hr\s*\/?>/i;
+const NOTE_LINE_REGEX = /^\s*>\s*/;
+const CONDITIONAL_BLOCK_REGEX = /{{#(\w+)}}(.*?)({{\/\1}})/gs;
+const SIMPLE_VAR_REGEX = /\{\{((?!#|\/)[\w]+)\}\}/g;
+const TEMPLATE_FRONTMATTER_REGEX = /^---.*?---\s*/s;
+
+export type CompiledTemplate = (data: TemplateData) => string;
+
+interface CachedTemplate {
+	fn: CompiledTemplate;
+	features: {
+		autoInsertDivider: boolean;
+	};
+}
+
 export interface TemplateValidationResult {
 	isValid: boolean;
 	errors: string[];
@@ -23,48 +39,87 @@ export interface TemplateValidationResult {
 }
 
 export class TemplateManager {
-	private isDarkTheme: boolean;
-	private templateCache: Map<string, string> = new Map();
+	private isDarkTheme: boolean = true;
+	private rawTemplateCache: Map<string, string> = new Map();
+	private compiledTemplateCache = new Map<string, CachedTemplate>();
 	public builtInTemplates: Map<string, TemplateDefinition> = new Map();
-	private currentTemplateFlags = {
-		autoInsertDivider: true,
-		autoPrefixNotes: true,
-	};
 
 	constructor(
 		public plugin: KoreaderImporterPlugin,
 		private vault: Vault,
-		private settings: KoreaderHighlightImporterSettings,
-		isDarkTheme?: boolean,
 	) {
-		this.isDarkTheme =
-			isDarkTheme ?? document.body.classList.contains(DARK_THEME_CLASS);
+		this.updateTheme = this.updateTheme.bind(this);
+		this.updateTheme();
+		this.plugin.registerEvent(
+			this.plugin.app.workspace.on("css-change", this.updateTheme),
+		);
 		devLog(`TemplateManager initialized. Dark theme: ${this.isDarkTheme}`);
 	}
 
-	private analyseTemplateFeatures(tpl: string): {
-		autoPrefixNotes: boolean;
-		autoInsertDivider: boolean;
-	} {
-		// ---------- 1. note prefix test ----------
-		// Look at every *line* that contains {{note}}.
-		// If ANY such line starts with '>' (ignoring leading whitespace)
-		// we assume the user is handling the block-quote themselves.
-		const noteLines = tpl.split(/\r?\n/).filter((l) => l.includes("{{note}}"));
-		const userHandlesPrefix = noteLines.some((l) => /^\s*>\s*/.test(l));
-		const autoPrefixNotes = !userHandlesPrefix; // invert
-
-		// ---------- 2. divider test ----------
-		// If we spot a horizontal rule or <hr> anywhere, we won’t add another.
-		const hasMdRule = /^\s*(-{3,}|_{3,}|\*{3,})\s*$/m.test(tpl);
-		const hasHtmlHr = /<hr\s*\/?>/i.test(tpl);
-		const autoInsertDivider = !(hasMdRule || hasHtmlHr);
-
-		return { autoPrefixNotes, autoInsertDivider };
+	private updateTheme(): void {
+		const newThemeState = document.body.classList.contains(DARK_THEME_CLASS);
+		if (this.isDarkTheme !== newThemeState) {
+			this.isDarkTheme = newThemeState;
+			devLog(`Theme changed. Dark theme: ${this.isDarkTheme}`);
+		}
 	}
 
-	public shouldAutoInsertDivider(): boolean {
-		return this.currentTemplateFlags.autoInsertDivider;
+	private analyseTemplateFeatures(tpl: string): CachedTemplate["features"] {
+		const noteLines = tpl.split(/\r?\n/).filter((l) => l.includes("{{note}}"));
+		const userHandlesPrefix = noteLines.some((l) => NOTE_LINE_REGEX.test(l));
+
+		const hasMdRule = MD_RULE_REGEX.test(tpl);
+		const hasHtmlHr = HTML_HR_REGEX.test(tpl);
+		const autoInsertDivider = !(hasMdRule || hasHtmlHr);
+
+		return { autoInsertDivider };
+	}
+
+	private compile(templateString: string): CompiledTemplate {
+		const noteLineHasQuote = /^[ \t]*>[^\n]*\{\{note\}\}/m.test(templateString);
+		const noteLines = templateString
+			.split(/\r?\n/)
+			.filter((l) => l.includes("{{note}}"));
+		const userHandlesPrefix = noteLines.some((l) => NOTE_LINE_REGEX.test(l));
+		const autoPrefixNotes = !userHandlesPrefix;
+
+		let noteReplacementLogic: string;
+		if (noteLineHasQuote) {
+			noteReplacementLogic = `(d.note || '').split('\\n').map((l, i) => i === 0 ? l : '> ' + l).join('\\n')`;
+		} else if (autoPrefixNotes) {
+			noteReplacementLogic = `(d.note || '').split('\\n').map(l => '> ' + l).join('\\n')`;
+		} else {
+			noteReplacementLogic = `d.note ?? ''`;
+		}
+
+		const code = templateString
+			.replace(/\\/g, "\\\\")
+			.replace(/`/g, "\\`")
+			.replace(
+				CONDITIONAL_BLOCK_REGEX,
+				(_, key, body) => `\${(d.${key}) ? \`${body}\` : ''}`,
+			)
+			.replace(SIMPLE_VAR_REGEX, (_, key) => {
+				if (key === "note") return `\${${noteReplacementLogic}}`;
+				return `\${d.${key} ?? ''}`;
+			});
+
+		const functionBody = `return \`${code}\`;`;
+
+		try {
+			// eslint-disable-next-line no-new-func
+			return new Function("d", functionBody) as CompiledTemplate;
+		} catch (error) {
+			devError("Failed to compile template.", error, {
+				template: functionBody,
+			});
+			return () => "Error: Template compilation failed.";
+		}
+	}
+
+	public async shouldAutoInsertDivider(): Promise<boolean> {
+		const { features } = await this.getCompiledTemplate();
+		return features.autoInsertDivider;
 	}
 
 	public async loadBuiltInTemplates(): Promise<void> {
@@ -74,20 +129,16 @@ export class TemplateManager {
 			const rawTemplates: Record<string, string> = JSON.parse(
 				KOREADER_BUILTIN_TEMPLATES,
 			);
-
 			for (const id in rawTemplates) {
 				const content = rawTemplates[id];
 				const name = id
 					.replace(/-/g, " ")
 					.replace(/\b\w/g, (l) => l.toUpperCase());
-
 				const fmMatch = content.match(/^---\s*description:\s*(.*?)\s*---/s);
 				const description = fmMatch
 					? fmMatch[1].trim()
 					: `The ${name} template.`;
-
-				const templateContent = content.replace(/^---.*?---\s*/s, "");
-
+				const templateContent = content.replace(TEMPLATE_FRONTMATTER_REGEX, "");
 				this.builtInTemplates.set(id, {
 					id,
 					name,
@@ -96,26 +147,25 @@ export class TemplateManager {
 				});
 			}
 		} catch (error) {
-			devError("Failed to parse or load embedded built-in templates.", error);
+			devError("Failed to parse built-in templates.", error);
 		}
-
-		devLog(
-			`Loaded ${this.builtInTemplates.size} built-in templates from bundle.`,
-		);
+		devLog(`Loaded ${this.builtInTemplates.size} built-in templates.`);
 	}
 
 	updateSettings(newSettings: KoreaderHighlightImporterSettings): void {
+		const settings = this.plugin.settings;
 		const templateChanged =
-			this.settings.template.selectedTemplate !==
+			settings.template.useCustomTemplate !==
+				newSettings.template.useCustomTemplate ||
+			settings.template.selectedTemplate !==
 				newSettings.template.selectedTemplate ||
-			this.settings.template.useCustomTemplate !==
-				newSettings.template.useCustomTemplate;
+			settings.template.templateDir !== newSettings.template.templateDir;
 
-		this.settings = newSettings;
+		this.plugin.settings = newSettings;
 
 		if (templateChanged) {
 			this.clearCache();
-			devLog("Template settings changed, cache cleared.");
+			devLog("Template settings changed, all caches cleared.");
 		}
 	}
 
@@ -126,10 +176,9 @@ export class TemplateManager {
 			warnings: [],
 			suggestions: [],
 		};
-
 		const requiredVars = ["highlight", "pageno"];
 		const foundVars = new Set(
-			[...content.matchAll(/{{([\w]+)}}/g)].map((m) => m[1]),
+			[...content.matchAll(SIMPLE_VAR_REGEX)].map((m) => m[1]),
 		);
 
 		requiredVars.forEach((v) => {
@@ -139,41 +188,22 @@ export class TemplateManager {
 			}
 		});
 
-		if (content.includes("{{#note}}") && !content.includes("{{/note}}")) {
-			result.errors.push("Unclosed {{#note}} block found.");
-			result.isValid = false;
-		}
-
-		if (
-			!content.includes("{{chapter}}") &&
-			!content.includes("{{#isFirstInChapter}}")
-		) {
-			result.suggestions.push(
-				"Consider adding {{chapter}} or {{#isFirstInChapter}} for better organization.",
-			);
-		}
-
 		if (/<[a-z][\s\S]*>/i.test(content)) {
-			result.warnings.push(
-				"HTML detected. This is powerful but may require custom CSS for correct styling.",
-			);
+			result.warnings.push("HTML detected; may require custom CSS.");
 		}
-
 		return result;
 	}
 
 	async loadTemplate(): Promise<string> {
-		const { useCustomTemplate, selectedTemplate } = this.settings.template;
+		const { useCustomTemplate, selectedTemplate } =
+			this.plugin.settings.template;
 		const templateId = selectedTemplate || FALLBACK_TEMPLATE_ID;
 
-		const cached = this.templateCache.get(templateId);
-		if (cached) {
-			this.currentTemplateFlags = this.analyseTemplateFeatures(cached);
-			return cached;
-		}
+		const cacheKey = useCustomTemplate ? templateId : `builtin_${templateId}`;
+		const cached = this.rawTemplateCache.get(cacheKey);
+		if (cached) return cached;
 
 		let templateContent: string;
-
 		if (!useCustomTemplate) {
 			const builtIn = this.builtInTemplates.get(templateId);
 			templateContent =
@@ -181,30 +211,51 @@ export class TemplateManager {
 				this.builtInTemplates.get(FALLBACK_TEMPLATE_ID)?.content ??
 				"";
 		} else {
-			let loadedFromVault = await this.loadTemplateFromVault(templateId);
+			const loadedFromVault = await this.loadTemplateFromVault(templateId);
 			if (!loadedFromVault) {
 				new Notice(
 					`Custom template "${templateId}" not found. Falling back to Default.`,
 				);
-				loadedFromVault =
+				templateContent =
 					this.builtInTemplates.get(FALLBACK_TEMPLATE_ID)?.content ?? "";
+			} else {
+				templateContent = loadedFromVault.replace(
+					TEMPLATE_FRONTMATTER_REGEX,
+					"",
+				);
 			}
-			templateContent = loadedFromVault.replace(/^---.*?---\s*/s, "");
 		}
 
 		const validation = this.validateTemplate(templateContent);
 		if (!validation.isValid) {
 			new Notice(
-				`Custom template "${templateId}" has errors. Falling back to Default. Check console for details.`,
+				`Template "${templateId}" has errors. Falling back to Default.`,
 			);
-			devError("Custom template validation failed:", validation.errors);
+			devError("Template validation failed:", validation.errors);
 			templateContent =
 				this.builtInTemplates.get(FALLBACK_TEMPLATE_ID)?.content ?? "";
 		}
 
-		this.currentTemplateFlags = this.analyseTemplateFeatures(templateContent);
-		this.templateCache.set(templateId, templateContent);
+		this.rawTemplateCache.set(cacheKey, templateContent);
 		return templateContent;
+	}
+
+	public async getCompiledTemplate(): Promise<CachedTemplate> {
+		const { useCustomTemplate, selectedTemplate } =
+			this.plugin.settings.template;
+		const templateId = selectedTemplate || FALLBACK_TEMPLATE_ID;
+		const cacheKey = useCustomTemplate ? templateId : `builtin_${templateId}`;
+
+		let cached = this.compiledTemplateCache.get(cacheKey);
+		if (cached) return cached;
+
+		const rawTemplate = await this.loadTemplate();
+		const compiledFn = this.compile(rawTemplate);
+		const features = this.analyseTemplateFeatures(rawTemplate);
+
+		cached = { fn: compiledFn, features };
+		this.compiledTemplateCache.set(cacheKey, cached);
+		return cached;
 	}
 
 	public async loadTemplateFromVault(
@@ -212,140 +263,52 @@ export class TemplateManager {
 	): Promise<string | null> {
 		const normalizedPath = normalizePath(vaultPath);
 		const file = this.vault.getAbstractFileByPath(normalizedPath);
-
-		if (file instanceof TFile) {
-			return this.vault.read(file);
-		}
-
-		devWarn(`Custom template file not found in vault: "${vaultPath}"`);
+		if (file instanceof TFile) return this.vault.read(file);
+		devWarn(`Custom template file not found: "${vaultPath}"`);
 		return null;
 	}
 
 	public render(templateString: string, data: TemplateData): string {
-		const withConditionals = this.processConditionalBlocks(
-			templateString,
-			data,
-		);
-		const withVariables = this.processSimpleVariables(withConditionals, data);
-		return withVariables.trim();
-	}
-
-	private async loadFromVault(templateId: string): Promise<string | null> {
-		const vaultPath = normalizePath(templateId);
-		const file = this.vault.getAbstractFileByPath(vaultPath);
-
-		if (file instanceof TFile) {
-			return this.vault.read(file);
-		}
-
-		devWarn(`Template not found in vault: "${vaultPath}"`);
-		return null;
-	}
-
-	private processConditionalBlocks(
-		template: string,
-		data: TemplateData,
-	): string {
-		const innermostRegex = /{{#(\w+)}}(.*?){{\/\1}}/gs;
-		let processedTemplate = template;
-		let lastTemplate: string;
-
-		do {
-			lastTemplate = processedTemplate;
-			processedTemplate = processedTemplate.replace(
-				innermostRegex,
-				(_, key, content) => {
-					const value = data[key];
-					let shouldRender: boolean;
-					if (typeof value === "boolean") {
-						shouldRender = value;
-					} else if (typeof value === "string") {
-						shouldRender = value.trim() !== "";
-					} else {
-						shouldRender = value !== null && value !== undefined;
-					}
-					if (key === "isFirstInChapter" && !data.chapter?.trim()) {
-						shouldRender = false;
-					}
-					return shouldRender ? content : "";
-				},
-			);
-		} while (processedTemplate !== lastTemplate);
-
-		return processedTemplate;
-	}
-
-	private processSimpleVariables(template: string, data: TemplateData): string {
-		const noteLineHasQuote = /^[ \t]*>[^\n]*\{\{note\}\}/m.test(template);
-
-		return template.replace(/\{\{((?!#|\/)[\w]+)\}\}/g, (_, key) => {
-			if (key === "note" && typeof data.note === "string") {
-				const lines = data.note.split("\n");
-
-				// CASE 1 – template already provides the first “> ”  →  prefix only the *next* lines
-				if (noteLineHasQuote) {
-					return lines
-						.map((line, idx) => (idx === 0 ? line : `> ${line}`))
-						.join("\n");
-				}
-
-				// CASE 2 – template has NO block-quote and our auto-detect decided
-				//          to add one for every line
-				if (this.currentTemplateFlags.autoPrefixNotes) {
-					return lines.map((line) => `> ${line}`).join("\n");
-				}
-
-				// CASE 3 – template wants the raw, unprefixed text
-				return data.note;
-			}
-
-			// … untouched replacement for non-note variables
-			return data[key]?.toString() ?? "";
-		});
+		const compiled = this.compile(templateString);
+		return compiled(data).trim();
 	}
 
 	async ensureTemplates(): Promise<void> {
-		const defaultPluginTemplateDir = normalizePath(
-			this.settings.template.templateDir || "KOReader/templates",
+		const templateDir = normalizePath(
+			this.plugin.settings.template.templateDir || "KOReader/templates",
 		);
-
 		try {
-			await ensureFolderExists(this.vault, defaultPluginTemplateDir);
+			await ensureFolderExists(this.vault, templateDir);
 		} catch (err) {
 			return;
 		}
+		if (this.builtInTemplates.size === 0) await this.loadBuiltInTemplates();
 
-		if (this.builtInTemplates.size === 0) {
-			await this.loadBuiltInTemplates();
-		}
-
-		for (const template of this.builtInTemplates.values()) {
-			const filePath = normalizePath(
-				`${defaultPluginTemplateDir}/${template.id}.md`,
-			);
-			if (!(await this.vault.adapter.exists(filePath))) {
-				devLog(`Creating built-in template file: ${filePath}`);
-				const fileContent = `---
-description: ${template.description}
----
-${template.content}`;
-				await this.vault.create(filePath, fileContent);
-			}
-		}
+		const writePromises = Array.from(this.builtInTemplates.values()).map(
+			async (template) => {
+				const filePath = normalizePath(`${templateDir}/${template.id}.md`);
+				if (!(await this.vault.adapter.exists(filePath))) {
+					devLog(`Creating built-in template file: ${filePath}`);
+					const fileContent = `---\ndescription: ${template.description}\n---\n${template.content}`;
+					await this.vault.create(filePath, fileContent);
+				}
+			},
+		);
+		await Promise.all(writePromises);
 	}
 
 	clearCache(): void {
-		this.templateCache.clear();
-		devLog("TemplateManager cache cleared.");
+		this.rawTemplateCache.clear();
+		this.compiledTemplateCache.clear();
+		devLog("TemplateManager caches cleared.");
 	}
 
 	public renderGroup(
-		templateStr: string,
+		compiledFn: CompiledTemplate,
 		group: Annotation[],
 		ctx: RenderContext,
 	): string {
 		const head = group[0];
-
 		const data: TemplateData = {
 			pageno: head.pageno ?? 0,
 			date: formatDate(head.datetime),
@@ -360,8 +323,7 @@ ${template.content}`;
 				.map((g) => g.note)
 				.filter((note): note is string => typeof note === "string"),
 		};
-
-		return this.render(templateStr, data);
+		return compiledFn(data);
 	}
 
 	private mergeHighlightText(
@@ -372,7 +334,6 @@ ${template.content}`;
 			const h = group[0];
 			return styleHighlight(h.text ?? "", h.color, h.drawer, this.isDarkTheme);
 		}
-
 		return group
 			.map((h, idx) => {
 				const styled = styleHighlight(
@@ -381,9 +342,7 @@ ${template.content}`;
 					h.drawer,
 					this.isDarkTheme,
 				);
-				if (idx === 0) return styled;
-				const sep = separators[idx - 1] ?? " ";
-				return sep + styled;
+				return (idx > 0 ? (separators[idx - 1] ?? " ") : "") + styled;
 			})
 			.join("");
 	}
@@ -391,7 +350,7 @@ ${template.content}`;
 	private mergeNotes(group: Annotation[]): string {
 		const notes = group
 			.map((g) => g.note)
-			.filter((n): n is string => typeof n === "string");
+			.filter((n): n is string => typeof n === "string" && n.trim() !== "");
 		if (!notes.length) return "";
 		return notes.join("\n\n---\n\n");
 	}

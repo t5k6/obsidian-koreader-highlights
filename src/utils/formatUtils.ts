@@ -27,7 +27,7 @@ interface CfiParts {
 // Group 6: Text node index for pos1
 // Group 7: End offset for pos1
 const CFI_REGEX_COMBINED =
-	/epubcfi\(([^!]*!)?([^,]+)(?:,\/(\d+):(\d+)(?:\,\/\d+:\d+)?)?(?:,\/(\d+):(\d+))?\)$/;
+	/epubcfi\(([^!]*!)?([^,]+)(?:,\/(\d+):(\d+)(?:,\/\d+:\d+)?)?(?:,\/(\d+):(\d+))?\)$/;
 
 export function generateObsidianFileName(
 	docProps: { title?: string; authors?: string },
@@ -152,7 +152,7 @@ export function simplifySdrName(raw: string, delimiter = " - "): string {
 	}
 
 	// ── 2. Drop REPEATED BLOCKS  (A B C  A B C  →  A B C)
-	let tokens = [...uniq];
+	const tokens = [...uniq];
 	let changed = true;
 
 	const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
@@ -404,4 +404,26 @@ export function isWithinGap(
 	maxGap: number,
 ): boolean {
 	return a.pageno === b.pageno && distanceBetweenHighlights(a, b) <= maxGap;
+}
+
+export function levenshteinDistance(a: string, b: string): number {
+	const aLower = a.toLowerCase();
+	const bLower = b.toLowerCase();
+	const matrix = Array.from({ length: bLower.length + 1 }, (_, i) => [i]);
+	for (let j = 1; j <= aLower.length; j++) {
+		matrix[0][j] = j;
+	}
+
+	for (let i = 1; i <= bLower.length; i++) {
+		for (let j = 1; j <= aLower.length; j++) {
+			const cost = aLower[j - 1] === bLower[i - 1] ? 0 : 1;
+			matrix[i][j] = Math.min(
+				matrix[i - 1][j] + 1, // deletion
+				matrix[i][j - 1] + 1, // insertion
+				matrix[i - 1][j - 1] + cost, // substitution
+			);
+		}
+	}
+
+	return matrix[bLower.length][aLower.length];
 }

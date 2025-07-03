@@ -77,6 +77,7 @@ export interface LuaMetadata {
 		derived: ReadingProgress;
 	};
 	originalFilePath?: string;
+	md5?: string;
 }
 
 // --- Frontmatter Data Structure ---
@@ -153,7 +154,7 @@ export interface DuplicateMatch {
 
 export interface IDuplicateHandlingModal {
 	openAndGetChoice(): Promise<{
-		choice: DuplicateChoice;
+		choice: DuplicateChoice | null; // choice can be null if modal is closed
 		applyToAll: boolean;
 	}>;
 }

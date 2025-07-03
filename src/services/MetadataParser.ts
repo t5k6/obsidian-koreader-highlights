@@ -98,6 +98,7 @@ export class MetadataParser {
 			docProps: { ...DEFAULT_DOC_PROPS },
 			pages: 0,
 			annotations: [],
+			md5: undefined,
 		};
 
 		let hasProcessedModernAnnotations = false;
@@ -139,6 +140,9 @@ export class MetadataParser {
 						break;
 					case "doc_pages":
 						result.pages = this.extractNumericValue(field.value) ?? 0; // Ensure pages is number
+						break;
+					case "partial_md5_checksum":
+						result.md5 = this.extractStringValue(field.value) ?? undefined;
 						break;
 					case "annotations":
 						modernAnnotationsData = field;

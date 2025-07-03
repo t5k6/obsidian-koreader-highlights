@@ -25,23 +25,26 @@ export class ServiceInitializer {
 		settings: KoreaderHighlightImporterSettings,
 	) {
 		// Register core services
-		container.register(SDRFinder, new SDRFinder(settings));
-		container.register(DatabaseService, new DatabaseService(settings));
-		container.register(
+		container.registerSingleton(SDRFinder, new SDRFinder(plugin));
+		container.registerSingleton(DatabaseService, new DatabaseService(plugin));
+		container.registerSingleton(
 			TemplateManager,
-			new TemplateManager(plugin, app.vault, settings),
+			new TemplateManager(plugin, app.vault),
 		);
-		container.register(FrontmatterGenerator, new FrontmatterGenerator());
+		container.registerSingleton(
+			FrontmatterGenerator,
+			new FrontmatterGenerator(),
+		);
 
 		// Register dependent services
-		container.register(
+		container.registerSingleton(
 			MetadataParser,
 			new MetadataParser(settings, container.resolve(SDRFinder)),
 		);
 
-		container.register(
+		container.registerSingleton(
 			ContentGenerator,
-			new ContentGenerator(container.resolve(TemplateManager), settings),
+			new ContentGenerator(container.resolve(TemplateManager), plugin),
 		);
 
 		// Define modal factory (same as original implementation)
@@ -53,24 +56,24 @@ export class ServiceInitializer {
 			return new DuplicateHandlingModal(app, match, message);
 		};
 
-		container.register(
+		container.registerSingleton(
 			DuplicateHandler,
 			new DuplicateHandler(
 				app.vault,
 				app,
 				modalFactory,
-				settings,
 				container.resolve(FrontmatterGenerator),
 				plugin,
 				container.resolve(ContentGenerator),
+				container.resolve(DatabaseService),
 			),
 		);
 
-		container.register(
+		container.registerSingleton(
 			ImportManager,
 			new ImportManager(
 				app,
-				settings,
+				plugin,
 				container.resolve(SDRFinder),
 				container.resolve(MetadataParser),
 				container.resolve(DatabaseService),
@@ -80,9 +83,9 @@ export class ServiceInitializer {
 			),
 		);
 
-		container.register(
+		container.registerSingleton(
 			ScanManager,
-			new ScanManager(app, settings, container.resolve(SDRFinder)),
+			new ScanManager(app, plugin, container.resolve(SDRFinder)),
 		);
 	}
 }

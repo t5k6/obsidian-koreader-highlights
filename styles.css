@@ -1,275 +1,305 @@
 /* Modal Container */
 .duplicate-modal-container {
-    max-width: 600px;
-    margin: 0 auto;
-    padding: 20px;
+	max-width: 600px;
+	margin: 0 auto;
+	padding: 20px;
+}
+
+.duplicate-modal-container:focus {
+	outline: 2px solid var(--color-accent);
+	outline-offset: 2px;
 }
 
 /* Header Section */
 .duplicate-modal-header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 20px;
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	margin-bottom: 20px;
 }
 
 .duplicate-modal-header h2 {
-    margin: 0;
-    flex-grow: 1;
+	margin: 0;
+	flex-grow: 1;
 }
 
 /* Match Type Badges */
 .duplicate-badge {
-    font-size: 12px;
-    padding: 4px 8px;
-    border-radius: 4px;
-    font-weight: 500;
+	font-size: 12px;
+	padding: 4px 8px;
+	border-radius: 4px;
+	font-weight: 500;
 }
 
 .duplicate-badge-exact {
-    background-color: var(--color-green);
-    color: var(--text-on-accent);
+	background-color: var(--color-green);
+	color: var(--text-on-accent);
 }
 
 .duplicate-badge-updated {
-    background-color: var(--color-yellow);
-    color: #000000;
+	background-color: var(--color-yellow);
+	color: #000000;
 }
 
 .duplicate-badge-divergent {
-    background-color: var(--color-orange);
-    color: var(--text-on-accent);
+	background-color: var(--color-orange);
+	color: var(--text-on-accent);
 }
 
 /* Message and File Path */
 .duplicate-message {
-    margin-bottom: 20px;
+	margin-bottom: 20px;
 }
 
 .duplicate-file-path {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
-    background-color: var(--color-base-20);
-    border-radius: 4px;
-    font-family: var(--font-monospace);
-    font-size: 0.9em;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 12px;
+	background-color: var(--color-base-20);
+	border-radius: 4px;
+	font-family: var(--font-monospace);
+	font-size: 0.9em;
 }
 
 /* Statistics Section */
 .duplicate-stats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 16px;
-    background: var(--color-base-20);
-    padding: 16px;
-    border-radius: 6px;
-    margin: 20px 0;
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+	gap: 16px;
+	background: var(--color-base-20);
+	padding: 16px;
+	border-radius: 6px;
+	margin: 20px 0;
 }
 
 .stat-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
+	display: flex;
+	align-items: center;
+	gap: 8px;
 }
 
 .stat-icon {
-    color: var(--color-accent);
+	color: var(--color-accent);
 }
 
 .stat-value {
-    font-weight: bold;
-    margin-left: auto;
+	font-weight: bold;
+	margin-left: auto;
 }
 
 /* Settings Section */
 .duplicate-settings {
-    margin: 20px 0;
-    padding: 12px;
-    background: var(--color-base-20);
-    border-radius: 6px;
+	margin: 20px 0;
+	padding: 12px;
+	background: var(--color-base-20);
+	border-radius: 6px;
 }
 
 /* Action Buttons */
 .duplicate-buttons {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 12px;
-    margin-top: 24px;
-    width: 100%;
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 12px;
+	margin-top: 24px;
+	width: 100%;
 }
 
 .button-container {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    width: 100%;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	width: 100%;
+}
+
+.button-container button:focus {
+	box-shadow: 0 0 0 2px var(--color-accent);
 }
 
 .duplicate-buttons .mod-button {
-    width: 100%;
-    padding: 12px;
-    border-radius: 6px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    transition: all 0.2s ease;
-    box-sizing: border-box;
+	width: 100%;
+	padding: 12px;
+	border-radius: 6px;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 8px;
+	transition: all 0.2s ease;
+	box-sizing: border-box;
 }
 
 .button-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
+	display: flex;
+	align-items: center;
+	justify-content: center;
 }
 
 .duplicate-buttons .mod-cta {
-    background-color: var(--color-accent);
-    color: var(--color-base-100);
+	background-color: var(--color-accent);
+	color: var(--color-base-100);
 }
 
 .duplicate-buttons .mod-warning {
-    background-color: var(--color-red);
-    color: var(--color-base-100);
+	background-color: var(--color-red);
+	color: var(--color-base-100);
 }
 
 .duplicate-buttons .mod-button:hover:not(.mod-disabled) {
-    transform: translateY(-1px);
-    filter: brightness(1.1);
+	transform: translateY(-1px);
+	filter: brightness(1.1);
 }
 
 .duplicate-buttons .mod-disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+	opacity: 0.5;
+	cursor: not-allowed;
 }
 
 /* Keyboard Shortcuts */
 .duplicate-shortcuts {
-    margin-top: 20px;
-    text-align: center;
-    font-size: 0.9em;
-    color: var(--color-base-70);
+	margin-top: 20px;
+	text-align: center;
+	font-size: 0.9em;
+	color: var(--color-base-70);
 }
 
 .duplicate-shortcuts kbd {
-    background: var(--color-base-30);
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-size: 0.9em;
+	background: var(--color-base-30);
+	padding: 2px 6px;
+	border-radius: 4px;
+	font-size: 0.9em;
 }
 
 .frontmatter-field-list {
-    max-height: 400px;
-    overflow-y: auto;
-    border: 1px solid var(--background-modifier-border);
-    border-radius: 4px;
-    padding: 8px;
-    margin-bottom: 16px;
+	max-height: 400px;
+	overflow-y: auto;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	padding: 8px;
+	margin-bottom: 16px;
 }
 
 .frontmatter-field-item {
-    padding: 4px 0;
-    border-bottom: 1px solid var(--background-modifier-border);
+	padding: 4px 0;
+	border-bottom: 1px solid var(--background-modifier-border);
 }
 
 .frontmatter-field-item:last-child {
-    border-bottom: none;
+	border-bottom: none;
 }
 
 .custom-fields-section {
-    margin-top: 2em;
-    border-top: 1px solid var(--background-modifier-border);
-    padding-top: 1em;
+	margin-top: 2em;
+	border-top: 1px solid var(--background-modifier-border);
+	padding-top: 1em;
 }
 
 .custom-fields-section .setting-item {
-    padding-top: 0;
-    border-bottom: none;
+	padding-top: 0;
+	border-bottom: none;
 }
 
 /* Highlights */
 :root {
-    --highlight-red: #ff0000;
-    --highlight-orange: #ff9900;
-    --highlight-yellow: #ffff00;
-    --highlight-green: #00ff00;
-    --highlight-gray: #808080;
+	--highlight-red: #ff0000;
+	--highlight-orange: #ff9900;
+	--highlight-yellow: #ffff00;
+	--highlight-green: #00ff00;
+	--highlight-gray: #808080;
 }
 
 .highlight-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 0.5em;
-    padding: 0.5em;
-    background-color: var(--background-secondary);
-    border-radius: 4px;
-    font-size: 0.9em;
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	margin-bottom: 0.5em;
+	padding: 0.5em;
+	background-color: var(--background-secondary);
+	border-radius: 4px;
+	font-size: 0.9em;
 }
 
 .highlight-date {
-    color: var(--text-muted);
-    font-style: italic;
+	color: var(--text-muted);
+	font-style: italic;
 }
 
 .highlight-page {
-    color: var(--text-normal);
-    font-weight: 500;
+	color: var(--text-normal);
+	font-weight: 500;
 }
 
 .highlight {
-    padding: 0.2em 0.4em;
-    border-radius: 4px;
-    font-weight: 500;
-    transition: box-shadow 0.2s;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+	padding: 0.2em 0.4em;
+	border-radius: 4px;
+	font-weight: 500;
+	transition: box-shadow 0.2s;
+	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
 }
 
 .highlight-red {
-    background-color: var(--highlight-red);
-    color: #fff;
+	background-color: var(--highlight-red);
+	color: #fff;
 }
 
 .highlight-orange {
-    background-color: var(--highlight-orange);
-    color: #000;
+	background-color: var(--highlight-orange);
+	color: #000;
 }
 
 .highlight-yellow {
-    background-color: var(--highlight-yellow);
-    color: #000;
+	background-color: var(--highlight-yellow);
+	color: #000;
 }
 
 .highlight-green {
-    background-color: var(--highlight-green);
-    color: #000;
+	background-color: var(--highlight-green);
+	color: #000;
 }
 
 .highlight-gray {
-    background-color: var(--highlight-gray);
-    color: #000;
-    font-style: italic;
+	background-color: var(--highlight-gray);
+	color: #000;
+	font-style: italic;
 }
 
 .highlight-note {
-    background: var(--background-secondary);
-    padding: 1em 1.2em;
-    border-radius: 6px;
-    margin: 1.2em 0;
-    font-size: 1em;
-    line-height: 1.8;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
-    border-left: 4px solid var(--highlight-color, var(--color-accent));
-    color: var(--text-normal);
+	background: var(--background-secondary);
+	padding: 1em 1.2em;
+	border-radius: 6px;
+	margin: 1.2em 0;
+	font-size: 1em;
+	line-height: 1.8;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+	border-left: 4px solid var(--highlight-color, var(--color-accent));
+	color: var(--text-normal);
 }
 
 .highlight-hr {
-    border: 0;
-    height: 1px;
-    background: var(--background-modifier-border);
-    margin: 2em 0;
-    opacity: 0.7;
+	border: 0;
+	height: 1px;
+	background: var(--background-modifier-border);
+	margin: 2em 0;
+	opacity: 0.7;
+}
+
+/* Style for the rendered output */
+.koreader-template-preview-modal .template-preview-rendered {
+	max-height: 40vh;
+	overflow: auto;
+	padding: 0.75rem 1rem;
+	background-color: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	margin-top: 0.5rem;
+}
+
+/* Style for the code block container rendered by MarkdownRenderer */
+.koreader-template-preview-modal .template-preview-code-block
+	.markdown-rendered
+	pre {
+	max-height: 40vh;
+	overflow: auto;
+	margin-top: 0.5rem;
+	/* Padding and other styles are usually handled by the theme's pre/code styling */
 }

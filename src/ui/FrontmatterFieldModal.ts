@@ -1,4 +1,4 @@
-import { type App, Modal, Setting } from "obsidian";
+import { type App, Modal, Notice, Setting } from "obsidian";
 import type { FrontmatterSettings } from "../types";
 
 export class FrontmatterFieldModal extends Modal {
@@ -40,9 +40,18 @@ export class FrontmatterFieldModal extends Modal {
 		const { contentEl } = this;
 		contentEl.empty();
 		contentEl.addClass("koreader-frontmatter-modal");
-		contentEl.createEl("h3", { text: "Manage Frontmatter Fields" });
+		contentEl.setAttribute("role", "dialog");
+		contentEl.setAttribute("aria-labelledby", "frontmatter-title");
+
+		const titleEl = contentEl.createEl("h3", {
+			text: "Manage Frontmatter Fields",
+			cls: "frontmatter-title",
+		});
+		titleEl.id = "frontmatter-title";
+
 		contentEl.createEl("p", {
-			text: "Check a field to EXCLUDE it from generated frontmatter.",
+			text: "These settings control which metadata fields appear in your highlight notes. Check a field to EXCLUDE it from generated frontmatter.",
+			cls: "frontmatter-description",
 		});
 
 		for (const field of this.fieldOptions) {
@@ -55,16 +64,77 @@ export class FrontmatterFieldModal extends Modal {
 
 		contentEl.createEl("h3", { text: "Custom Fields" });
 		contentEl.createEl("p", {
-			text: "Add extra fields from KOReader metadata (comma-separated).",
+			text: "Add extra fields from KOReader metadata:",
 		});
-		new Setting(contentEl).addTextArea((text) =>
-			text
-				.setValue(this.currentSettings.customFields.join(", "))
-				.onChange((value) => {
-					this.currentSettings.customFields = value
-						.split(",")
-						.map((f) => f.trim())
-						.filter(Boolean);
+
+		// List container for custom fields
+		const fieldsContainer = contentEl.createDiv("custom-fields-container");
+
+		// Function to render custom fields list
+		const renderCustomFields = () => {
+			fieldsContainer.empty();
+
+			this.currentSettings.customFields.forEach((field, index) => {
+				const setting = new Setting(fieldsContainer)
+					.setName(field)
+					.addButton((button) =>
+						button
+							.setIcon("trash")
+							.setTooltip("Remove field")
+							.onClick(() => {
+								this.currentSettings.customFields.splice(index, 1);
+								renderCustomFields();
+							}),
+					);
+			});
+		};
+
+		renderCustomFields();
+
+		const addFieldContainer = contentEl.createDiv("add-field-container");
+		const addFieldSetting = new Setting(addFieldContainer);
+
+		let newFieldValue = "";
+		const input = addFieldSetting.addText((text) => {
+			text.setPlaceholder("New field name").onChange((value) => {
+				newFieldValue = value.trim();
+			});
+		}).controlEl;
+
+		const suggestedFields = ["rating", "genre", "publisher"];
+
+		input.setAttribute("list", "field-suggestions");
+		const datalist = contentEl.createEl("datalist");
+		datalist.id = "field-suggestions";
+		suggestedFields.forEach((field) =>
+			datalist.createEl("option", { value: field }),
+		);
+
+		addFieldSetting.addButton((button) =>
+			button
+				.setButtonText("Add")
+				.setCta()
+				.onClick(() => {
+					if (!newFieldValue) return;
+
+					// Validate field name format
+					if (!/^[a-zA-Z0-9_-]+$/.test(newFieldValue)) {
+						new Notice(
+							"Field names can only contain letters, numbers, hyphens and underscores",
+						);
+						return;
+					}
+
+					// Check for duplicates
+					if (this.currentSettings.customFields.includes(newFieldValue)) {
+						new Notice("Field already exists");
+						return;
+					}
+
+					this.currentSettings.customFields.push(newFieldValue);
+					renderCustomFields();
+					input.querySelector("input")!.value = "";
+					newFieldValue = "";
 				}),
 		);
 
@@ -78,6 +148,12 @@ export class FrontmatterFieldModal extends Modal {
 			.addButton((btn) =>
 				btn.setButtonText("Cancel").onClick(() => this.close()),
 			);
+
+		// Set focus to first control
+		const firstToggle = contentEl.querySelector(
+			'input[type="checkbox"]',
+		) as HTMLElement;
+		if (firstToggle) firstToggle.focus();
 	}
 
 	private handleSave() {

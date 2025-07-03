@@ -1,8 +1,5 @@
-import type {
-	Annotation,
-	KoreaderHighlightImporterSettings,
-	LuaMetadata,
-} from "../types";
+import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import type { Annotation, LuaMetadata } from "../types";
 import {
 	compareAnnotations,
 	distanceBetweenHighlights,
@@ -18,7 +15,7 @@ interface SuccessiveGroup {
 export class ContentGenerator {
 	constructor(
 		private templateManager: TemplateManager,
-		private settings: KoreaderHighlightImporterSettings,
+		private plugin: KoreaderImporterPlugin,
 	) {}
 
 	async generateHighlightsContent(
@@ -29,7 +26,8 @@ export class ContentGenerator {
 			return "";
 		}
 
-		const templateString = await this.templateManager.loadTemplate();
+		const { fn: compiledTemplate, features } =
+			await this.templateManager.getCompiledTemplate();
 
 		// 1. Group all annotations by chapter name.
 		const groupedByChapter = annotations.reduce(
@@ -51,11 +49,9 @@ export class ContentGenerator {
 					compareAnnotations,
 				);
 
-				// Sort the highlights within this chapter to find the earliest one.
 				sortedHighlights.forEach((ann) => {
 					ann.chapter = chapterName;
 				});
-				// The chapter's order is determined by its first highlight's page number.
 				const startPage = sortedHighlights[0]?.pageno ?? 0;
 
 				return {
@@ -71,25 +67,18 @@ export class ContentGenerator {
 
 		// 4. Render the chapters in the now-correct order.
 		let finalContent = "";
-		let isFirstChapterProcessed = true;
 		for (const chapterData of chaptersToSort) {
 			const chapterHighlights = chapterData.annotations;
 			if (!chapterHighlights || chapterHighlights.length === 0) continue;
 
-			if (!isFirstChapterProcessed) {
-				finalContent += "\n\n";
-			}
-
 			let isFirstHighlightInChapter = true;
-
-			// Group successive highlights within the already sorted chapter.
 			const groupedSuccessiveHighlights =
 				this.groupSuccessiveHighlights(chapterHighlights);
 
-			// Render each highlight block within the chapter.
+			let chapterContent = "";
 			for (const highlightGroup of groupedSuccessiveHighlights) {
-				finalContent += this.templateManager.renderGroup(
-					templateString,
+				chapterContent += this.templateManager.renderGroup(
+					compiledTemplate,
 					highlightGroup.annotations,
 					{
 						separators: highlightGroup.separators,
@@ -98,18 +87,20 @@ export class ContentGenerator {
 				);
 				isFirstHighlightInChapter = false;
 
-				// divider between groups inside the chapter
-				if (!isFirstHighlightInChapter) {
-					if (this.templateManager.shouldAutoInsertDivider()) {
-						finalContent += "\n\n---\n\n";
-					} else {
-						// If the template has its own divider, we still add spacing.
-						finalContent += "\n\n";
-					}
+				if (features.autoInsertDivider) {
+					chapterContent += "\n\n---\n\n";
+				} else {
+					chapterContent += "\n\n";
 				}
 			}
 
-			isFirstChapterProcessed = false;
+			// Add the processed chapter content to the final output
+			finalContent += chapterContent;
+		}
+
+		// Remove the last divider and trim whitespace
+		if (features.autoInsertDivider) {
+			finalContent = finalContent.slice(0, -7);
 		}
 
 		return finalContent.replace(/\n{3,}/g, "\n\n").trim();
@@ -125,12 +116,17 @@ export class ContentGenerator {
 			if (current.length) {
 				const prev = current[current.length - 1];
 				const gap = distanceBetweenHighlights(prev, h);
-				seps.push(gap <= this.settings.maxHighlightGap ? " " : " [...] ");
+				seps.push(
+					gap <= this.plugin.settings.maxHighlightGap ? " " : " [...] ",
+				);
 			}
 			current.push(h);
 
 			const next = anno[i + 1];
-			if (!next || !isWithinGap(h, next, this.settings.maxHighlightGap)) {
+			if (
+				!next ||
+				!isWithinGap(h, next, this.plugin.settings.maxHighlightGap)
+			) {
 				groups.push({ annotations: current, separators: seps });
 				current = [];
 				seps = [];

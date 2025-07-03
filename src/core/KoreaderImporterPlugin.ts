@@ -136,20 +136,12 @@ export default class KoreaderImporterPlugin extends Plugin {
 		console.log("KOReader Importer Plugin: Loaded successfully.");
 	}
 
-	onunload() {
+	async onunload() {
 		console.log("KOReader Importer Plugin: Unloading...");
 
-		try {
-			const dbService =
-				this.diContainer.resolve<DatabaseService>(DatabaseService);
-			dbService.closeDatabase();
-		} catch (error) {
-			devWarn(
-				"DatabaseService not found during unload, may have failed to initialize.",
-			);
-		}
+		await this.diContainer.dispose();
+		await closeLogging();
 
-		closeLogging();
 		this.servicesInitialized = false;
 		devLog("KOReader Importer resources cleaned up.");
 	}
@@ -187,6 +179,12 @@ export default class KoreaderImporterPlugin extends Plugin {
 
 		await runPluginAction(() => this.importManager.importHighlights(), {
 			failureNotice: "An unexpected error occurred during import",
+		}).catch((error) => {
+			if (error.name !== "AbortError") {
+				devError("Import failed with an unexpected error", error);
+				new Notice("Import failed. Check console for details.");
+			}
+			// If it is an AbortError, it's already handled by the modal, so we do nothing.
 		});
 	}
 
@@ -216,18 +214,16 @@ export default class KoreaderImporterPlugin extends Plugin {
 		}
 
 		const currentSettings = this.settings;
-		await this.pluginSettings.saveSettings(currentSettings);
+		await this.pluginSettings.saveSettings(this.settings);
 
 		setDebugLevel(currentSettings.debugLevel);
 
 		try {
-			this.diContainer
-				.resolve<SDRFinder>(SDRFinder)
-				.updateSettings(currentSettings);
+			this.diContainer.resolve<SDRFinder>(SDRFinder).updateSettings();
 			this.diContainer
 				.resolve<DatabaseService>(DatabaseService)
-				.setSettings(currentSettings);
-			this.templateManager.updateSettings(currentSettings);
+				.setSettings(this.settings);
+			this.templateManager.updateSettings(this.settings);
 		} catch (error) {
 			devError("Failed to update settings in one or more services", error);
 		}

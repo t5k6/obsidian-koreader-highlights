@@ -111,26 +111,36 @@ export class LogManager {
 	}): Promise<void> {
 		const levelForFileName = "ALL";
 		const formattedDate = getFormattedDate();
+		const logFilePath = normalizePath(
+			`${this.logDir}/koreader-importer_${formattedDate}_${levelForFileName}.md`,
+		);
+		const initialContent = `Log initialized at ${new Date().toISOString()} (File Log captures all levels. Console Level: ${
+			DebugLevel[currentConsoleLogLevel]
+		})\n`;
+
 		try {
 			await ensureFolder(this.vault, this.logDir);
 
-			const logFilePath = normalizePath(
-				`${this.logDir}/koreader-importer_${formattedDate}_${levelForFileName}.md`,
-			);
-			this.logFile = await this.vault.create(
-				logFilePath,
-				`Log initialized at ${new Date().toISOString()} (File Log captures all levels. Console Level: ${
-					DebugLevel[currentConsoleLogLevel]
-				})\n`,
-			);
-			if (!this.logFile) {
-				const maybe = this.vault.getAbstractFileByPath(logFilePath);
-				if (maybe instanceof TFile) this.logFile = maybe;
+			let fileHandle = this.vault.getAbstractFileByPath(logFilePath);
+
+			// If path exists but it's a folder, that's a problem.
+			if (fileHandle && !(fileHandle instanceof TFile)) {
+				console.error(
+					`Log path ${logFilePath} exists but is a folder. Logging disabled.`,
+				);
+				throw new Error("Log path is a folder");
 			}
+
+			// If file doesn't exist, create it.
+			if (!fileHandle) {
+				fileHandle = await this.vault.create(logFilePath, initialContent);
+			}
+
+			this.logFile = fileHandle as TFile;
 		} catch (error) {
 			console.error("LogManager.initialize internal error:", error);
 			this.logFile = null;
-			throw error;
+			throw error; 
 		}
 
 		if (cleanupOptions?.enabled) {

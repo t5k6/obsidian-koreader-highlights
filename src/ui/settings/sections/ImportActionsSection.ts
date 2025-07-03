@@ -1,11 +1,11 @@
 import { Setting } from "obsidian";
-import type KoReaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import { runPluginAction } from "src/utils/actionUtils";
 import { SettingsSection } from "../SettingsSection";
 
 export class ImportActionsSection extends SettingsSection {
 	constructor(
-		plugin: KoReaderImporterPlugin,
+		plugin: KoreaderImporterPlugin,
 		debouncedSave: () => void,
 		title: string,
 		startOpen = false,

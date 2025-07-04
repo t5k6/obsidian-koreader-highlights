@@ -7,6 +7,7 @@ import { ImportManager } from "../services/ImportManager";
 import { MetadataParser } from "../services/MetadataParser";
 import { ScanManager } from "../services/ScanManager";
 import { SDRFinder } from "../services/SDRFinder";
+import { SnapshotManager } from "../services/SnapshotManager";
 import { TemplateManager } from "../services/TemplateManager";
 import type {
 	DuplicateMatch,
@@ -34,6 +35,11 @@ export class ServiceInitializer {
 		container.registerSingleton(
 			FrontmatterGenerator,
 			new FrontmatterGenerator(),
+		);
+
+		container.registerSingleton(
+			SnapshotManager,
+			new SnapshotManager(app, plugin, app.vault)
 		);
 
 		// Register dependent services
@@ -66,6 +72,7 @@ export class ServiceInitializer {
 				plugin,
 				container.resolve(ContentGenerator),
 				container.resolve(DatabaseService),
+				container.resolve(SnapshotManager),
 			),
 		);
 
@@ -80,6 +87,7 @@ export class ServiceInitializer {
 				container.resolve(FrontmatterGenerator),
 				container.resolve(ContentGenerator),
 				container.resolve(DuplicateHandler),
+				container.resolve(SnapshotManager),
 			),
 		);
 

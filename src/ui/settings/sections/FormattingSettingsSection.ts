@@ -26,6 +26,21 @@ class FrontmatterFieldSetting {
 export class FormattingSettingsSection extends SettingsSection {
 	protected renderContent(containerEl: HTMLElement): void {
 		new FrontmatterFieldSetting(containerEl, this.plugin);
+		
+		new Setting(containerEl)
+			.setName("Auto-merge on addition")
+			.setDesc(
+				"Automatically merge imports if they only add new highlights, without showing the duplicate dialog.",
+			)
+			.addToggle((tgl) =>
+				tgl
+					.setValue(this.plugin.settings.autoMergeOnAddition)
+					.onChange(async (v) => {
+						this.plugin.settings.autoMergeOnAddition = v;
+						await this.plugin.saveSettings();
+					}),
+			);
+
 		new Setting(containerEl)
 			.setName("Enable full vault duplicate check")
 			.setDesc(

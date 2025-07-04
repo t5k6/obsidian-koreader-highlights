@@ -14,6 +14,9 @@ import { devLog, devWarn } from "../utils/logging";
 import type { ContentGenerator } from "./ContentGenerator";
 import type { DatabaseService } from "./DatabaseService";
 import type { FrontmatterGenerator } from "./FrontmatterGenerator";
+import type { SnapshotManager } from "./SnapshotManager";
+import { getFrontmatterAndBody } from "src/utils/obsidianUtils";
+import { diff3Merge, type MergeRegion } from 'node-diff3';
 
 export class DuplicateHandler {
 	currentMatch: NonNullable<DuplicateMatch> | null = null;
@@ -33,6 +36,7 @@ export class DuplicateHandler {
 		private plugin: KoreaderImporterPlugin,
 		private contentGenerator: ContentGenerator,
 		private databaseService: DatabaseService,
+		private snapshotManager: SnapshotManager,
 	) {}
 
 	/** Resets the "Apply to All" state. Call before starting a new batch import. */
@@ -238,17 +242,21 @@ export class DuplicateHandler {
 			}
 
 			case "merge": {
-				const existingContent = await this.app.vault.read(file);
-				const existingAnnotations = extractHighlights(existingContent);
+				const baseContent = await this.snapshotManager.getSnapshotContent(file);
+				
+				if (!baseContent) {
+					devWarn(`No base snapshot found for ${file.path}. Performing a 2-way merge.`);
+					// Fallback to old 2-way merge logic if no base snapshot exists
+					return this.execute2WayMerge(file, newAnnotations, luaMetadata);
+				}
 
-				const merged = await this.mergeContents(
-					file,
-					existingAnnotations,
-					newAnnotations,
-					luaMetadata,
-				);
-				await this.app.vault.modify(file, merged);
-				return { status: "merged", file };
+				devLog(`Performing 3-way merge for ${file.path}`);
+				return this.execute3WayMerge(file, baseContent, newContent!);
+			}
+
+			case "automerge": {
+				devLog(`Executing automerge for ${file.path}`);
+				return this.execute2WayMerge(file, newAnnotations, luaMetadata);
 			}
 
 			case "keep-both":
@@ -259,6 +267,89 @@ export class DuplicateHandler {
 		}
 	}
 
+	private async execute2WayMerge(
+		file: TFile,
+		newAnnotations: Annotation[],
+		luaMetadata: LuaMetadata,
+	): Promise<{ status: "merged"; file: TFile }> {
+		const { body: existingBody } = await getFrontmatterAndBody(this.app, file);
+		const { extractHighlights } = require("../utils/highlightExtractor");
+		const existingAnnotations = extractHighlights(existingBody);
+
+		const merged = await this.mergeContents(
+			file,
+			existingAnnotations,
+			newAnnotations,
+			luaMetadata,
+		);
+		await this.app.vault.modify(file, merged);
+		return { status: "merged", file };
+	}
+
+	private async execute3WayMerge(
+		file: TFile,
+		baseContent: string,
+		newFileContent: string,
+	): Promise<{ status: "merged"; file: TFile }> {
+		// 1. Split all three versions into frontmatter and body.
+		const { body: baseBody } = await getFrontmatterAndBody(this.app, {
+			content: baseContent,
+		});
+		const { body: ourBody, frontmatter: ourFm } = await getFrontmatterAndBody(
+			this.app,
+			file,
+		);
+		const { body: theirBody } = await getFrontmatterAndBody(this.app, {
+			content: newFileContent,
+		});
+	
+		// 2. Perform 3-way merge on the body content, splitting it into lines.
+		const mergeRegions: MergeRegion<string>[] = diff3Merge(
+			ourBody.split("\n"),
+			baseBody.split("\n"),
+			theirBody.split("\n"),
+		);
+	
+		// 3. Process the merge regions to build the final body and detect conflicts.
+		const mergedLines: string[] = [];
+		let hasConflict = false;
+	
+		for (const region of mergeRegions) {
+			if (region.ok) {
+				// This is a stable, non-conflicting chunk.
+				mergedLines.push(...region.ok);
+			}
+			if (region.conflict) {
+				// This is a conflict. Mark it and add conflict markers.
+				hasConflict = true;
+				mergedLines.push('<<<<<<< YOUR VERSION');
+				mergedLines.push(...region.conflict.a);
+				mergedLines.push('=======');
+				mergedLines.push(...region.conflict.b);
+				mergedLines.push('>>>>>>> INCOMING VERSION');
+			}
+		}
+		const mergedBody = mergedLines.join('\n');
+	
+		// 4. Re-assemble the final file content.
+		let finalContent: string;
+		const finalFm = this.frontmatterGenerator.formatDataToYaml(ourFm ?? {}, {});
+	
+		if (hasConflict) {
+			devWarn(`Merge conflict detected in ${file.path}. Adding conflict markers.`);
+			const conflictCallout = `> [!caution] Merge Conflict Detected\n> This note contains conflicting changes between the version in your vault and the new version from KOReader. Please search for \`<<<<<<<\` to resolve them manually.\n\n`;
+			finalContent = `${finalFm}\n\n${conflictCallout}${mergedBody}`;
+		} else {
+			devLog(`Successfully merged content for ${file.path} without conflicts.`);
+			finalContent = `${finalFm}\n\n${mergedBody}`;
+		}
+	
+		// 5. Write the result back to the vault.
+		await this.vault.modify(file, finalContent);
+		return { status: "merged", file };
+	}
+
+
 	private mergeAnnotationArrays(
 		existing: Annotation[],
 		incoming: Annotation[],
@@ -266,16 +357,19 @@ export class DuplicateHandler {
 		const key = (a: Annotation) =>
 			`${a.pageno}|${a.pos0}|${a.pos1}|${(a.text || "").trim()}`;
 
-		const seen = new Set(existing.map(key));
-		const out = [...existing];
+		// Use a map to store existing annotations, keyed for quick lookup.
+		// This preserves the full `existing` annotation object on collision.
+		const map = new Map(existing.map(ann => [key(ann), ann]));
 
 		for (const ann of incoming) {
-			if (!seen.has(key(ann))) {
-				out.push(ann);
-				seen.add(key(ann));
+			const k = key(ann);
+			// Only add the incoming annotation if its key is not already in the map.
+			if (!map.has(k)) {
+				map.set(k, ann);
 			}
 		}
-		return out.sort(compareAnnotations);
+		
+		return Array.from(map.values()).sort(compareAnnotations);
 	}
 
 	/** Merges two frontmatter objects. Prioritizes existing values generally, updates specific fields. */

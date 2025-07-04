@@ -1,7 +1,7 @@
 import path from "node:path";
 import { type App, Notice, normalizePath, TFile } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
-import type { LuaMetadata } from "../types";
+import type { DuplicateMatch, LuaMetadata } from "../types";
 import { ProgressModal } from "../ui/ProgressModal";
 import {
 	ensureParentDirectory,
@@ -18,10 +18,12 @@ import type { DuplicateHandler } from "./DuplicateHandler";
 import type { FrontmatterGenerator } from "./FrontmatterGenerator";
 import type { MetadataParser } from "./MetadataParser";
 import type { SDRFinder } from "./SDRFinder";
+import type { SnapshotManager } from "./SnapshotManager";
 
 type Summary = {
 	created: number;
 	merged: number;
+	automerged: number;
 	skipped: number;
 	errors: number;
 };
@@ -36,6 +38,7 @@ export class ImportManager {
 		private readonly frontmatterGenerator: FrontmatterGenerator,
 		private readonly contentGenerator: ContentGenerator,
 		private readonly duplicateHandler: DuplicateHandler,
+		private readonly snapshotManager: SnapshotManager,
 	) {}
 
 	async importHighlights(): Promise<void> {
@@ -54,7 +57,7 @@ export class ImportManager {
 
 		this.duplicateHandler.resetApplyToAll();
 
-		const summary: Summary = { created: 0, merged: 0, skipped: 0, errors: 0 };
+		const summary: Summary = { created: 0, merged: 0, automerged: 0, skipped: 0, errors: 0 };
 
 		try {
 			for (let idx = 0; idx < sdrPaths.length; idx++) {
@@ -64,6 +67,7 @@ export class ImportManager {
 				const sdrPath = sdrPaths[idx];
 				const result = await this.processSdr(sdrPath);
 				summary.created += result.created;
+				summary.automerged += result.automerged;
 				summary.merged += result.merged;
 				summary.skipped += result.skipped;
 				summary.errors += result.error ? 1 : 0;
@@ -107,6 +111,7 @@ export class ImportManager {
 		const summary: Summary & { error?: any } = {
 			created: 0,
 			merged: 0,
+			automerged: 0,
 			skipped: 0,
 			errors: 0,
 		};
@@ -180,80 +185,96 @@ export class ImportManager {
 	private async saveHighlightsToFile(
 		luaMetadata: LuaMetadata,
 		bookKey: string,
-	): Promise<{ created: number; merged: number; skipped: number }> {
-		const result = { created: 0, merged: 0, skipped: 0 };
+	): Promise<Summary> {
+		const result: Summary = { created: 0, merged: 0, automerged: 0, skipped: 0, errors: 0 };
 
 		const potentialDuplicates =
 			await this.duplicateHandler.findPotentialDuplicates(luaMetadata.docProps);
 
-		let targetPath: string | null = null;
+		let targetFile: TFile | null = null;
 		let content: string | null = null; // lazily generated
 
 		/* ── Case A: duplicates found ─────────────────────── */
-		if (potentialDuplicates.length) {
-			devLog(`Found ${potentialDuplicates.length} potential duplicate(s).`);
-
-			const duplicateFile = potentialDuplicates[0];
-			const analysis = await this.duplicateHandler.analyzeDuplicate(
-				duplicateFile,
-				luaMetadata.annotations,
-				luaMetadata,
+		if (potentialDuplicates.length > 0) {
+			const analyses: DuplicateMatch[] = await Promise.all(
+				potentialDuplicates.map(file => 
+					this.duplicateHandler.analyzeDuplicate(file, luaMetadata.annotations, luaMetadata)
+				)
 			);
+			analyses.sort((a, b) => (a.newHighlights + a.modifiedHighlights) - (b.newHighlights + b.modifiedHighlights));
+			const bestMatch = analyses[0];
+	
+			if (
+				this.plugin.settings.autoMergeOnAddition &&
+				bestMatch.matchType === 'updated' &&
+				bestMatch.modifiedHighlights === 0
+			) {
+				devLog(`Auto-merging additions into ${bestMatch.file.path}`);
+				const { file } = await this.duplicateHandler.handleDuplicate(
+					bestMatch,
+					luaMetadata.annotations,
+					luaMetadata,
+					async () => content ??= await this.generateFileContent(luaMetadata),
+				);
+				targetFile = file;
+				if(targetFile) result.automerged++;
 
-			// content might be needed depending on choice, so defer creation until then
-			const { choice, file } = await this.duplicateHandler.handleDuplicate(
-				analysis,
-				luaMetadata.annotations,
-				luaMetadata,
-				async () => {
-					content ??= await this.generateFileContent(luaMetadata);
-					return content;
-				},
-			);
-
-			switch (choice) {
-				case "merge":
-				case "replace":
-					result.merged++;
-					targetPath = file!.path;
-					break;
-				case "skip":
-					result.skipped++;
-					break;
-				case "keep-both":
-					// fall through to new-file path
-					break;
+			} else {
+				const { choice, file } = await this.duplicateHandler.handleDuplicate(
+					bestMatch,
+					luaMetadata.annotations,
+					luaMetadata,
+					async () => {
+						content ??= await this.generateFileContent(luaMetadata);
+						return content;
+					},
+				);
+		
+				switch (choice) {
+					case "merge":
+					case "replace":
+						result.merged++;
+						targetFile = file;
+						break;
+					case "skip":
+						result.skipped++;
+						break;
+					case "keep-both":
+						break;
+				}
 			}
 		}
 
 		/* ── Case B: need to create a new file ────────────── */
-		if (!targetPath && result.skipped === 0) {
+		if (!targetFile && result.skipped === 0 && result.automerged === 0) {
 			content ??= await this.generateFileContent(luaMetadata);
-
+	
 			const fileName = generateObsidianFileName(
 				luaMetadata.docProps,
 				this.plugin.settings.highlightsFolder,
 				luaMetadata.originalFilePath,
 			);
-			targetPath = await generateUniqueFilePath(
+			const targetPath = await generateUniqueFilePath(
 				this.app.vault,
 				this.plugin.settings.highlightsFolder,
 				fileName,
 			);
-
-			await this.createOrUpdateFile(targetPath, content);
+	
+			targetFile = await this.createOrUpdateFile(targetPath, content);
 			result.created++;
 		}
 
 		/* ── Update DB if something was actually written ─── */
-		if (targetPath) {
+		if (targetFile) {
 			await this.databaseService.upsertBook(
 				luaMetadata.statistics?.book.id ?? null,
 				bookKey,
 				luaMetadata.docProps.title,
 				luaMetadata.docProps.authors,
-				targetPath,
+				targetFile.path,
 			);
+			// Create a snapshot for the next import
+			await this.snapshotManager.createSnapshot(targetFile);
 		}
 
 		return result;
@@ -277,14 +298,15 @@ export class ImportManager {
 	private async createOrUpdateFile(
 		filePath: string,
 		content: string,
-	): Promise<void> {
+	): Promise<TFile> {
 		await ensureParentDirectory(this.app.vault, filePath);
 
 		const existing = this.app.vault.getAbstractFileByPath(filePath);
 		if (existing instanceof TFile) {
 			await this.app.vault.modify(existing, content);
+			return existing;
 		} else {
-			await this.app.vault.create(filePath, content);
+			return await this.app.vault.create(filePath, content);
 		}
 	}
 }

@@ -1,14 +1,40 @@
-import type { App, CachedMetadata, TFile } from "obsidian";
+import { type App, TFile, parseYaml, type FrontMatterCache } from "obsidian";
 
-export async function getFrontmatterAndBody(app: App, file: TFile) {
-	const fileCache: CachedMetadata | null = app.metadataCache.getFileCache(file);
+// A regex to match a YAML frontmatter block at the start of a string.
+const FRONTMATTER_REGEX = /^---\s*?\r?\n([\s\S]+?)\r?\n---\s*?\r?\n?/;
 
-	const frontmatter = fileCache?.frontmatter;
-	const content = await app.vault.read(file);
+type FileOrContent = TFile | { content: string };
 
-	const bodyContent = fileCache?.frontmatterPosition
-		? content.slice(fileCache.frontmatterPosition.end.offset)
-		: content;
+export async function getFrontmatterAndBody(
+	app: App,
+	fileOrContent: FileOrContent,
+): Promise<{ frontmatter: FrontMatterCache | undefined; body: string }> {
+	let content: string;
+	let frontmatter: FrontMatterCache | undefined;
+
+	if (fileOrContent instanceof TFile) {
+		// --- Path 1: It's a real file, use the reliable metadataCache ---
+		content = await app.vault.read(fileOrContent);
+		const cache = app.metadataCache.getFileCache(fileOrContent);
+		frontmatter = cache?.frontmatter;
+	} else {
+		// --- Path 2: It's a raw string, parse it manually ---
+		content = fileOrContent.content;
+		const match = content.match(FRONTMATTER_REGEX);
+
+		if (match) {
+			const yamlBlock = match[1];
+			try {
+				frontmatter = parseYaml(yamlBlock) ?? {};
+			} catch (e) {
+				console.error("Failed to parse frontmatter from string", e);
+				frontmatter = {};
+			}
+		}
+	}
+
+	// Determine where the body starts
+	const bodyContent = content.replace(FRONTMATTER_REGEX, "").trimStart();
 
 	return { frontmatter, body: bodyContent };
 }

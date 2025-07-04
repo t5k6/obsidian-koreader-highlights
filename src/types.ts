@@ -133,6 +133,7 @@ export interface KoreaderHighlightImporterSettings {
 	debugMode: boolean;
 	debugLevel: 0 | 1 | 2 | 3; // 0=None, 1=Info, 2=Warn, 3=Error
 	enableFullDuplicateCheck: boolean;
+	autoMergeOnAddition: boolean;
 	frontmatter: FrontmatterSettings;
 	maxHighlightGap: number;
 	maxTimeGapMinutes: number;
@@ -142,7 +143,7 @@ export interface KoreaderHighlightImporterSettings {
 
 // --- UI / Modal Related Types ---
 
-export type DuplicateChoice = "replace" | "merge" | "keep-both" | "skip";
+export type DuplicateChoice = "replace" | "merge" | "keep-both" | "skip" | "automerge";
 
 export interface DuplicateMatch {
 	file: TFile;

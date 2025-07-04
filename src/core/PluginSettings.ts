@@ -23,6 +23,7 @@ export const DEFAULT_SETTINGS: KoreaderHighlightImporterSettings = {
 	debugMode: false,
 	debugLevel: 3,
 	enableFullDuplicateCheck: false,
+	autoMergeOnAddition: true,
 	frontmatter: {
 		disabledFields: [],
 		customFields: [],
@@ -198,6 +199,13 @@ export class PluginSettings {
 			"enableFullDuplicateCheck",
 			"boolean",
 			DEFAULT_SETTINGS.enableFullDuplicateCheck,
+		);
+
+		settings.autoMergeOnAddition = this.validateType(
+			settings,
+			"autoMergeOnAddition",
+			"boolean",
+			DEFAULT_SETTINGS.autoMergeOnAddition,
 		);
 
 		// Validate array properties

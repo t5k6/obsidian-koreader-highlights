@@ -261,53 +261,6 @@ export class DatabaseService implements Disposable {
 		}
 	}
 
-	public async getBookStatistics(
-		authors: string,
-		title: string,
-	): Promise<LuaMetadata["statistics"] | null> {
-		const mountPoint = this.plugin.settings.koboMountPoint;
-		if (!mountPoint) {
-			devWarn("KOReader mount point not configured – skipping stats.");
-			return null;
-		}
-
-		let db: SQLDatabase | null = null;
-		try {
-			const deviceRoot = (await this.findDeviceRoot(mountPoint)) ?? mountPoint;
-			const filePath = path.join(
-				deviceRoot,
-				".adds",
-				"koreader",
-				"settings",
-				"statistics.sqlite3",
-			);
-
-			const SQL = await DatabaseService.getSqlJs();
-			const fileBuf = await fsp.readFile(filePath);
-			db = new SQL.Database(fileBuf);
-
-			const bookRow = this.queryBookRow(db, authors, title);
-			if (!bookRow) return null;
-
-			const sessions = this.querySessions(db, bookRow.id);
-
-			return {
-				book: bookRow,
-				readingSessions: sessions,
-				derived: this.calculateDerivedStatistics(bookRow, sessions),
-			};
-		} catch (error) {
-			devError(`Failed to get book statistics for "${title}"`, error);
-			// The error is logged, and we return null to allow the import to continue.
-			return null;
-		} finally {
-			// Ensure the connection is always closed.
-			if (db) {
-				db.close();
-			}
-		}
-	}
-
 	//  for merge feature we may add highlight insert later
 	public async upsertBook(
 		id: number | null,

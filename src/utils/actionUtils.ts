@@ -1,5 +1,5 @@
 import { type ButtonComponent, Notice } from "obsidian";
-import { devError } from "./logging";
+import { logger } from "./logging";
 
 export async function runPluginAction(
 	action: () => Promise<void>,
@@ -22,7 +22,7 @@ export async function runPluginAction(
 
 		await action();
 	} catch (error) {
-		devError(failureNotice, error);
+		logger.error("actionUtils: Action failed", failureNotice, error);
 		new Notice(`${failureNotice}. Check console for details.`);
 	} finally {
 		if (button) {

@@ -1,17 +1,19 @@
-import path from "node:path";
-import { type App, Notice, normalizePath, TFile } from "obsidian";
+import { type App, Notice, TFile } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
-import type { DuplicateMatch, LuaMetadata } from "../types";
-import { ProgressModal } from "../ui/ProgressModal";
-import {
-	ensureParentDirectory,
-	generateUniqueFilePath,
-} from "../utils/fileUtils";
+import { ProgressModal } from "src/ui/ProgressModal";
+import { asyncPool } from "src/utils/concurrency";
+import { createFileSafely, ensureParentDirectory } from "src/utils/fileUtils";
 import {
 	generateObsidianFileName,
 	getFileNameWithoutExt,
-} from "../utils/formatUtils";
-import { devError, devLog, devWarn } from "../utils/logging";
+} from "src/utils/formatUtils";
+import { logger } from "src/utils/logging";
+import {
+	addSummary,
+	blankSummary,
+	type DuplicateMatch,
+	type LuaMetadata,
+} from "../types";
 import type { ContentGenerator } from "./ContentGenerator";
 import type { DatabaseService } from "./DatabaseService";
 import type { DuplicateHandler } from "./DuplicateHandler";
@@ -42,54 +44,83 @@ export class ImportManager {
 	) {}
 
 	async importHighlights(): Promise<void> {
-		devLog("Starting KOReader highlight import process…");
+		logger.info("ImportManager: Starting KOReader highlight import process…");
 
 		const sdrPaths = await this.sdrFinder.findSdrDirectoriesWithMetadata();
 		if (!sdrPaths?.length) {
 			new Notice("No KOReader highlight files found (.sdr with metadata.lua).");
-			devLog("No SDR files found to import.");
+			logger.info("ImportManager: No SDR files found to import.");
 			return;
 		}
+
+		const poolSize = Math.min(
+			6,
+			Math.max(2, navigator.hardwareConcurrency || 4),
+		);
+		logger.info(`ImportManager: Import concurrency = ${poolSize}`);
 
 		const modal = new ProgressModal(this.app);
 		modal.open();
 		modal.setTotal(sdrPaths.length);
 
 		this.duplicateHandler.resetApplyToAll();
+		this.duplicateHandler.clearCache();
 
-		const summary: Summary = { created: 0, merged: 0, automerged: 0, skipped: 0, errors: 0 };
+		let summary = blankSummary();
+
+		/* ---  tiny helpers  --- */
+		let doneCounter = 0;
+		const progressTicker = setInterval(() => {
+			modal.updateProgress(
+				doneCounter,
+				`${doneCounter}/${sdrPaths.length} processed`,
+			);
+		}, 200); // update UI at most 5×/s
 
 		try {
-			for (let idx = 0; idx < sdrPaths.length; idx++) {
-				if (modal.abortSignal.aborted)
-					throw new DOMException("Aborted by user", "AbortError");
+			const perFileSummaries = await asyncPool(
+				poolSize,
+				sdrPaths,
+				async (sdrPath, idx) => {
+					if (modal.abortSignal.aborted)
+						throw new DOMException("Aborted by user", "AbortError");
 
-				const sdrPath = sdrPaths[idx];
-				const result = await this.processSdr(sdrPath);
-				summary.created += result.created;
-				summary.automerged += result.automerged;
-				summary.merged += result.merged;
-				summary.skipped += result.skipped;
-				summary.errors += result.error ? 1 : 0;
+					const res = await this.processSdr(sdrPath);
+					doneCounter = idx + 1;
+					return res;
+				},
+				modal.abortSignal,
+			);
 
-				modal.updateProgress(idx + 1, path.basename(sdrPath));
-			}
+			// aggregate
+			for (const s of perFileSummaries) summary = addSummary(summary, s);
 
 			new Notice(
-				`KOReader Import finished\n${summary.created} new • ${summary.merged} merged • ${summary.skipped} skipped • ${summary.errors} error(s)`,
+				`KOReader Import finished\n${summary.created} new • ${
+					summary.merged
+				} merged • ${summary.automerged} auto-merged • ${
+					summary.skipped
+				} skipped • ${summary.errors} error(s)`,
 				10_000,
 			);
-			devLog("Import process finished", summary);
+			logger.info("ImportManager: Import process finished", summary);
 		} catch (err: any) {
 			if (err?.name === "AbortError") {
 				new Notice("Import cancelled by user.");
 			} else {
-				devError("Critical error during highlight import process:", err);
+				logger.error(
+					"ImportManager: Critical error during highlight import process:",
+					err,
+				);
 				new Notice("KOReader Importer: critical error. Check console.");
 			}
 		} finally {
-			devLog("Flushing database index …");
+			clearInterval(progressTicker);
+
+			// One single flush, avoids sql.js race conditions
+			logger.info("ImportManager: Flushing database index …");
 			await this.databaseService.flushIndex();
+
 			modal.close();
 		}
 	}
@@ -98,29 +129,23 @@ export class ImportManager {
 		this.sdrFinder.clearCache();
 		this.metadataParser.clearCache();
 		this.duplicateHandler.clearCache();
-		devLog("Import-related caches cleared.");
+		logger.info("ImportManager: Import-related caches cleared.");
 	}
 
 	/* ------------------------------------------------------------------ */
 	/*                             PRIVATE                                */
 	/* ------------------------------------------------------------------ */
 
-	private async processSdr(
-		sdrPath: string,
-	): Promise<Summary & { error?: any }> {
-		const summary: Summary & { error?: any } = {
-			created: 0,
-			merged: 0,
-			automerged: 0,
-			skipped: 0,
-			errors: 0,
-		};
+	private async processSdr(sdrPath: string): Promise<Summary> {
+		const summary = blankSummary();
 
 		try {
 			/* 1 ──────────────────  Parse metadata  ───────────────────────── */
 			const luaMetadata = await this.metadataParser.parseFile(sdrPath);
 			if (!luaMetadata?.annotations?.length) {
-				devWarn(`Skipping – no annotations: ${sdrPath}`);
+				logger.info(
+					`ImportManager: Skipping – no annotations found in ${sdrPath}`,
+				);
 				summary.skipped++;
 				return summary;
 			}
@@ -131,6 +156,9 @@ export class ImportManager {
 			/* 3 ───────────────────  Missing title  ───────────────────────── */
 			if (!luaMetadata.docProps.title) {
 				luaMetadata.docProps.title = getFileNameWithoutExt(sdrPath);
+				logger.warn(
+					`ImportManager: Metadata missing title for ${sdrPath}, using filename as fallback.`,
+				);
 			}
 
 			/* 4 ─────────────────  Save highlights  ───────────────────────── */
@@ -139,15 +167,15 @@ export class ImportManager {
 			);
 
 			const fileSummary = await this.saveHighlightsToFile(luaMetadata, bookKey);
-			Object.assign(summary, {
-				created: fileSummary.created,
-				merged: fileSummary.merged,
-				skipped: fileSummary.skipped,
-			});
+
+			summary.created += fileSummary.created;
+			summary.merged += fileSummary.merged;
+			summary.automerged += fileSummary.automerged;
+			summary.skipped += fileSummary.skipped;
+			summary.errors += fileSummary.errors;
 		} catch (err) {
-			devError(`Error processing ${sdrPath}`, err);
-			summary.error = err;
-			summary.errors = 1;
+			logger.error(`ImportManager: Error processing ${sdrPath}`, err);
+			summary.errors++;
 		}
 
 		return summary;
@@ -178,7 +206,9 @@ export class ImportManager {
 		) {
 			luaMetadata.docProps.authors = stats.book.authors;
 		}
-		devLog(`Corrected metadata for “${sdrPath}” from stats DB.`);
+		logger.info(
+			`ImportManager: Enriched metadata for "${sdrPath}" with stats DB info.`,
+		);
 	}
 
 	/* ---------------------- helper: save/merge ------------------------ */
@@ -186,7 +216,13 @@ export class ImportManager {
 		luaMetadata: LuaMetadata,
 		bookKey: string,
 	): Promise<Summary> {
-		const result: Summary = { created: 0, merged: 0, automerged: 0, skipped: 0, errors: 0 };
+		const result: Summary = {
+			created: 0,
+			merged: 0,
+			automerged: 0,
+			skipped: 0,
+			errors: 0,
+		};
 
 		const potentialDuplicates =
 			await this.duplicateHandler.findPotentialDuplicates(luaMetadata.docProps);
@@ -197,29 +233,61 @@ export class ImportManager {
 		/* ── Case A: duplicates found ─────────────────────── */
 		if (potentialDuplicates.length > 0) {
 			const analyses: DuplicateMatch[] = await Promise.all(
-				potentialDuplicates.map(file => 
-					this.duplicateHandler.analyzeDuplicate(file, luaMetadata.annotations, luaMetadata)
-				)
+				potentialDuplicates.map((file) =>
+					this.duplicateHandler.analyzeDuplicate(
+						file,
+						luaMetadata.annotations,
+						luaMetadata,
+					),
+				),
 			);
-			analyses.sort((a, b) => (a.newHighlights + a.modifiedHighlights) - (b.newHighlights + b.modifiedHighlights));
+			analyses.sort(
+				(a, b) =>
+					a.newHighlights +
+					a.modifiedHighlights -
+					(b.newHighlights + b.modifiedHighlights),
+			);
 			const bestMatch = analyses[0];
-	
+
+			// Check for snapshot before attempting auto-merge
+			const snapshotExists = await this.snapshotManager.getSnapshotContent(
+				bestMatch.file,
+			);
+
 			if (
 				this.plugin.settings.autoMergeOnAddition &&
-				bestMatch.matchType === 'updated' &&
-				bestMatch.modifiedHighlights === 0
+				bestMatch.matchType === "updated" &&
+				bestMatch.modifiedHighlights === 0 &&
+				snapshotExists // <-- THE CRITICAL SAFETY CHECK
 			) {
-				devLog(`Auto-merging additions into ${bestMatch.file.path}`);
+				logger.info(
+					`ImportManager: Auto-merging additions into ${bestMatch.file.path} via safe 3-way merge.`,
+				);
 				const { file } = await this.duplicateHandler.handleDuplicate(
 					bestMatch,
 					luaMetadata.annotations,
 					luaMetadata,
-					async () => content ??= await this.generateFileContent(luaMetadata),
+					async () => {
+						if (content === null) {
+							content = await this.generateFileContent(luaMetadata);
+						}
+						return content;
+					},
+					true, // Pass isAutoMerge = true
 				);
 				targetFile = file;
-				if(targetFile) result.automerged++;
-
+				if (targetFile) result.automerged++;
 			} else {
+				if (
+					!snapshotExists &&
+					this.plugin.settings.autoMergeOnAddition &&
+					bestMatch.matchType === "updated"
+				) {
+					logger.info(
+						`ImportManager: Skipping auto-merge for ${bestMatch.file.path} because no snapshot exists for a safe 3-way merge.`,
+					);
+				}
+
 				const { choice, file } = await this.duplicateHandler.handleDuplicate(
 					bestMatch,
 					luaMetadata.annotations,
@@ -228,8 +296,9 @@ export class ImportManager {
 						content ??= await this.generateFileContent(luaMetadata);
 						return content;
 					},
+					false, // Pass isAutoMerge = false for manual prompt
 				);
-		
+
 				switch (choice) {
 					case "merge":
 					case "replace":
@@ -239,6 +308,10 @@ export class ImportManager {
 					case "skip":
 						result.skipped++;
 						break;
+					case "automerge":
+						result.automerged++;
+						targetFile = file;
+						break;
 					case "keep-both":
 						break;
 				}
@@ -246,21 +319,28 @@ export class ImportManager {
 		}
 
 		/* ── Case B: need to create a new file ────────────── */
-		if (!targetFile && result.skipped === 0 && result.automerged === 0) {
+		// Only create a new file if no duplicate was handled (merged, replaced, skipped, automerged)
+		// AND the choice was not 'keep-both' (which implies new file creation).
+		if (
+			!targetFile &&
+			result.skipped === 0 &&
+			result.merged === 0 &&
+			result.automerged === 0
+		) {
 			content ??= await this.generateFileContent(luaMetadata);
-	
+
 			const fileName = generateObsidianFileName(
 				luaMetadata.docProps,
 				this.plugin.settings.highlightsFolder,
 				luaMetadata.originalFilePath,
 			);
-			const targetPath = await generateUniqueFilePath(
+
+			targetFile = await createFileSafely(
 				this.app.vault,
 				this.plugin.settings.highlightsFolder,
-				fileName,
+				fileName.replace(/\.md$/, ""), // stem
+				content,
 			);
-	
-			targetFile = await this.createOrUpdateFile(targetPath, content);
 			result.created++;
 		}
 
@@ -288,7 +368,6 @@ export class ImportManager {
 		);
 		const highlights = await this.contentGenerator.generateHighlightsContent(
 			luaMetadata.annotations,
-			luaMetadata,
 		);
 
 		return `${fm}\n\n${highlights.trim()}`;
@@ -303,9 +382,11 @@ export class ImportManager {
 
 		const existing = this.app.vault.getAbstractFileByPath(filePath);
 		if (existing instanceof TFile) {
+			logger.info(`ImportManager: Modifying existing file: ${filePath}`);
 			await this.app.vault.modify(existing, content);
 			return existing;
 		} else {
+			logger.info(`ImportManager: Creating new file: ${filePath}`);
 			return await this.app.vault.create(filePath, content);
 		}
 	}

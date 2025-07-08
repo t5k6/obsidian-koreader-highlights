@@ -63,28 +63,30 @@ Here's how to use the KOReader Highlights Importer:
    * **Using the button in the plugin settings:** Click the "Import KOReader Highlights" button in the plugin settings.
 4. **(Optional) Scan for Highlights First:** If you want to see which files will be processed before importing, you can use the "Scan KOReader Highlights" command. This will generate a list of found `.sdr` directories in a note named "KOReader SDR Files.md".
 
-###  🎨 Templating System
-- **Default Templates**: Two built-in templates are provided:
-  - `minimal`: A simple structure with chapter titles and highlights.
-  - `default`: A structured format with page numbers, dates, and notes.
-- **Vault or External Templates**: Choose templates stored in your Obsidian vault or select a file from your computer. You can copy/edit the default templates
-- **Conditional Logic**: Support for conditional sections (e.g., `{{#note}}> [!NOTE] {{note}}\n{{/note}}`) to conditionally include notes.
-- **Replace {{variables}}**  with your desired fields (e.g., chapter, pageno, highlight, note).
+## 🎨 Templating System
 
+Customize your notes by creating your own templates in the folder specified in the settings (default: `KOReader/templates`).
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `{{highlight}}` | Selected text | “It was the best of times…” |
-| `{{pageno}}` | Page number | `134` |
-| `{{note}}` | Inline note | “Key concept” |
-| ... | | |
+- **Conditional Logic**: Only show a section if a variable exists. For example, to only show the note section if a note exists: `{{#note}}> [!NOTE] {{note}}\n{{/note}}`.
+- **Automatic Note Formatting**: The plugin automatically prefixes each line of a `{{note}}` with `> ` for blockquote formatting if you don't do it yourself.
+- **Variables**: Use the following variables in your templates.
+
+| Variable | Description |
+|:--- |:--- |
+| `{{highlight}}` | The highlighted text, with styling (`<mark>`, `<u>`, etc.) applied. |
+| `{{note}}` | The text of the note associated with the highlight. |
+| `{{notes}}` | An array of all notes in a merged highlight group. |
+| `{{pageno}}` | The page number where the highlight appears. |
+| `{{chapter}}` | The name of the chapter containing the highlight. |
+| `{{date}}` | The date the highlight was made (formatted like "Jan 1, 2024"). |
+| `{{isFirstInChapter}}`| A boolean (`true`/`false`) you can use for conditional logic. |
 
 
 **Troubleshooting**
 
 * **Error Messages:** If you encounter issues, open the Obsidian Developer Console (`Ctrl/Cmd + Shift + I` on Windows/Linux, `Cmd + Option + I` on macOS) and check for error messages related to the plugin.
-* **Mount Point:** Double-check that you've entered the correct mount point for your KoReader device in the plugin settings.
-* **Permissions:** Ensure that Obsidian has the necessary permissions to access the mounted KoReader device and your specified highlights folder.
+* **Mount Point:** Double-check that you've entered the correct mount point for your KOReader device in the plugin settings.
+* **Permissions:** Ensure that Obsidian has the necessary permissions to access the mounted KOReader device and your specified highlights folder.
 
 ## Development
 - **Install Dependencies** with [pnpm](https://pnpm.io/): `pnpm install`

@@ -1,10 +1,11 @@
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
-import type { Annotation, LuaMetadata } from "../types";
 import {
 	compareAnnotations,
+	computeAnnotationId,
 	distanceBetweenHighlights,
 	isWithinGap,
-} from "../utils/formatUtils";
+} from "src/utils/formatUtils";
+import type { Annotation } from "../types";
 import type { TemplateManager } from "./TemplateManager";
 
 interface SuccessiveGroup {
@@ -18,10 +19,7 @@ export class ContentGenerator {
 		private plugin: KoreaderImporterPlugin,
 	) {}
 
-	async generateHighlightsContent(
-		annotations: Annotation[],
-		luaMetadata: LuaMetadata,
-	): Promise<string> {
+	async generateHighlightsContent(annotations: Annotation[]): Promise<string> {
 		if (!annotations || annotations.length === 0) {
 			return "";
 		}
@@ -77,7 +75,21 @@ export class ContentGenerator {
 
 			let chapterContent = "";
 			for (const highlightGroup of groupedSuccessiveHighlights) {
-				chapterContent += this.templateManager.renderGroup(
+				const markers = highlightGroup.annotations
+					.map((ann) => {
+						const meta = {
+							v: 1,
+							id: ann.id ?? computeAnnotationId(ann),
+							p: ann.pageno,
+							pos0: ann.pos0,
+							pos1: ann.pos1,
+							t: ann.datetime,
+						};
+						return `<!-- KOHL ${JSON.stringify(meta)} -->`;
+					})
+					.join("\n");
+
+				const renderedVisualGroup = this.templateManager.renderGroup(
 					compiledTemplate,
 					highlightGroup.annotations,
 					{
@@ -85,6 +97,7 @@ export class ContentGenerator {
 						isFirstInChapter: isFirstHighlightInChapter,
 					},
 				);
+				chapterContent += `${markers}\n${renderedVisualGroup}`;
 				isFirstHighlightInChapter = false;
 
 				if (features.autoInsertDivider) {
@@ -106,6 +119,9 @@ export class ContentGenerator {
 		return finalContent.replace(/\n{3,}/g, "\n\n").trim();
 	}
 
+	/* 	Groups consecutive annotations that are close together within a chapter.
+	 	Highlights are considered successive if they are on the same page
+	 	and their character position is within a defined gap. 				*/
 	private groupSuccessiveHighlights(anno: Annotation[]): SuccessiveGroup[] {
 		const groups: SuccessiveGroup[] = [];
 		let current: Annotation[] = [];

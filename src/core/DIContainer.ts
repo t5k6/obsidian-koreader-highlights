@@ -1,19 +1,23 @@
+import { logger } from "src/utils/logging";
+
 type Ctor<T> = new (...args: any[]) => T;
 
 export interface Disposable {
 	dispose(): void | Promise<void>;
 }
 
+// simple dependency injection container that manages the lifecycle of instances.
 export class DIContainer {
 	private instances = new Map<Function, any>();
 
-	public registerSingleton<T>(token: Ctor<T>, instance: T): void {
+	public registerSingleton<T>(token: Ctor<T>, instance: T): DIContainer {
 		if (this.instances.has(token)) {
-			console.warn(
+			logger.warn(
 				`DIContainer: Token ${token.name} is already registered. Overwriting.`,
 			);
 		}
 		this.instances.set(token, instance);
+		return this;
 	}
 
 	public resolve<T>(token: Ctor<T>): T {
@@ -33,5 +37,6 @@ export class DIContainer {
 		}
 		await Promise.all(disposalPromises);
 		this.instances.clear();
+		logger.info("DIContainer: All instances disposed and container cleared.");
 	}
 }

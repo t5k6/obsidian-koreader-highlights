@@ -1,339 +1,285 @@
 import { normalizePath, TFile, TFolder, type Vault } from "obsidian";
+import pako from "pako";
 
-let isDebugFileLoggingEnabled = false;
+/* ---------------------------------------------------------------- *\
+ |  HELPERS                                                          |
+\* ---------------------------------------------------------------- */
 
-export enum DebugLevel {
-	NONE = 0,
-	INFO = 1, // Most verbose: Info, Warnings, Errors
-	WARNING = 2, // Medium: Warnings, Errors
-	ERROR = 3, // Least verbose (active): Errors only
+function formatArgs(args: any[]): string {
+	return args
+		.map((x) => {
+			if (x instanceof Error) return `${x.message}\n${x.stack ?? ""}`;
+			if (typeof x === "object" && x !== null) {
+				try {
+					return JSON.stringify(x);
+				} catch {
+					return "[Unserializable Object]";
+				}
+			}
+			return String(x);
+		})
+		.join(" ");
 }
 
-let currentConsoleLogLevel: DebugLevel = DebugLevel.NONE;
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const dayStamp = () => new Date().toISOString().slice(0, 10);
 
-export function setDebugLevel(level: DebugLevel): void {
-	if (level in DebugLevel && typeof level === "number") {
-		currentConsoleLogLevel = level;
-	}
-}
+async function mkdirp(vault: Vault, dir: string) {
+	const normalizedDir = normalizePath(dir);
+	if (await vault.adapter.exists(normalizedDir)) return;
 
-export function setDebugMode(enableFileLog: boolean) {
-	isDebugFileLoggingEnabled = enableFileLog;
-	if (enableFileLog && currentConsoleLogLevel === DebugLevel.NONE) {
-		currentConsoleLogLevel = DebugLevel.INFO;
-	}
-}
-
-function formatMessage(arg: unknown): string {
-	if (arg instanceof Error) {
-		return arg.message + (arg.stack ? `\nStack: ${arg.stack}` : "");
-	}
-	if (typeof arg === "object" && arg !== null) {
-		try {
-			return JSON.stringify(arg, null, 2);
-		} catch (e) {
-			return "[Unserializable Object]";
-		}
-	}
-	return String(arg);
-}
-
-function formatArgs(args: unknown[]): string {
-	return args.map((arg) => formatMessage(arg)).join(" ");
-}
-
-export function devLog(...args: unknown[]): void {
-	if (currentConsoleLogLevel === DebugLevel.INFO) {
-		console.log(...args.map((arg) => formatMessage(arg)));
-	}
-	if (isDebugFileLoggingEnabled && logManager) {
-		logManager.write(formatArgs(args), "INFO");
-	}
-}
-
-export function devWarn(...args: unknown[]): void {
-	if (
-		currentConsoleLogLevel === DebugLevel.INFO ||
-		currentConsoleLogLevel === DebugLevel.WARNING
-	) {
-		console.warn(...args.map((arg) => formatMessage(arg)));
-	}
-	if (isDebugFileLoggingEnabled && logManager) {
-		logManager.write(formatArgs(args), "WARNING");
-	}
-}
-
-export function devError(...args: unknown[]): void {
-	if (currentConsoleLogLevel !== DebugLevel.NONE) {
-		// Any active level
-		console.error(...args.map((arg) => formatMessage(arg)));
-	}
-	if (isDebugFileLoggingEnabled && logManager) {
-		logManager.write(formatArgs(args), "ERROR");
-	}
-}
-
-function getFormattedDate(): string {
-	const date = new Date();
-	return date.toISOString().replace(/[:.]/g, "-").replace("T", "_");
-}
-
-async function ensureFolder(vault: Vault, dir: string) {
-	const parts = dir.split("/");
+	const parts = normalizedDir.split("/");
 	let current = "";
-	for (const p of parts) {
-		current = current ? `${current}/${p}` : p;
-		if (!(await vault.adapter.exists(current))) {
-			await vault.createFolder(current); // creates one level only
+	for (const part of parts) {
+		current = current ? `${current}/${part}` : part;
+		try {
+			// eslint-disable-next-line no-await-in-loop
+			await vault.createFolder(current);
+		} catch (e: any) {
+			// Ignore errors if folder was created in parallel
+			if (e?.message?.includes("Folder already exists")) continue;
+			throw e;
 		}
 	}
 }
 
-export class LogManager {
-	private vault: Vault;
-	public logDir: string;
-	public logFile: TFile | null = null;
-	private logBuffer: string[] = [];
-	private isWriting = false;
-	public flushTimer: NodeJS.Timeout | undefined;
-	private static readonly MAX_BUFFER_SIZE = 100;
-	private static readonly FLUSH_INTERVAL = 500;
+/* ---------------------------------------------------------------- *\
+ |  QUEUE & SINKS                                                    |
+\* ---------------------------------------------------------------- */
 
-	constructor(vault: Vault, logDir: string) {
-		this.vault = vault;
-		this.logDir = normalizePath(logDir);
+type QueueItem = { lvl: string; msg: string; ts: number };
+
+class BufferedQueue {
+	private buf: QueueItem[] = [];
+	private sizeBytes = 0;
+	private drainTimer: NodeJS.Timeout | undefined;
+
+	constructor(
+		private maxItems: number,
+		private maxBytes: number,
+		private delay: number,
+		private drainCb: (batch: QueueItem[]) => Promise<void>,
+	) {}
+
+	enqueue(item: QueueItem) {
+		this.buf.push(item);
+		this.sizeBytes += item.msg.length + 24; // Approximation of memory usage
+		if (this.buf.length >= this.maxItems || this.sizeBytes >= this.maxBytes) {
+			this.flushNow();
+		} else if (!this.drainTimer) {
+			this.drainTimer = setTimeout(() => this.flushNow(), this.delay);
+		}
 	}
 
-	public async initialize(cleanupOptions?: {
-		enabled: boolean;
-		maxAgeDays?: number;
-		maxFiles?: number;
-	}): Promise<void> {
-		const levelForFileName = "ALL";
-		const formattedDate = getFormattedDate();
-		const logFilePath = normalizePath(
-			`${this.logDir}/koreader-importer_${formattedDate}_${levelForFileName}.md`,
-		);
-		const initialContent = `Log initialized at ${new Date().toISOString()} (File Log captures all levels. Console Level: ${
-			DebugLevel[currentConsoleLogLevel]
-		})\n`;
+	drainAll(): QueueItem[] {
+		const batch = this.buf;
+		this.buf = [];
+		this.sizeBytes = 0;
+		return batch;
+	}
 
+	private flushNow() {
+		if (this.drainTimer) {
+			clearTimeout(this.drainTimer);
+			this.drainTimer = undefined;
+		}
+		const batch = this.drainAll();
+		if (batch.length) void this.drainCb(batch);
+	}
+}
+
+class FileSink {
+	private curFile: TFile | null = null;
+	private curSize = 0;
+	private curDate = "";
+	private rotating = false;
+	private readonly MAX_LOG_SIZE = 2 * 1024 * 1024; // 2 MB
+	private readonly MAX_LOG_FILES = 10;
+
+	constructor(
+		private vault: Vault,
+		private dir: string,
+	) {
+		void this.rotate();
+	}
+
+	async write(batch: QueueItem[]) {
+		if (this.rotating) await delay(100); // Wait for rotation to complete
+		if (!this.curFile) return;
+
+		const text = `${batch
+			.map((i) => `[${new Date(i.ts).toISOString()}] [${i.lvl}] ${i.msg}`)
+			.join("\n")}\n`;
 		try {
-			await ensureFolder(this.vault, this.logDir);
+			await this.vault.adapter.append(this.curFile.path, text);
+			this.curSize += text.length;
 
-			let fileHandle = this.vault.getAbstractFileByPath(logFilePath);
-
-			// If path exists but it's a folder, that's a problem.
-			if (fileHandle && !(fileHandle instanceof TFile)) {
-				console.error(
-					`Log path ${logFilePath} exists but is a folder. Logging disabled.`,
-				);
-				throw new Error("Log path is a folder");
+			if (this.curSize > this.MAX_LOG_SIZE || dayStamp() !== this.curDate) {
+				void this.rotate();
 			}
-
-			// If file doesn't exist, create it.
-			if (!fileHandle) {
-				fileHandle = await this.vault.create(logFilePath, initialContent);
-			}
-
-			this.logFile = fileHandle as TFile;
 		} catch (error) {
-			console.error("LogManager.initialize internal error:", error);
-			this.logFile = null;
-			throw error; 
-		}
-
-		if (cleanupOptions?.enabled) {
-			await this.cleanupOldLogs(
-				cleanupOptions.maxAgeDays,
-				cleanupOptions.maxFiles,
-			);
+			console.error("KOReader Logger: Failed to write to log file.", error);
 		}
 	}
 
-	public async write(
-		message: string,
-		level: "INFO" | "WARNING" | "ERROR",
-	): Promise<void> {
-		if (!this.logFile) return; // Only write if a log file is successfully initialized
-
-		const timestamp = new Date().toISOString();
-		this.logBuffer.push(`[${timestamp}] [${level}] ${message}`);
-
-		if (
-			this.logBuffer.length >= LogManager.MAX_BUFFER_SIZE ||
-			level === "ERROR"
-		) {
-			await this.flush();
-		} else if (!this.flushTimer) {
-			this.flushTimer = setTimeout(
-				() => this.flush(),
-				LogManager.FLUSH_INTERVAL,
-			);
-		}
-	}
-
-	async flush(): Promise<void> {
-		if (this.isWriting || this.logBuffer.length === 0 || !this.logFile) {
-			return;
-		}
-		this.isWriting = true;
-		if (this.flushTimer) clearTimeout(this.flushTimer);
-		this.flushTimer = undefined;
-
-		const entriesToFlush = [...this.logBuffer];
-		this.logBuffer = [];
-
+	private async rotate() {
+		this.rotating = true;
 		try {
-			const currentContent = await this.vault.read(this.logFile);
-			await this.vault.modify(
-				this.logFile,
-				currentContent + entriesToFlush.join("\n") + "\n",
+			await mkdirp(this.vault, this.dir);
+			const date = dayStamp();
+			const filePath = normalizePath(
+				`${this.dir}/log_${date}_${Date.now()}.md`,
 			);
-		} catch (e) {
-			console.error("Failed to flush log buffer to file:", e);
-			this.logBuffer.unshift(...entriesToFlush);
+			this.curFile = await this.vault.create(
+				filePath,
+				`# KOReader Importer Log\nLog created: ${new Date().toISOString()}\n\n`,
+			);
+			this.curSize = 0;
+			this.curDate = date;
+			void this.cleanup(); // Fire-and-forget cleanup
+		} catch (error) {
+			console.error("KOReader Logger: Failed to rotate log file.", error);
+			this.curFile = null; // Stop logging if rotation fails
 		} finally {
-			this.isWriting = false;
+			this.rotating = false;
 		}
 	}
 
-	private async cleanupOldLogs(
-		maxAgeDays = 7,
-		maxFileCount?: number,
-	): Promise<void> {
-		const folder = this.vault.getAbstractFileByPath(this.logDir);
+	private async cleanup() {
+		const folder = this.vault.getAbstractFileByPath(this.dir);
 		if (!(folder instanceof TFolder)) return;
 
-		const now = Date.now();
-		const cutoffTime = now - maxAgeDays * 24 * 60 * 60 * 1000;
-		const logFiles: { file: TFile; mtime: number }[] = [];
+		const files = folder.children
+			.filter(
+				(f): f is TFile =>
+					f instanceof TFile &&
+					f.name.startsWith("log_") &&
+					f.path !== this.curFile?.path,
+			)
+			.sort((a, b) => b.stat.mtime - a.stat.mtime); // Newest first
 
-		for (const child of folder.children) {
-			if (
-				child instanceof TFile &&
-				child.name.startsWith("koreader-importer_") &&
-				child.extension === "md"
-			) {
+		// Gzip old .md files
+		for (const file of files) {
+			if (file.extension === "md") {
 				try {
-					const stat = await this.vault.adapter.stat(child.path);
-					if (stat?.mtime) {
-						logFiles.push({ file: child, mtime: stat.mtime });
-					}
+					// eslint-disable-next-line no-await-in-loop
+					const content = await this.vault.adapter.read(file.path);
+					const compressed = pako.gzip(content);
+					// eslint-disable-next-line no-await-in-loop
+					await this.vault.adapter.writeBinary(`${file.path}.gz`, compressed);
+					// eslint-disable-next-line no-await-in-loop
+					await this.vault.adapter.remove(file.path);
 				} catch (e) {
-					/* ignore stat error for individual file */
-				}
-			}
-		}
-		logFiles.sort((a, b) => a.mtime - b.mtime); // Oldest first
-
-		let filesToDeletePaths: string[] = [];
-
-		// Mark files older than maxAgeDays for deletion
-		for (const lf of logFiles) {
-			if (lf.mtime < cutoffTime) {
-				filesToDeletePaths.push(lf.file.path);
-			}
-		}
-
-		// If maxFileCount is set and we still have too many files (after age-based pruning)
-		if (
-			maxFileCount &&
-			logFiles.length - filesToDeletePaths.length > maxFileCount
-		) {
-			const numberToPruneByCount =
-				logFiles.length - filesToDeletePaths.length - maxFileCount;
-			let prunedByCount = 0;
-			for (const lf of logFiles) {
-				// Iterate oldest first
-				if (prunedByCount >= numberToPruneByCount) break;
-				if (!filesToDeletePaths.includes(lf.file.path)) {
-					// If not already marked for deletion
-					filesToDeletePaths.push(lf.file.path);
-					prunedByCount++;
+					console.error(`KOReader Logger: Failed to compress ${file.path}`, e);
 				}
 			}
 		}
 
-		filesToDeletePaths = Array.from(new Set(filesToDeletePaths)); // Ensure uniqueness
+		// Delete oldest files if count exceeds max
+		const allLogs = folder.children
+			.filter(
+				(f): f is TFile =>
+					f instanceof TFile &&
+					f.name.startsWith("log_") &&
+					f.path !== this.curFile?.path,
+			)
+			.sort((a, b) => a.stat.mtime - b.stat.mtime); // Oldest first
 
-		let deletedCount = 0;
-		for (const filePath of filesToDeletePaths) {
-			const fileInstance = this.vault.getAbstractFileByPath(filePath);
-			if (fileInstance instanceof TFile) {
-				try {
-					await this.vault.delete(fileInstance);
-					deletedCount++;
-				} catch (error) {
-					console.error(
-						`Failed to delete old log file ${fileInstance.name}:`,
-						error,
-					);
-				}
+		if (allLogs.length > this.MAX_LOG_FILES) {
+			const toDelete = allLogs.slice(0, allLogs.length - this.MAX_LOG_FILES);
+			for (const file of toDelete) {
+				// eslint-disable-next-line no-await-in-loop
+				await this.vault.adapter.remove(file.path);
 			}
 		}
+	}
 
-		if (deletedCount > 0) {
-			console.log(
-				`Cleaned up ${deletedCount} old log files from ${this.logDir}.`,
-			);
-		}
+	async dispose() {
+		// Nothing to do here, flush is handled by the Logger class
 	}
 }
 
-let logManager: LogManager | null = null;
+/* ---------------------------------------------------------------- *\
+ |  MAIN SINGLETON                                                   |
+\* ---------------------------------------------------------------- */
 
-export async function initLogging(
-	vault: Vault,
-	logFolderPath: string,
-	cleanupOptions?: {
-		enabled: boolean;
-		maxAgeDays?: number;
-		maxFiles?: number;
-	},
-): Promise<string> {
-	if (!isDebugFileLoggingEnabled) {
-		if (logManager) await closeLogging();
-		return "";
-	}
-	if (logManager?.logFile) {
-		return logManager.logDir;
-	}
+export enum DebugLevel {
+	NONE = 3,
+	ERROR = 2,
+	WARN = 1,
+	INFO = 0,
+}
 
-	logManager = new LogManager(vault, logFolderPath);
-	try {
-		await logManager.initialize(cleanupOptions);
+class Logger {
+	private level: DebugLevel = DebugLevel.NONE;
+	private fileSink: FileSink | undefined;
+	private q: BufferedQueue;
 
-		if (logManager.logFile) {
-			console.log(
-				"File logging successfully initialized to:",
-				logManager.logFile.path,
-			);
-			await logManager.write(
-				`File logging system started. Console Log Level: ${
-					DebugLevel[currentConsoleLogLevel]
-				}. File log captures all severities.`,
-				"INFO",
-			);
-		} else {
-			console.warn("File logging could not be started.");
-			logManager = null; // disable
-		}
-	} catch (error) {
-		console.error(
-			"Critical error during LogManager initialization, file logging disabled:",
-			error,
+	constructor() {
+		this.q = new BufferedQueue(500, 64 * 1024, 800, (batch) =>
+			this.flush(batch),
 		);
-		logManager = null;
 	}
-	return logManager?.logDir || "";
+
+	public setLevel(level: DebugLevel) {
+		this.level = level;
+		this.info(`Console log level set to ${DebugLevel[level]}`);
+	}
+
+	public enableFileSink(enable: boolean, vault?: Vault, dir = "KOReader/logs") {
+		if (enable && !this.fileSink && vault) {
+			this.fileSink = new FileSink(vault, dir);
+			this.info(`File logging enabled to directory: ${dir}`);
+		} else if (!enable && this.fileSink) {
+			const sink = this.fileSink;
+			this.fileSink = undefined;
+			this.info("File logging disabled.");
+			// Ensure final flush before disposal
+			this.flush(this.q.drainAll()).then(() => sink.dispose());
+		}
+	}
+
+	public info(...args: any[]) {
+		if (this.level <= DebugLevel.INFO) this.emit("INFO", args);
+	}
+	public warn(...args: any[]) {
+		if (this.level <= DebugLevel.WARN) this.emit("WARN", args);
+	}
+	public error(...args: any[]) {
+		if (this.level <= DebugLevel.ERROR) this.emit("ERROR", args);
+	}
+
+	private emit(lvl: "INFO" | "WARN" | "ERROR", args: any[]) {
+		const msg = formatArgs(args);
+		if (this.level <= DebugLevel.INFO && lvl === "INFO") console.log(msg);
+		if (this.level <= DebugLevel.WARN && lvl === "WARN") console.warn(msg);
+		if (this.level <= DebugLevel.ERROR && lvl === "ERROR") console.error(msg);
+
+		if (this.fileSink) {
+			this.q.enqueue({ lvl, msg, ts: Date.now() });
+			if (lvl === "ERROR") void this.flush(this.q.drainAll());
+		}
+	}
+
+	private async flush(batch: QueueItem[]) {
+		if (!batch?.length || !this.fileSink) return;
+		await this.fileSink.write(batch);
+	}
+
+	async dispose() {
+		const finalBatch = this.q.drainAll();
+		await this.flush(finalBatch);
+		await this.fileSink?.dispose();
+		this.fileSink = undefined;
+	}
 }
 
-export async function closeLogging(): Promise<void> {
-	if (logManager) {
-		const lm = logManager; // Capture instance
-		logManager = null; // Nullify global first to prevent race conditions on re-entry
-		if (lm.flushTimer) clearTimeout(lm.flushTimer);
-		await lm.flush();
-	}
+export const logger = new Logger();
+
+// Legacy control functions
+export const setDebugLevel = logger.setLevel.bind(logger);
+export function setDebugMode(enable: boolean, vault?: Vault) {
+	logger.enableFileSink(enable, vault);
 }
+
+export const closeLogging = logger.dispose.bind(logger);

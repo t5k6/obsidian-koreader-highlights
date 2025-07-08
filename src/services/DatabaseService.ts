@@ -4,9 +4,15 @@ import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { normalizePath } from "obsidian";
 import initSqlJs, { type SqlJsStatic } from "sql.js";
+import { SQLITE_WASM } from "src/binaries/sql-wasm-base64";
 import type { Disposable } from "src/core/DIContainer";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
-import { SQLITE_WASM } from "../binaries/sql-wasm-base64";
+import { debounce } from "src/utils/debounce";
+import {
+	levenshteinDistance,
+	normalizeFileNamePiece,
+} from "src/utils/formatUtils";
+import { logger } from "src/utils/logging";
 import type {
 	BookStatistics,
 	DocProps,
@@ -15,22 +21,45 @@ import type {
 	PageStatData,
 	ReadingStatus,
 } from "../types";
-import { debounce } from "../utils/debounce";
-import {
-	levenshteinDistance,
-	normalizeFileNamePiece,
-} from "../utils/formatUtils";
-import { devError, devLog, devWarn } from "../utils/logging";
 
 /* ------------------------------------------------------------------ */
-/*                     ─── CONSTANTS & TYPES ───                      */
+/*                      SHARED HELPER CLASSES                         */
 /* ------------------------------------------------------------------ */
+
+class LruCache<K, V> {
+	constructor(
+		private readonly max = 200,
+		private readonly map = new Map<K, V>(),
+	) {}
+	get(key: K): V | undefined {
+		const value = this.map.get(key);
+		if (value !== undefined) {
+			// refresh LRU order
+			this.map.delete(key);
+			this.map.set(key, value);
+		}
+		return value;
+	}
+	set(key: K, value: V): void {
+		if (this.map.has(key)) this.map.delete(key);
+		this.map.set(key, value);
+		if (this.map.size > this.max) {
+			const first = this.map.keys().next().value;
+			if (first !== undefined) this.map.delete(first);
+		}
+	}
+	delete(key: K): void {
+		this.map.delete(key);
+	}
+	clear(): void {
+		this.map.clear();
+	}
+}
 
 type SQLDatabase = InstanceType<
 	Awaited<ReturnType<typeof initSqlJs>>["Database"]
 >;
 
-// Define a type-safe debounced function interface
 interface DebouncedFunction<T extends (...args: any[]) => any> {
 	(...args: Parameters<T>): void;
 	cancel(): void;
@@ -86,17 +115,14 @@ export class DatabaseService implements Disposable {
 
 	/* ---------------- prepared statements & caches ---------------- */
 	// simple in-memory LRU (only last 200 bookKeys) to save IPC to sql.js
-	private pathCache = new Map<string, string[]>();
+	private pathCache = new LruCache<string, string[]>(200);
 
-	// debounced export to persist index changes without blocking UI
 	private persistIndexDebounced: DebouncedFunction<() => Promise<void>>;
 
 	constructor(private plugin: KoreaderImporterPlugin) {
-		this.currentMountPoint = plugin.settings.koboMountPoint;
-		// Use normalizePath for cross-platform safety
+		this.currentMountPoint = plugin.settings.koreaderMountPoint;
 		this.idxPath = normalizePath(
 			path.join(
-				// use the *data* dir so it survives plugin upgrades
 				this.plugin.app.vault.configDir,
 				"plugins",
 				"koreader-importer",
@@ -106,7 +132,7 @@ export class DatabaseService implements Disposable {
 
 		this.persistIndexDebounced = debounce(
 			() => this.persistIndex(),
-			2500,
+			2_500,
 		) as DebouncedFunction<() => Promise<void>>;
 	}
 
@@ -123,14 +149,12 @@ export class DatabaseService implements Disposable {
 
 	/* 2️⃣ Fast duplicate detection (book-level) */
 	public async findExistingBookFiles(bookKey: string): Promise<string[]> {
-		// in-memory cache first
 		const cached = this.pathCache.get(bookKey);
 		if (cached) return cached;
 
 		await this.ensureIndexReady();
 		if (!this.idxDb) return [];
 
-		// Prepare statement on-the-fly to avoid stale statement issues.
 		const stmt = this.idxDb.prepare(
 			"SELECT vault_path FROM book WHERE key = ? AND vault_path IS NOT NULL",
 		);
@@ -143,28 +167,27 @@ export class DatabaseService implements Disposable {
 				if (row.vault_path) paths.push(row.vault_path as string);
 			}
 		} finally {
-			// Always free the statement after use.
 			stmt.free();
 		}
 
-		// tiny LRU of 200
 		this.pathCache.set(bookKey, paths);
-		if (this.pathCache.size > 200) {
-			// delete first inserted (Map keeps insertion order)
-			const firstKey = this.pathCache.keys().next().value;
-			if (firstKey) this.pathCache.delete(firstKey);
-		}
 		return paths;
 	}
+
+	/* ------------------------------------------------------------------ */
+	/*                 ───    STATISTICS (device)   ───                   */
+	/* ------------------------------------------------------------------ */
 
 	public async findBookStatistics(
 		title: string,
 		authors: string,
 		md5?: string,
 	): Promise<LuaMetadata["statistics"] | null> {
-		const mountPoint = this.plugin.settings.koboMountPoint;
+		const mountPoint = this.plugin.settings.koreaderMountPoint;
 		if (!mountPoint) {
-			devWarn("KOReader mount point not configured – skipping stats.");
+			logger.warn(
+				"DatabaseService: KOReader mount point not configured – skipping stats.",
+			);
 			return null;
 		}
 
@@ -183,85 +206,80 @@ export class DatabaseService implements Disposable {
 			const fileBuf = await fsp.readFile(filePath);
 			db = new SQL.Database(fileBuf);
 
+			// ── Tiered lookup --------------------------------------------------
 			let bookRow: BookStatistics | null = null;
 
-			// --- Tier 1: Perfect match (md5 + title) ---
-			if (md5) {
-				bookRow = this.queryBookRowByMd5AndTitle(db, md5, title);
-				if (bookRow) {
-					devLog(
-						`Found perfect stats match for "${title}" using md5 and title.`,
-					);
-				}
-			}
+			// 1️⃣ MD5 + title (perfect match)
+			if (md5)
+				bookRow = this.queryFirstRow<BookStatistics>(
+					db,
+					"SELECT * FROM book WHERE md5 = ? AND title = ?",
+					[md5, title],
+				);
 
-			// --- Tier 2: MD5 match with author disambiguation ---
+			// 2️⃣ MD5 only (author disambiguation)
 			if (!bookRow && md5) {
-				const candidates = this.queryBookRowsByMd5(db, md5);
+				const candidates = this.queryAllRows<BookStatistics>(
+					db,
+					"SELECT * FROM book WHERE md5 = ?",
+					[md5],
+				);
 				if (candidates.length === 1) {
 					bookRow = candidates[0];
-					devLog(`Found unique stats match for "${title}" using only md5.`);
 				} else if (candidates.length > 1) {
-					devLog(
-						`Found ${candidates.length} books with same MD5. Disambiguating with author: "${authors}"`,
-					);
-					// Find the best match by comparing author strings
-					let bestMatch: BookStatistics | null = null;
+					let best: BookStatistics | null = null;
 					let minDistance = Infinity;
-					for (const candidate of candidates) {
-						const distance = levenshteinDistance(
-							authors,
-							candidate.authors || "",
-						);
-						if (distance < minDistance) {
-							minDistance = distance;
-							bestMatch = candidate;
+					for (const c of candidates) {
+						const d = levenshteinDistance(authors, c.authors ?? "");
+						if (d < minDistance) {
+							minDistance = d;
+							best = c;
 						}
 					}
-					bookRow = bestMatch;
-					devLog(
-						`Disambiguation selected: "${bookRow?.title}" (author distance: ${minDistance})`,
-					);
+					bookRow = best;
 				}
 			}
 
-			// --- Tier 3: Legacy fallback (authors + title) ---
+			// 3️⃣ Fallback: author + title
 			if (!bookRow) {
-				bookRow = this.queryBookRowByAuthorsAndTitle(db, authors, title);
-				if (bookRow)
-					devLog(
-						`Found stats match for "${title}" using author/title fallback.`,
-					);
+				bookRow = this.queryFirstRow<BookStatistics>(
+					db,
+					"SELECT * FROM book WHERE authors = ? AND title = ?",
+					[authors, title],
+				);
 			}
 
 			if (!bookRow) return null;
 
-			const sessions = this.querySessions(db, bookRow.id);
+			const sessions = this.queryAllRows<PageStatData>(
+				db,
+				"SELECT * FROM page_stat_data WHERE id_book = ? ORDER BY start_time",
+				[bookRow.id],
+			);
 
 			return {
 				book: bookRow,
 				readingSessions: sessions,
 				derived: this.calculateDerivedStatistics(bookRow, sessions),
 			};
-		} catch (error) {
-			// Check if the error is a "File Not Found" error.
-			if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
-				// This is an expected, non-critical situation.
-				devLog(`Statistics database not found at the expected path. This is normal if not using a direct device mount. Proceeding without reading statistics.`);
+		} catch (error: any) {
+			if (error?.code === "ENOENT") {
+				logger.info(
+					"DatabaseService: Statistics DB not found (normal on indirect device sync).",
+				);
 				return null;
 			}
-			
-			// For any other kind of error, log it as a problem.
-			devError(`Failed to get book statistics for "${title}"`, error);
+			logger.error(
+				`DatabaseService: Failed to get book statistics for "${title}"`,
+				error,
+			);
 			return null;
 		} finally {
-			if (db) {
-				db.close();
-			}
+			db?.close();
 		}
 	}
 
-	//  for merge feature we may add highlight insert later
+	/** For merge feature – insert / update */
 	public async upsertBook(
 		id: number | null,
 		key: string,
@@ -270,35 +288,64 @@ export class DatabaseService implements Disposable {
 		vaultPath?: string,
 	): Promise<void> {
 		await this.ensureIndexReady();
-		const sql = `
-      INSERT INTO book(key,id,title,authors,vault_path)
-      VALUES(?,?,?,?,?)
-      ON CONFLICT(key) DO UPDATE SET
-        id         = COALESCE(excluded.id, book.id),
-        title      = excluded.title,
-        authors    = excluded.authors,
-        vault_path = COALESCE(excluded.vault_path, book.vault_path);
-    `;
-		this.idxDb!.run(sql, [key, id, title, authors, vaultPath ?? null]);
-		this.pathCache.delete(key); // bust cache
+		this.idxDb!.run(
+			`
+				INSERT INTO book(key,id,title,authors,vault_path)
+				VALUES(?,?,?,?,?)
+				ON CONFLICT(key) DO UPDATE SET
+				  id         = COALESCE(excluded.id, book.id),
+				  title      = excluded.title,
+				  authors    = excluded.authors,
+				  vault_path = COALESCE(excluded.vault_path, book.vault_path);
+			`,
+			[key, id, title, authors, vaultPath ?? null],
+		);
+		this.pathCache.delete(key);
 		this.persistIndexDebounced();
 	}
 
-	/* -------------------- settings hot-reload ----------------------- */
+	/* -------------------- settings hot-reload ---------------------- */
 	public setSettings(s: Readonly<KoreaderHighlightImporterSettings>) {
-		if (s.koboMountPoint !== this.currentMountPoint) {
-			// statistics path changed → reopen
-			if (this.db) {
-				this.db.close();
-				this.db = null;
-			}
-			this.currentMountPoint = s.koboMountPoint;
+		if (s.koreaderMountPoint !== this.currentMountPoint) {
+			this.db?.close(); // will be reopened lazily
+			this.db = null;
+			this.currentMountPoint = s.koreaderMountPoint;
 		}
 	}
 
 	/* ------------------------------------------------------------------ */
-	/*                  ─── PRIVATE (stats helpers) ───                   */
+	/*                  ─── PRIVATE HELPERS (sql) ───                     */
 	/* ------------------------------------------------------------------ */
+
+	private queryFirstRow<T = Record<string, unknown>>(
+		db: SQLDatabase,
+		sql: string,
+		params: any[] = [],
+	): T | null {
+		const stmt = db.prepare(sql);
+		try {
+			stmt.bind(params);
+			return stmt.step() ? (stmt.getAsObject() as unknown as T) : null;
+		} finally {
+			stmt.free();
+		}
+	}
+
+	private queryAllRows<T = Record<string, unknown>>(
+		db: SQLDatabase,
+		sql: string,
+		params: any[] = [],
+	): T[] {
+		const stmt = db.prepare(sql);
+		const out: T[] = [];
+		try {
+			stmt.bind(params);
+			while (stmt.step()) out.push(stmt.getAsObject() as unknown as T);
+			return out;
+		} finally {
+			stmt.free();
+		}
+	}
 
 	private calculateDerivedStatistics(
 		book: BookStatistics,
@@ -310,7 +357,7 @@ export class DatabaseService implements Disposable {
 		const percentComplete =
 			pages > 0 ? Math.round((totalReadPages / pages) * 100) : 0;
 		const averageTimePerPage =
-			totalReadPages > 0 && book.total_read_time > 0
+			totalReadPages && book.total_read_time
 				? book.total_read_time / 60 / totalReadPages
 				: 0;
 
@@ -324,7 +371,7 @@ export class DatabaseService implements Disposable {
 		return {
 			percentComplete,
 			averageTimePerPage,
-			firstReadDate: sessions.length
+			firstReadDate: sessions[0]
 				? new Date(sessions[0].start_time * 1000)
 				: null,
 			lastReadDate: new Date(book.last_open * 1000),
@@ -332,111 +379,9 @@ export class DatabaseService implements Disposable {
 		};
 	}
 
-	private queryBookRow(
-		db: SQLDatabase,
-		authors: string,
-		title: string,
-	): BookStatistics | null {
-		const stmt = db.prepare(
-			"SELECT * FROM book WHERE authors = ? AND title = ?",
-		);
-		try {
-			stmt.bind([authors, title]);
-			if (stmt.step()) {
-				const row = stmt.getAsObject();
-				return row as unknown as BookStatistics;
-			}
-			return null;
-		} finally {
-			stmt.free();
-		}
-	}
-
-	private queryBookRowByAuthorsAndTitle(
-		db: SQLDatabase,
-		authors: string,
-		title: string,
-	): BookStatistics | null {
-		const stmt = db.prepare(
-			"SELECT * FROM book WHERE authors = ? AND title = ?",
-		);
-		try {
-			stmt.bind([authors, title]);
-			if (stmt.step()) {
-				const row = stmt.getAsObject();
-				return row as unknown as BookStatistics;
-			}
-			return null;
-		} finally {
-			stmt.free();
-		}
-	}
-
-	private queryBookRowByMd5AndTitle(
-		db: SQLDatabase,
-		md5: string,
-		title: string,
-	): BookStatistics | null {
-		const stmt = db.prepare("SELECT * FROM book WHERE md5 = ? AND title = ?");
-		try {
-			stmt.bind([md5, title]);
-			if (stmt.step()) {
-				const row = stmt.getAsObject();
-				return row as unknown as BookStatistics;
-			}
-			return null;
-		} finally {
-			stmt.free();
-		}
-	}
-
-	private queryBookRowsByMd5(db: SQLDatabase, md5: string): BookStatistics[] {
-		const stmt = db.prepare("SELECT * FROM book WHERE md5 = ?");
-		const results: BookStatistics[] = [];
-		try {
-			stmt.bind([md5]);
-			while (stmt.step()) {
-				const row = stmt.getAsObject();
-				results.push(row as unknown as BookStatistics);
-			}
-			return results;
-		} finally {
-			stmt.free();
-		}
-	}
-
-	private querySessions(db: SQLDatabase, bookId: number): PageStatData[] {
-		const stmt = db.prepare(
-			"SELECT * FROM page_stat_data WHERE id_book = ? ORDER BY start_time",
-		);
-		try {
-			stmt.bind([bookId]);
-			const sessions: PageStatData[] = [];
-			while (stmt.step()) {
-				// Fix: Properly cast through unknown first
-				const row = stmt.getAsObject();
-				sessions.push(row as unknown as PageStatData);
-			}
-			return sessions;
-		} finally {
-			stmt.free();
-		}
-	}
-
 	/* ------------------------------------------------------------------ */
 	/*             ───   CONNECTION BOOTSTRAP / TEARDOWN  ───             */
 	/* ------------------------------------------------------------------ */
-
-	private async ensureReady(): Promise<void> {
-		if (this.db) return;
-		if (this.initializing) return this.initializing;
-
-		this.initializing = (async () => {
-			await this.openStatisticsDatabase();
-			this.initializing = null;
-		})();
-		return this.initializing;
-	}
 
 	private async ensureIndexReady(): Promise<void> {
 		if (this.idxDb) return;
@@ -449,37 +394,17 @@ export class DatabaseService implements Disposable {
 		return this.idxInitializing;
 	}
 
-	private async openStatisticsDatabase(): Promise<void> {
-		const mount = this.plugin.settings.koboMountPoint;
-		if (!mount) throw new Error("Mount point not configured");
-
-		const deviceRoot = (await this.findDeviceRoot(mount)) ?? mount;
-		const filePath = path.join(
-			deviceRoot,
-			".adds",
-			"koreader",
-			"settings",
-			"statistics.sqlite3",
-		);
-
-		devLog(`Opening statistics DB: ${filePath}`);
-		const SQL = await DatabaseService.getSqlJs();
-		const fileBuf = await fsp.readFile(filePath);
-		this.db = new SQL.Database(fileBuf);
-		this.db.exec("PRAGMA temp_store = MEMORY;");
-	}
-
 	private async openIndexDatabase(): Promise<void> {
 		const SQL = await DatabaseService.getSqlJs();
 		let bytes: Uint8Array | null = null;
 
 		try {
 			bytes = await fsp.readFile(this.idxPath);
-			devLog(`Opening index DB: ${this.idxPath}`);
+			logger.info(`DatabaseService: Opening index DB: ${this.idxPath}`);
 			this.idxDb = new SQL.Database(bytes);
 		} catch (e: any) {
 			if (e.code !== "ENOENT") throw e;
-			devLog("No index DB yet, creating fresh one");
+			logger.info("DatabaseService: No index DB yet, creating fresh one");
 			this.idxDb = new SQL.Database();
 			this.idxDb.run(INDEX_DB_SCHEMA);
 			await this.persistIndex(); // initial disk write
@@ -497,14 +422,14 @@ export class DatabaseService implements Disposable {
 
 	private async persistIndex() {
 		if (!this.idxDb) return;
-		devLog("Persisting index database to disk...");
+		logger.info("DatabaseService: Persisting index database to disk...");
 		try {
 			const data = this.idxDb.export();
 			await fsp.mkdir(path.dirname(this.idxPath), { recursive: true });
 			await fsp.writeFile(this.idxPath, Buffer.from(data));
-			devLog("Index database persisted successfully.");
+			logger.info("DatabaseService: Index database persisted successfully.");
 		} catch (error) {
-			devError("Failed to persist index database.", error);
+			logger.error("DatabaseService: Failed to persist index database.", error);
 		}
 	}
 
@@ -531,7 +456,7 @@ export class DatabaseService implements Disposable {
 				}
 				fs.writeFileSync(this.idxPath, Buffer.from(data));
 			} catch (e) {
-				devError("Unable to write index DB on dispose", e);
+				logger.error("DatabaseService: Unable to write index DB on dispose", e);
 			}
 			this.idxDb.close();
 			this.idxDb = null;

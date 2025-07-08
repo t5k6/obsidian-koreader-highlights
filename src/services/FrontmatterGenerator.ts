@@ -1,4 +1,10 @@
 import { stringifyYaml } from "obsidian";
+import {
+	formatDate,
+	formatPercent,
+	secondsToHoursMinutesSeconds,
+} from "src/utils/formatUtils";
+import { logger } from "src/utils/logging";
 import type {
 	DocProps,
 	FrontmatterData,
@@ -6,12 +12,6 @@ import type {
 	LuaMetadata,
 	ParsedFrontmatter,
 } from "../types";
-import {
-	formatDate,
-	formatPercent,
-	secondsToHoursMinutesSeconds,
-} from "../utils/formatUtils";
-import { devWarn } from "../utils/logging";
 
 const FRIENDLY_KEY_MAP: Record<string, string> = {
 	title: "Title",
@@ -68,9 +68,14 @@ export class FrontmatterGenerator {
 		}
 
 		// Default title/authors if they weren't in docProps
-		if (frontmatter.title === undefined) frontmatter.title = "";
-		if (frontmatter.authors === undefined && !disabled.has("authors")) {
-			frontmatter.authors = "";
+		if (!frontmatter.title) {
+			frontmatter.title = ""; // Always have a title, even if empty
+		}
+
+		if (!frontmatter.authors && !disabled.has("authors")) {
+			frontmatter.authors = settings.useUnknownAuthor
+				? "Unknown Author"
+				: undefined;
 		}
 
 		// --- 2. Calculate and add Highlight/Note Counts ---
@@ -122,6 +127,70 @@ export class FrontmatterGenerator {
 		}
 
 		return frontmatter as FrontmatterData;
+	}
+
+	public mergeFrontmatterData(
+		existingFm: ParsedFrontmatter,
+		newMetadata: LuaMetadata,
+		settings: FrontmatterSettings,
+	): FrontmatterData {
+		// 1. Generate the ideal frontmatter object from the new data.
+		const theirData = this.createFrontmatterData(newMetadata, settings);
+
+		// 2. Convert existing frontmatter (friendly keys) to programmatic keys
+		const reverseKeyMap = new Map(
+			Object.entries(FRIENDLY_KEY_MAP).map(([pKey, fKey]) => [fKey, pKey]),
+		);
+
+		const ourData: Record<string, any> = {};
+		for (const friendlyKey in existingFm) {
+			const progKey = reverseKeyMap.get(friendlyKey) ?? friendlyKey;
+			ourData[progKey] = existingFm[friendlyKey];
+		}
+
+		// 3. Define keys to always update from the new import.
+		const alwaysUpdateKeys = new Set([
+			"lastRead",
+			"firstRead",
+			"totalReadTime",
+			"progress",
+			"readingStatus",
+			"averageTimePerPage",
+			"highlightCount",
+			"noteCount",
+			"pages",
+		]);
+
+		// 4. Perform the merge. Start with ourData to preserve user edits by default.
+		const mergedData: Record<string, any> = { ...ourData };
+
+		for (const key in theirData) {
+			if (alwaysUpdateKeys.has(key) || !Object.hasOwn(mergedData, key)) {
+				(mergedData as any)[key] = (theirData as any)[key];
+			}
+		}
+
+		// 5. Preserve all custom fields from existing frontmatter that weren't handled above
+		for (const friendlyKey in existingFm) {
+			// If the friendly key isn't a value in FRIENDLY_KEY_MAP, it's a custom field
+			const isCustomField =
+				!Object.values(FRIENDLY_KEY_MAP).includes(friendlyKey);
+			if (
+				isCustomField && // Not a standard field
+				!alwaysUpdateKeys.has(friendlyKey) && // Not an always-update field
+				!mergedData[friendlyKey] // Not already set
+			) {
+				mergedData[friendlyKey] = existingFm[friendlyKey];
+			}
+		}
+
+		// Ensure required fields like title/authors exist, even if empty.
+		if (mergedData.title === undefined)
+			mergedData.title = theirData.title || "";
+		if (mergedData.authors === undefined)
+			mergedData.authors = theirData.authors || "";
+
+		return mergedData as FrontmatterData;
 	}
 
 	private isValidValue(value: unknown): boolean {
@@ -185,7 +254,9 @@ export class FrontmatterGenerator {
 			case "progress": {
 				const numericValue = parseInt(String(value), 10);
 				if (Number.isNaN(numericValue)) {
-					devWarn(`Could not parse numeric value for progress: ${value}`);
+					logger.warn(
+						`FrontmatterGenerator: Could not parse numeric value for progress: ${value}`,
+					);
 					return "0%"; // Return a sensible default on failure
 				}
 				return formatPercent(numericValue);
@@ -232,7 +303,7 @@ export class FrontmatterGenerator {
 		const { useFriendlyKeys = true, sortKeys = true } = options;
 		const finalObject: Record<string, any> = {};
 
-		let entries = Object.entries(data);
+		const entries = Object.entries(data);
 
 		if (sortKeys) {
 			entries.sort(([aKey], [bKey]) => aKey.localeCompare(bKey));
@@ -262,10 +333,26 @@ export class FrontmatterGenerator {
 			) {
 				finalValue = this.formatStatValue(key, rawValue);
 			} else if (["authors", "description", "keywords"].includes(key)) {
-				finalValue = this.formatDocPropValue(key, String(rawValue));
+				if (key === "authors") {
+					const isSingleLink =
+						typeof rawValue === "string" && rawValue.startsWith("[[");
+					const isArrayOfLinks =
+						Array.isArray(rawValue) &&
+						rawValue.every((item) => String(item).startsWith("[["));
+
+					if (isSingleLink || isArrayOfLinks) {
+						finalValue = rawValue; // Already formatted, pass through.
+					} else {
+						// Not formatted, so apply formatting.
+						finalValue = this.formatDocPropValue(key, String(rawValue));
+					}
+				} else {
+					// For other fields like description/keywords, format as usual.
+					finalValue = this.formatDocPropValue(key, String(rawValue));
+				}
 			}
 
-			if (finalValue === "" && key !== "authors") continue;
+			if (finalValue === "" && !Array.isArray(finalValue)) continue;
 
 			finalObject[formattedKey] = finalValue;
 		}

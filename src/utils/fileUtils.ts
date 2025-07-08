@@ -1,68 +1,135 @@
-import { Notice, normalizePath, type Vault } from "obsidian";
-import { devError } from "./logging";
+import { normalizePath, Notice, TFile, type Vault } from "obsidian";
+import { logger } from "./logging";
 
-interface FileSystemError extends Error {
-	code?: string;
+/* ------------------------------------------------------------------ */
+/*                              TYPES                                 */
+/* ------------------------------------------------------------------ */
+
+export type FileSystemOperation =
+	| "creating folder"
+	| "reading file"
+	| "writing file"
+	| "deleting file"
+	| "reading directory"
+	| "reading metadata file"
+	| "reading SDR directory";
+
+export enum FileSystemErrorCode {
+	NotFound = "ENOENT",
+	AccessDenied = "EACCES",
+	Permission = "EPERM",
+	IsDirectory = "EISDIR",
+	NotDirectory = "ENOTDIR",
 }
+
+type ErrorWithCode = Error & { code?: string };
+
+interface HandleFsErrOptions {
+	shouldThrow?: boolean;
+	customNoticeMessage?: string;
+}
+
+/* ------------------------------------------------------------------ */
+/*                           ᴜᴛɪʟɪᴛɪᴇs                               */
+/* ------------------------------------------------------------------ */
+
+/** split name + extension (extension keeps leading dot) */
+const splitFileName = (f: string): { base: string; ext: string } => {
+	const idx = f.lastIndexOf(".");
+	return idx === -1
+		? { base: f, ext: "" }
+		: { base: f.slice(0, idx), ext: f.slice(idx) };
+};
+
+/* ------------------------------------------------------------------ */
+/*                             API                                    */
+/* ------------------------------------------------------------------ */
 
 export async function generateUniqueFilePath(
 	vault: Vault,
 	baseDir: string,
 	fileName: string,
 ): Promise<string> {
-	const normalizedBaseDir = normalizePath(baseDir);
-	const originalFileName = normalizePath(fileName);
+	const dir = normalizePath(baseDir);
+	const orig = normalizePath(fileName);
+	const { base, ext } = splitFileName(orig);
 
 	let counter = 0;
-	let currentPath = normalizePath(`${normalizedBaseDir}/${originalFileName}`);
-	const extSeparator = originalFileName.includes(".") ? "." : "";
-	const baseName = originalFileName.substring(
-		0,
-		originalFileName.lastIndexOf(extSeparator),
-	);
-	const ext = originalFileName.substring(
-		originalFileName.lastIndexOf(extSeparator),
-	);
+	let candidate = normalizePath(`${dir}/${orig}`);
 
-	while (await vault.adapter.exists(currentPath)) {
-		counter++;
-		currentPath = normalizePath(
-			`${normalizedBaseDir}/${baseName} (${counter})${ext}`,
-		);
+	while (await vault.adapter.exists(candidate)) {
+		counter += 1;
+		candidate = normalizePath(`${dir}/${base} (${counter})${ext}`);
 	}
+	return candidate;
+}
 
-	return currentPath;
+const fileCreateLock = new Map<Vault, Promise<void>>();
+
+async function withVaultLock<T>(
+	vault: Vault,
+	fn: () => Promise<T>,
+): Promise<T> {
+	const prev = fileCreateLock.get(vault) ?? Promise.resolve();
+	let unlock: () => void;
+	let next = new Promise<void>((res) => {
+		unlock = res;
+	});
+	fileCreateLock.set(
+		vault,
+		prev.then(() => next),
+	);
+	try {
+		await prev; // wait turn
+		return await fn(); // critical section
+	} finally {
+		unlock!(); // release
+		if (fileCreateLock.get(vault) === next) fileCreateLock.delete(vault);
+	}
+}
+
+export async function createFileSafely(
+	vault: Vault,
+	baseDir: string,
+	filenameStem: string,
+	content: string,
+): Promise<TFile> {
+	return withVaultLock(vault, async () => {
+		let counter = 0;
+		let candidate: string;
+		do {
+			const suffix = counter === 0 ? "" : ` (${counter})`;
+			candidate = normalizePath(`${baseDir}/${filenameStem}${suffix}.md`);
+			counter++;
+		} while (await vault.adapter.exists(candidate));
+
+		// final check & write
+		if (await vault.adapter.exists(candidate)) {
+			// extremely rare – fallback to uuid suffix
+			const stamp = Date.now().toString(36).slice(-4);
+			candidate = normalizePath(`${baseDir}/${filenameStem}-${stamp}.md`);
+		}
+		return vault.create(candidate, content);
+	});
 }
 
 export async function ensureFolderExists(
 	vault: Vault,
 	folderPath: string,
 ): Promise<boolean> {
-	const normalized = normalizePath(folderPath);
-
-	// Fast in-memory check
-	if (vault.getFolderByPath(normalized)) {
-		return false;
-	}
+	const path = normalizePath(folderPath);
+	if (vault.getFolderByPath(path)) return false; // in-memory fast path
 
 	try {
-		const stat = await vault.adapter.stat(normalized).catch(() => null);
+		const stat = await vault.adapter.stat(path).catch(() => null);
+		if (stat?.type === "folder") return false;
+		if (stat) throw new Error(`"${path}" exists but is not a folder.`);
 
-		if (stat) {
-			if (stat.type === "folder") {
-				return false;
-			}
-			throw new Error(`"${normalized}" exists but is not a folder.`);
-		}
-
-		// If we reach here, the folder does not exist. Create it.
-		await vault.createFolder(normalized);
-		return true; // Was newly created
+		await vault.createFolder(path);
+		return true;
 	} catch (err) {
-		handleFileSystemError("creating folder", normalized, err, {
-			shouldThrow: true,
-		});
-		return false; // Should not be reached due to throw, but satisfies TS
+		handleFileSystemError("creating folder", path, err, { shouldThrow: true });
+		return false;
 	}
 }
 
@@ -70,69 +137,52 @@ export async function ensureParentDirectory(
 	vault: Vault,
 	filePath: string,
 ): Promise<void> {
-	const dir = normalizePath(filePath.substring(0, filePath.lastIndexOf("/")));
-	await ensureFolderExists(vault, dir);
+	const idx = normalizePath(filePath).lastIndexOf("/");
+	if (idx !== -1) await ensureFolderExists(vault, filePath.slice(0, idx));
 }
 
 export function handleFileSystemError(
-	operationDescription: string,
-	filePath: string,
+	operation: FileSystemOperation,
+	path: string,
 	error: unknown,
-	options: {
-		shouldThrow?: boolean;
-		customNoticeMessage?: string;
-	} = {},
+	{ shouldThrow = false, customNoticeMessage }: HandleFsErrOptions = {},
 ): Error {
-	const { shouldThrow = false, customNoticeMessage } = options;
-	const baseError = error instanceof Error ? error : new Error(String(error));
+	const err: ErrorWithCode =
+		error instanceof Error ? error : new Error(String(error));
 
-	let userMessage = customNoticeMessage;
-	let detailedMessage = `Error ${operationDescription} "${filePath}": ${baseError.message}`;
+	let userMsg = customNoticeMessage;
+	let logMsg = `Error ${operation} "${path}": ${err.message}`;
 
-	const errorCode =
-		typeof error === "object" &&
-		error !== null &&
-		"code" in error &&
-		typeof error.code === "string"
-			? error.code
-			: undefined;
+	const code = (err.code ?? "") as FileSystemErrorCode | "";
 
-	if (errorCode) {
-		detailedMessage += ` (Code: ${errorCode})`;
-		switch (errorCode) {
-			case "ENOENT":
-				userMessage = userMessage ?? `Not found: ${filePath}`;
-				detailedMessage = `File/Directory not found: ${filePath}. Operation: ${operationDescription}.`;
+	if (code) {
+		logMsg += ` (code: ${code})`;
+		switch (code) {
+			case FileSystemErrorCode.NotFound:
+				userMsg ??= `Not found: ${path}`;
 				break;
-			case "EPERM":
-			case "EACCES":
-				userMessage = userMessage ?? `Permission denied: ${filePath}`;
-				detailedMessage = `Permission/Access denied for ${filePath}. Operation: ${operationDescription}.`;
+			case FileSystemErrorCode.AccessDenied:
+			case FileSystemErrorCode.Permission:
+				userMsg ??= `Permission denied: ${path}`;
 				break;
-			case "EISDIR":
-				userMessage =
-					userMessage ?? `Expected a file but found a directory: ${filePath}`;
-				detailedMessage = `Path is a directory, but a file was expected: ${filePath}. Operation: ${operationDescription}.`;
+			case FileSystemErrorCode.IsDirectory:
+				userMsg ??= `Expected a file, found directory: ${path}`;
 				break;
-			case "ENOTDIR":
-				userMessage =
-					userMessage ?? `Expected a directory but found a file: ${filePath}`;
-				detailedMessage = `Path is a file, but a directory was expected: ${filePath}. Operation: ${operationDescription}.`;
+			case FileSystemErrorCode.NotDirectory:
+				userMsg ??= `Expected a directory, found file: ${path}`;
 				break;
 		}
 	}
 
-	userMessage =
-		userMessage ??
-		`Failed to ${operationDescription} ${filePath}. Check console.`;
+	userMsg ??= `Failed to ${operation} – see console for details.`;
 
-	devError(detailedMessage, baseError.stack);
-	new Notice(userMessage, 7000);
+	logger.error(logMsg, err.stack);
+	new Notice(userMsg, 7_000);
 
 	if (shouldThrow) {
 		throw new Error(
-			`Operation failed: ${operationDescription} for ${filePath}. Reason: ${baseError.message}`,
+			`Operation failed (${operation}) on ${path}: ${err.message}`,
 		);
 	}
-	return baseError;
+	return err;
 }

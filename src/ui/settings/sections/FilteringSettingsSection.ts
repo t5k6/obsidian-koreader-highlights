@@ -1,38 +1,32 @@
-import { Setting } from "obsidian";
+import { stringArraySetting } from "../SettingHelpers";
 import { SettingsSection } from "../SettingsSection";
 
 export class FilteringSettingsSection extends SettingsSection {
 	protected renderContent(containerEl: HTMLElement): void {
-		new Setting(containerEl)
-			.setName("Excluded folders")
-			.setDesc("Comma-separated list of folder names to ignore during scans.")
-			.addTextArea((txt) =>
-				txt
-					.setValue(this.plugin.settings.excludedFolders.join(", "))
-					.setPlaceholder(".git, .stfolder, $RECYCLE.BIN")
-					.onChange((v) => {
-						this.plugin.settings.excludedFolders = v
-							.split(",")
-							.map((s) => s.trim())
-							.filter(Boolean);
-						this.debouncedSave();
-					}),
-			);
+		const [, excludedFoldersComponent] = stringArraySetting(
+			containerEl,
+			"Excluded folders",
+			"Comma-separated list of folder names to ignore during scans.",
+			() => this.plugin.settings.excludedFolders,
+			(value) => {
+				this.plugin.settings.excludedFolders = value;
+				this.debouncedSave();
+			},
+		);
+		excludedFoldersComponent.setPlaceholder(".git, .stfolder");
 
-		new Setting(containerEl)
-			.setName("Allowed file types")
-			.setDesc("Process highlights for these book types only (empty = all).")
-			.addText((txt) =>
-				txt
-					.setValue(this.plugin.settings.allowedFileTypes.join(", "))
-					.setPlaceholder("epub, pdf, mobi")
-					.onChange((v) => {
-						this.plugin.settings.allowedFileTypes = v
-							.split(",")
-							.map((s) => s.trim().toLowerCase())
-							.filter(Boolean);
-						this.debouncedSave();
-					}),
-			);
+		const [, allowedTypesComponent] = stringArraySetting(
+			containerEl,
+			"Allowed file types",
+			"Process highlights for these book types only (empty = all).",
+			() => this.plugin.settings.allowedFileTypes,
+			(value) => {
+				this.plugin.settings.allowedFileTypes = value.map((v) =>
+					v.toLowerCase(),
+				);
+				this.debouncedSave();
+			},
+		);
+		allowedTypesComponent.setPlaceholder("epub, pdf, mobi");
 	}
 }

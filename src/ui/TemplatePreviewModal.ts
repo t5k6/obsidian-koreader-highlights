@@ -3,7 +3,7 @@ import type {
 	CompiledTemplate,
 	TemplateManager,
 } from "src/services/TemplateManager";
-import type { Annotation, TemplateDefinition } from "src/types";
+import type { Annotation, TemplateDefinition } from "../types";
 
 const EXAMPLE_ANNOTATION_GROUP: Annotation[] = [
 	{

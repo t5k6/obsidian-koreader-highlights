@@ -1,54 +1,55 @@
-import type { Annotation } from "src/types";
+import type { Annotation } from "../types";
 
-export function extractHighlights(content: string): Annotation[] {
-	const highlights: Annotation[] = [];
-	let currentChapter = "";
+const KOHL_MARKER_REGEX = /<!--\s*KOHL\s*({.*?})\s*-->/g;
 
-	// A pattern that identifies a highlight block, starting with the metadata.
-	const highlightBlockRegex =
-		/\(\*Date:\s*(.+?)\s*-\s*Page:\s*(.+?)\s*\*\)\r?\n([\s\S]*?)(?=---|$)/g;
+function safeParseJson(json: string): any | null {
+	try {
+		return JSON.parse(json);
+	} catch {
+		return null;
+	}
+}
 
-	const lines = content.split(/\r?\n/);
-	let blockContent = "";
+function splitTextAndNote(block: string): { text: string; note?: string } {
+	const lines = block.split(/\r?\n/);
+	const noteIndex = lines.findIndex((l) => l.trim().startsWith(">"));
+	if (noteIndex === -1) return { text: block };
+	const text = lines.slice(0, noteIndex).join("\n").trim();
+	const note = lines
+		.slice(noteIndex)
+		.map((l) => l.replace(/^\s*>?\s*/, ""))
+		.join("\n")
+		.trim();
+	return { text, note };
+}
 
-	// First, find all chapter definitions and their line numbers.
-	const chapterDeclarations = new Map<number, string>();
-	lines.forEach((line, index) => {
-		const chapterMatch = line.match(/^### Chapter:\s*(.+)/);
-		if (chapterMatch) {
-			chapterDeclarations.set(index, chapterMatch[1].trim());
-		}
-	});
+export function extractHighlights(md: string): Annotation[] {
+	const annotations: Annotation[] = [];
+	const matches = Array.from(md.matchAll(KOHL_MARKER_REGEX));
 
-	const matches = content.matchAll(highlightBlockRegex);
-
-	for (const match of matches) {
-		// Find the line number where this match starts.
-		const matchIndex = match.index ?? 0;
-		const contentUpToMatch = content.substring(0, matchIndex);
-		const startLine = contentUpToMatch.split(/\r?\n/).length - 1;
-
-		// Determine the current chapter based on the match's position.
-		let chapterForThisHighlight = "";
-		// Find the most recent chapter declaration that occurred *before* this highlight.
-		for (const [lineNum, chapterName] of chapterDeclarations.entries()) {
-			if (lineNum < startLine) {
-				chapterForThisHighlight = chapterName;
-			} else {
-				break; // Stop once we pass the highlight's position
-			}
-		}
-
-		const [, datetime, pageStr, textBlock] = match;
-		const pageNum = Number.parseInt(pageStr, 10);
-
-		highlights.push({
-			chapter: chapterForThisHighlight,
-			datetime: datetime.trim(),
-			pageno: Number.isFinite(pageNum) ? pageNum : 0,
-			text: textBlock.trim(),
-		});
+	if (matches.length === 0) {
+		return [];
 	}
 
-	return highlights;
+	for (let i = 0; i < matches.length; i++) {
+		const match = matches[i];
+		const meta = safeParseJson(match[1]);
+		if (!meta || !meta.id) continue;
+
+		const startPos = match.index! + match[0].length;
+		const endPos = matches[i + 1] ? matches[i + 1].index! : md.length;
+		const visibleText = md.slice(startPos, endPos).trim();
+		const { text, note } = splitTextAndNote(visibleText);
+
+		annotations.push({
+			id: meta.id,
+			pageno: meta.p,
+			pos0: meta.pos0,
+			pos1: meta.pos1,
+			datetime: meta.t,
+			text: text,
+			note: note,
+		});
+	}
+	return annotations;
 }

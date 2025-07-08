@@ -3,31 +3,29 @@ import { access, stat as fsStat, opendir, readFile } from "node:fs/promises";
 import { platform } from "node:os";
 import { join as joinPath } from "node:path";
 import { Notice } from "obsidian";
-import type KoreaderImporterPlugin from "../core/KoreaderImporterPlugin";
-import { handleFileSystemError } from "../utils/fileUtils";
-import { devLog, devWarn } from "../utils/logging";
+import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import { ConcurrencyLimiter } from "src/utils/concurrency";
+import { handleFileSystemError } from "src/utils/fileUtils";
+import { logger } from "src/utils/logging";
+
+/* ------------------------------------------------------------------ */
+/*                              CONSTS                                */
+/* ------------------------------------------------------------------ */
 
 const SDR_SUFFIX = ".sdr";
 const METADATA_REGEX = /^metadata\.(.+)\.lua$/i;
 const MAX_PARALLEL_IO = 64;
 
-function limit(capacity = MAX_PARALLEL_IO) {
-	let active = 0;
-	const queue: (() => void)[] = [];
+/* ------------------------------------------------------------------ */
+/*                 Simple concurrency limiter (generic)               */
+/* ------------------------------------------------------------------ */
 
-	return async <T>(task: () => Promise<T>): Promise<T> => {
-		// generic here
-		if (active >= capacity) await new Promise<void>((r) => queue.push(r));
-		active++;
-		try {
-			return await task();
-		} finally {
-			active--;
-			if (queue.length) queue.shift()!();
-		}
-	};
-}
-const io = limit();
+const ioLimiter = new ConcurrencyLimiter(MAX_PARALLEL_IO);
+const io = <T>(fn: () => Promise<T>) => ioLimiter.schedule(fn);
+
+/* ------------------------------------------------------------------ */
+/*                            MAIN CLASS                              */
+/* ------------------------------------------------------------------ */
 
 export class SDRFinder {
 	private sdrDirCache = new Map<string, Promise<string[]>>();
@@ -38,6 +36,8 @@ export class SDRFinder {
 		this.updateCacheKey();
 	}
 
+	/* -------------------------- Public ----------------------------- */
+
 	updateSettings(): void {
 		const prevKey = this.cacheKey;
 		this.updateCacheKey();
@@ -45,13 +45,11 @@ export class SDRFinder {
 	}
 
 	async *iterSdrDirectories(): AsyncGenerator<string> {
-		const all = await this.findSdrDirectoriesWithMetadata();
-		for (const path of all) yield path;
+		for (const dir of await this.findSdrDirectoriesWithMetadata()) yield dir;
 	}
 
 	async findSdrDirectoriesWithMetadata(): Promise<string[]> {
 		if (!this.cacheKey) return [];
-
 		let inFlight = this.sdrDirCache.get(this.cacheKey);
 		if (!inFlight) {
 			inFlight = this.scan();
@@ -66,12 +64,10 @@ export class SDRFinder {
 
 		const full = joinPath(sdrDir, name);
 		try {
-			devLog("Reading metadata:", full);
+			logger.info("SDRFinder: Reading metadata:", full);
 			return await readFile(full, "utf-8");
 		} catch (err) {
-			handleFileSystemError("reading metadata file", full, err, {
-				shouldThrow: false,
-			});
+			handleFileSystemError("reading metadata file", full, err);
 			return null;
 		}
 	}
@@ -79,31 +75,35 @@ export class SDRFinder {
 	clearCache(): void {
 		this.sdrDirCache.clear();
 		this.metadataNameCache.clear();
-		devLog("SDRFinder: caches cleared");
+		logger.info("SDRFinder: caches cleared");
 	}
 
+	/* ------------------------- Private ----------------------------- */
+
 	private updateCacheKey(): void {
-		const settings = this.plugin.settings;
-		this.cacheKey =
-			`${settings.koboMountPoint ?? "nokey"}::` +
-			`${settings.excludedFolders.join(",").toLowerCase()}::` +
-			`${settings.allowedFileTypes.join(",").toLowerCase()}`;
+		const { koreaderMountPoint, excludedFolders, allowedFileTypes } =
+			this.plugin.settings;
+		this.cacheKey = [
+			koreaderMountPoint ?? "nokey",
+			...excludedFolders.map((s) => s.toLowerCase()),
+			...allowedFileTypes.map((s) => s.toLowerCase()),
+		].join("::");
 	}
 
 	private async scan(): Promise<string[]> {
 		if (!(await this.checkMountPoint())) return [];
 
-		const settings = this.plugin.settings;
-		const root = settings.koboMountPoint!;
+		const { koreaderMountPoint, excludedFolders } = this.plugin.settings;
+		const root = koreaderMountPoint!;
 		const excluded = new Set(
-			settings.excludedFolders
-				.map((f) => f.trim().toLowerCase())
-				.filter(Boolean),
+			excludedFolders.map((e) => e.trim().toLowerCase()),
 		);
 
 		const results: string[] = [];
 		await this.walk(root, excluded, results);
-		devLog(`SDR scan finished. Found ${results.length} valid directories.`);
+		logger.info(
+			`SDRFinder: Scan finished. Found ${results.length} valid SDR directories.`,
+		);
 		return results;
 	}
 
@@ -113,22 +113,21 @@ export class SDRFinder {
 		out: string[],
 	): Promise<void> {
 		try {
-			const dh: Dir = await io(() => opendir(dir)); // <- Dir, never undefined
+			const dh: Dir = await io(() => opendir(dir));
 			try {
-				for await (const entry of dh) {
-					if (excluded.has(entry.name.toLowerCase())) continue;
+				for await (const e of dh) {
+					const path = joinPath(dir, e.name);
+					if (!e.isDirectory()) continue;
+					if (excluded.has(e.name.toLowerCase())) continue;
 
-					const path = joinPath(dir, entry.name);
-					if (!entry.isDirectory()) continue;
-
-					if (entry.name.endsWith(SDR_SUFFIX)) {
+					if (e.name.endsWith(SDR_SUFFIX)) {
 						if (await this.getMetadataFileName(path)) {
 							out.push(path);
-							continue; // don't recurse into *.sdr
+							continue; // do not recurse into *.sdr
 						}
 					}
 
-					if (!entry.name.startsWith(".") && entry.name !== "$RECYCLE.BIN") {
+					if (!e.name.startsWith(".") && e.name !== "$RECYCLE.BIN") {
 						await this.walk(path, excluded, out);
 					}
 				}
@@ -136,9 +135,7 @@ export class SDRFinder {
 				await dh.close().catch(() => {});
 			}
 		} catch (err) {
-			handleFileSystemError("reading directory", dir, err, {
-				shouldThrow: false,
-			});
+			handleFileSystemError("reading directory", dir, err);
 		}
 	}
 
@@ -146,11 +143,11 @@ export class SDRFinder {
 		const cached = this.metadataNameCache.get(dir);
 		if (cached !== undefined) return cached;
 
-		const settings = this.plugin.settings;
-		const allow = settings.allowedFileTypes
-			.map((t) => t.trim().toLowerCase())
-			.filter(Boolean);
-		const allowAll = allow.length === 0;
+		const { allowedFileTypes } = this.plugin.settings;
+		const allow = new Set(
+			allowedFileTypes.map((t) => t.trim().toLowerCase()).filter(Boolean),
+		);
+		const allowAll = allow.size === 0;
 
 		let dh: Dir | undefined;
 		try {
@@ -161,16 +158,13 @@ export class SDRFinder {
 				if (!m) continue;
 
 				const ext = m[1]?.toLowerCase();
-				if (allowAll || allow.includes(ext)) {
+				if (allowAll || allow.has(ext)) {
 					this.metadataNameCache.set(dir, entry.name);
-					// Return inside the finally block after closing the handle.
 					return entry.name;
 				}
 			}
 		} catch (err) {
-			handleFileSystemError("reading SDR directory", dir, err, {
-				shouldThrow: false,
-			});
+			handleFileSystemError("reading SDR directory", dir, err);
 		} finally {
 			await dh?.close().catch(() => {});
 		}
@@ -179,35 +173,35 @@ export class SDRFinder {
 		return null;
 	}
 
-	async checkMountPoint(): Promise<boolean> {
-		const settings = this.plugin.settings;
-		const mp = settings.koboMountPoint;
-		if (mp && (await this.isUsableDir(mp))) return true;
+	/* ---------- mount-point handling / auto-detect ----------------- */
 
-		devWarn("Mount point not accessible – attempting auto-detect");
+	async checkMountPoint(): Promise<boolean> {
+		const { koreaderMountPoint } = this.plugin.settings;
+		if (koreaderMountPoint && (await this.isUsableDir(koreaderMountPoint)))
+			return true;
+
+		logger.warn(
+			"SDRFinder: Configured mount point not accessible – attempting auto-detect.",
+		);
 
 		for (const candidate of await this.detectCandidates()) {
 			if (await this.isUsableDir(candidate)) {
-				// Directly modify the settings on the plugin instance
-				this.plugin.settings.koboMountPoint = candidate;
-				new Notice(`KOReader: auto-detected device at "${candidate}"`, 5000);
-				devLog("Using auto-detected mount point:", candidate);
+				this.plugin.settings.koreaderMountPoint = candidate;
+				new Notice(`KOReader: auto-detected device at "${candidate}"`, 5_000);
+				logger.info("Using auto-detected mount point:", candidate);
 				this.updateCacheKey();
 				return true;
 			}
 		}
-
-		new Notice(
-			"KOReader Importer: Kobo device not found – please check the path in settings.",
-			7000,
+		logger.warn(
+			"SDRFinder: Failed to find or access any KOReader mount point.",
 		);
 		return false;
 	}
 
 	private async isUsableDir(p: string): Promise<boolean> {
 		try {
-			const st = await fsStat(p);
-			return st.isDirectory();
+			return (await fsStat(p)).isDirectory();
 		} catch {
 			return false;
 		}

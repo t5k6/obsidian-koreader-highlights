@@ -1,11 +1,11 @@
 import { type App, Notice, TFile } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
-import { ProgressModal } from "../ui/ProgressModal";
+import { ProgressModal } from "src/ui/ProgressModal";
 import {
 	ensureParentDirectory,
 	generateUniqueFilePath,
-} from "../utils/fileUtils";
-import { devError, devLog } from "../utils/logging";
+} from "src/utils/fileUtils";
+import { logger } from "src/utils/logging";
 import type { SDRFinder } from "./SDRFinder";
 
 export class ScanManager {
@@ -18,7 +18,7 @@ export class ScanManager {
 	) {}
 
 	async scanForHighlights(): Promise<void> {
-		devLog("Starting KOReader SDR scan process...");
+		logger.info("ScanManager: Starting KOReader SDR scan process...");
 
 		const modal = new ProgressModal(this.app);
 		modal.open();
@@ -32,13 +32,15 @@ export class ScanManager {
 				new Notice(
 					"Scan complete: No KOReader highlight files (.sdr directories with metadata.lua) found.",
 				);
-				devLog("Scan complete: No SDR files found.");
+				logger.info("ScanManager: Scan complete. No SDR files found.");
 				modal.close();
 				await this.createOrUpdateScanNote([]);
 				return;
 			}
 
-			devLog(`Scan found ${sdrFilePaths.length} SDR files.`);
+			logger.info(
+				`ScanManager: Scan found ${sdrFilePaths.length} SDR directories.`,
+			);
 			modal.statusEl.setText(
 				`Found ${sdrFilePaths.length} files. Generating report...`,
 			);
@@ -48,9 +50,9 @@ export class ScanManager {
 			new Notice(
 				`Scan complete: Report saved to "${ScanManager.SCAN_REPORT_FILENAME}"`,
 			);
-			devLog("Scan process finished successfully.");
+			logger.info("ScanManager: Scan process finished successfully.");
 		} catch (error) {
-			devError("Error during SDR scan process:", error);
+			logger.error("ScanManager: Error during SDR scan process:", error);
 			new Notice(
 				"KOReader Importer: Error during scan. Check console for details.",
 			);
@@ -75,15 +77,19 @@ export class ScanManager {
 				this.app.vault.getAbstractFileByPath(uniqueReportPath);
 
 			if (existingReportFile instanceof TFile) {
-				devLog(`Updating existing scan report: ${uniqueReportPath}`);
+				logger.info(
+					`ScanManager: Updating existing scan report: ${uniqueReportPath}`,
+				);
 				await this.app.vault.modify(existingReportFile, reportContent);
 			} else {
-				devLog(`Creating new scan report: ${uniqueReportPath}`);
+				logger.info(
+					`ScanManager: Creating new scan report: ${uniqueReportPath}`,
+				);
 				await this.app.vault.create(uniqueReportPath, reportContent);
 			}
 		} catch (error) {
-			devError(
-				`Error creating/updating scan report note at ${uniqueReportPath}:`,
+			logger.error(
+				`ScanManager: Error creating/updating scan report note at ${uniqueReportPath}:`,
 				error,
 			);
 			new Notice("Failed to save scan report note.");
@@ -95,7 +101,7 @@ export class ScanManager {
 		const timestamp = new Date().toLocaleString();
 		let content = "# KOReader SDR Scan Report\n\n";
 		content += `*Scan performed on: ${timestamp}*\n`;
-		content += `*Mount Point: ${this.plugin.settings.koboMountPoint}*\n\n`;
+		content += `*Mount Point: ${this.plugin.settings.koreaderMountPoint}*\n\n`;
 
 		if (sdrFilePaths.length === 0) {
 			content +=
@@ -105,7 +111,7 @@ export class ScanManager {
 			content += sdrFilePaths
 				.map(
 					(filePath) =>
-						`- \`${filePath.replace(this.plugin.settings.koboMountPoint, "")}\``,
+						`- \`${filePath.replace(this.plugin.settings.koreaderMountPoint, "")}\``,
 				) // Show relative path from mount point
 				.join("\n");
 		}

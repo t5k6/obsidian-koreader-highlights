@@ -11,10 +11,12 @@ export class DuplicateHandlingModal
 {
 	private choice: DuplicateChoice | null = "skip";
 	private applyToAll = false;
+
 	private resolvePromise:
 		| ((value: { choice: DuplicateChoice | null; applyToAll: boolean }) => void)
 		| null = null;
-	private boundKeydownHandler: (event: KeyboardEvent) => void; // Add bound handler reference
+
+	private readonly boundKeydownHandler: (event: KeyboardEvent) => void;
 
 	constructor(
 		app: App,
@@ -23,8 +25,12 @@ export class DuplicateHandlingModal
 		private title = "Duplicate Highlights Found",
 	) {
 		super(app);
-		this.boundKeydownHandler = this.handleKeydown.bind(this); // Bind once in constructor
+		this.boundKeydownHandler = this.handleKeydown.bind(this);
 	}
+
+	/* ------------------------------------------------------------------ */
+	/*                             PUBLIC API                             */
+	/* ------------------------------------------------------------------ */
 
 	async openAndGetChoice(): Promise<{
 		choice: DuplicateChoice | null;
@@ -36,192 +42,175 @@ export class DuplicateHandlingModal
 		});
 	}
 
+	/* ------------------------------------------------------------------ */
+	/*                                UI                                  */
+	/* ------------------------------------------------------------------ */
+
 	onOpen() {
 		const { contentEl } = this;
 		contentEl.empty();
-		contentEl.setAttribute("role", "dialog"); 
-		contentEl.setAttribute("aria-labelledby", "modal-title");
 
-		// Add main container with max width
+		// split into two calls; no chaining after .empty()
+		contentEl.setAttr("role", "dialog");
+		contentEl.setAttr("aria-labelledby", "modal-title");
+
 		const container = contentEl.createDiv({
 			cls: "duplicate-modal-container",
 			attr: { "aria-modal": "true" },
 		});
 
-		// Header section
-		const headerEl = container.createDiv({ cls: "duplicate-modal-header" });
-		headerEl.createEl("h2", {
-			text: this.title,
-			attr: { id: "modal-title" }, 
-		});
-
-		// Add match type badge
-		const badgeEl = headerEl.createEl("span", {
+		/* ---------- header ---------- */
+		const headerEl = container.createDiv("duplicate-modal-header");
+		headerEl.createEl("h2", { text: this.title, attr: { id: "modal-title" } });
+		headerEl.createEl("span", {
 			cls: `duplicate-badge duplicate-badge-${this.match.matchType}`,
 			text: this.getMatchTypeLabel(),
 		});
 
-		// Message and file path
-		const messageEl = container.createDiv({ cls: "duplicate-message" });
-		messageEl.createEl("p", { text: this.message });
+		/* ---------- message + file ---------- */
+		const msg = container.createDiv("duplicate-message");
+		msg.createEl("p", { text: this.message });
 
-		const filePathEl = messageEl.createDiv({ cls: "duplicate-file-path" });
-		setIcon(filePathEl.createSpan(), "file-text");
-		filePathEl.createSpan({ text: this.match.file.path });
+		const pathLine = msg.createDiv("duplicate-file-path");
+		setIcon(pathLine.createSpan(), "file-text");
+		pathLine.createSpan({ text: this.match.file.path });
 
-		// Statistics section
+		/* ---------- stats ---------- */
 		if (this.match.matchType !== "exact") {
-			const statsEl = container.createDiv({ cls: "duplicate-stats" });
-
-			const createStatItem = (icon: string, label: string, value: number) => {
-				const statItem = statsEl.createDiv({ cls: "stat-item" });
-				setIcon(statItem.createSpan({ cls: "stat-icon" }), icon);
-				statItem.createSpan({ text: label });
-				statItem.createSpan({
-					cls: "stat-value",
-					text: value.toString(),
-				});
+			const stats = container.createDiv("duplicate-stats");
+			const add = (icon: string, label: string, val: number) => {
+				const s = stats.createDiv("stat-item");
+				setIcon(s.createSpan("stat-icon"), icon);
+				s.createSpan({ text: label });
+				s.createSpan({ cls: "stat-value", text: val.toString() });
 			};
-
-			createStatItem(
-				"plus-circle",
-				"New highlights:",
-				this.match.newHighlights,
-			);
-			createStatItem(
-				"edit",
-				"Modified highlights:",
-				this.match.modifiedHighlights,
-			);
+			add("plus-circle", "New highlights:", this.match.newHighlights);
+			add("edit", "Modified highlights:", this.match.modifiedHighlights);
 		}
 
-		// Apply to all setting
-		const settingsEl = container.createDiv({ cls: "duplicate-settings" });
+		/* ---------- toggle ---------- */
+		const settingsEl = container.createDiv("duplicate-settings");
 		new Setting(settingsEl)
 			.setName("Apply to all remaining items")
 			.setDesc("Use the same action for all subsequent duplicates")
-			.addToggle((toggle) => {
-				toggle.setValue(this.applyToAll).onChange((value) => {
-					this.applyToAll = value;
-				});
-			});
+			.addToggle((toggle) =>
+				toggle.setValue(this.applyToAll).onChange((v) => {
+					this.applyToAll = v; // keep local state in sync
+				}),
+			);
 
-		// Action buttons
-		this.createActionButtons(container);
+		/* ---------- buttons ---------- */
+		this.createActionButtons(container, this.match.canMergeSafely);
 
-		// Keyboard shortcuts help
-		const shortcutsEl = container.createDiv({ cls: "duplicate-shortcuts" });
-		shortcutsEl.createEl("span", { text: "Shortcuts: " });
-		shortcutsEl.createEl("kbd", { text: "Enter" });
-		shortcutsEl.createSpan({ text: " to Replace, " });
-		shortcutsEl.createEl("kbd", { text: "Esc" });
-		shortcutsEl.createSpan({ text: " to Skip" });
+		/* ---------- shortcuts help ---------- */
+		const shortcuts = container.createDiv("duplicate-shortcuts");
+		shortcuts.createSpan({ text: "Shortcuts: " });
+		shortcuts.createEl("kbd", { text: "Enter" });
+		shortcuts.createSpan({ text: " to Replace, " });
+		shortcuts.createEl("kbd", { text: "Esc" });
+		shortcuts.createSpan({ text: " to Skip" });
 
-		contentEl.addEventListener("keydown", this.boundKeydownHandler); // Use stored reference
-
+		contentEl.addEventListener("keydown", this.boundKeydownHandler);
 		container.focus();
 	}
 
-	private getMatchTypeLabel(): string {
-		const labels = {
-			exact: "Exact Match",
-			updated: "Updated Content",
-			divergent: "Content Differs",
-		};
-		return labels[this.match.matchType];
-	}
+	private createActionButtons(container: HTMLElement, canMergeSafely: boolean) {
+		const wrap = container.createDiv("duplicate-buttons");
 
-	private createActionButtons(container: HTMLElement) {
-		const buttonContainer = container.createDiv({
-			cls: "duplicate-buttons",
-		});
-
-		const createButton = (
+		const mk = (
 			text: string,
 			choice: DuplicateChoice,
 			icon: string,
-			options: {
+			opts: {
 				warning?: boolean;
 				disabled?: boolean;
 				tooltip?: string;
 				primary?: boolean;
 			} = {},
 		) => {
-			const buttonEl = buttonContainer.createDiv({
-				cls: "button-container",
-			});
-			const button = new ButtonComponent(buttonEl)
+			const holder = wrap.createDiv("button-container");
+			const btn = new ButtonComponent(holder)
 				.setButtonText(text)
 				.onClick(() => this.handleChoice(choice));
 
-			const iconSpan = button.buttonEl.createSpan({ cls: "button-icon" });
-			setIcon(iconSpan, icon);
-			iconSpan.style.marginLeft = "4px";
+			const ic = btn.buttonEl.createSpan("button-icon");
+			setIcon(ic, icon);
+			ic.style.marginLeft = "4px";
 
-			if (options.warning) button.setClass("mod-warning");
-			if (options.disabled) {
-				button.setDisabled(true);
-				if (options.tooltip) button.setTooltip(options.tooltip);
+			if (opts.warning) btn.setClass("mod-warning");
+			if (opts.disabled) {
+				btn.setDisabled(true);
+				opts.tooltip && btn.setTooltip(opts.tooltip);
 			}
-			if (options.primary) button.setCta();
+			if (opts.primary) btn.setCta();
 		};
 
-		createButton("Replace ", "replace", "replace-all", {
+		mk("Replace ", "replace", "replace-all", {
 			warning: this.match.matchType === "exact",
-			tooltip:
-				"Replace the existing file with the new one. This will overwrite all existing content in the file.",
+			tooltip: "Replace the existing file with the new one (overwrite).",
+		});
+		const isMergeDisabled = this.match.matchType === "exact" || !canMergeSafely;
+		let mergeTooltip = "Merge new highlights with existing content.";
+		if (this.match.matchType === "exact") {
+			mergeTooltip = "No new content to merge.";
+		} else if (!canMergeSafely) {
+			mergeTooltip =
+				"Cannot merge safely – no snapshot exists for a 3-way merge.";
+		}
+
+		mk("Merge ", "merge", "git-merge", {
+			disabled: isMergeDisabled,
+			tooltip: mergeTooltip,
 		});
 
-		createButton("Merge ", "merge", "git-merge", {
-			disabled: this.match.matchType === "exact",
-			tooltip:
-				this.match.matchType === "exact"
-					? "No new content to merge"
-					: "Merge new highlights with existing content while preserving existing notes",
+		mk("Keep Both ", "keep-both", "copy", {
+			tooltip: "Create a new file and keep the original.",
 		});
 
-		createButton("Keep Both ", "keep-both", "copy", {
-			tooltip:
-				"Create a new file for the imported highlights and retain the original. Useful when you want to keep both versions.",
-		});
-
-		createButton("Skip ", "skip", "x", {
+		mk("Skip ", "skip", "x", {
 			primary: true,
-			tooltip: "Skip importing this file and leave the existing one unchanged",
+			tooltip: "Skip importing this file.",
 		});
 	}
+
+	/* ------------------------------------------------------------------ */
+	/*                           EVENT HANDLERS                           */
+	/* ------------------------------------------------------------------ */
 
 	private handleChoice(choice: DuplicateChoice) {
 		this.choice = choice;
+		// this.applyToAll already reflects the toggle's latest state
 		this.closeModal();
 	}
 
+	private handleKeydown(e: KeyboardEvent) {
+		if (e.key === "Escape") this.handleChoice("skip");
+		else if (e.key === "Enter") this.handleChoice("replace");
+	}
+
 	private closeModal() {
-		if (this.resolvePromise) {
-			this.resolvePromise({
-				choice: this.choice,
-				applyToAll: this.applyToAll,
-			});
-			this.resolvePromise = null;
-		}
+		this.resolvePromise?.({ choice: this.choice, applyToAll: this.applyToAll });
+		this.resolvePromise = null;
 		this.close();
 	}
 
-	private handleKeydown(event: KeyboardEvent) {
-		if (event.key === "Escape") {
-			this.handleChoice("skip");
-		} else if (event.key === "Enter") {
-			this.handleChoice("replace");
-		}
+	onClose() {
+		this.contentEl.empty();
+		this.contentEl.removeEventListener("keydown", this.boundKeydownHandler);
+		// ensure promise resolves if closed externally
+		this.resolvePromise?.({ choice: "skip", applyToAll: false });
+		this.resolvePromise = null;
 	}
 
-	onClose() {
-		const { contentEl } = this;
-		contentEl.empty();
-		contentEl.removeEventListener("keydown", this.boundKeydownHandler); // Remove using same reference
-		if (this.resolvePromise) {
-			this.resolvePromise({ choice: "skip", applyToAll: false });
-			this.resolvePromise = null;
-		}
+	/* ------------------------------------------------------------------ */
+	/*                             helpers                                */
+	/* ------------------------------------------------------------------ */
+
+	private getMatchTypeLabel(): string {
+		return {
+			exact: "Exact Match",
+			updated: "Updated Content",
+			divergent: "Content Differs",
+		}[this.match.matchType];
 	}
 }

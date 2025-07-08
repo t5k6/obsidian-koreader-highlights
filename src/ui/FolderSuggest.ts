@@ -1,4 +1,5 @@
 import { AbstractInputSuggest, type App, debounce, TFolder } from "obsidian";
+import { logger } from "src/utils/logging";
 
 export class FolderSuggest extends AbstractInputSuggest<string> {
 	private folderCache: string[] = [];
@@ -15,14 +16,15 @@ export class FolderSuggest extends AbstractInputSuggest<string> {
 	// Debounced refresh to avoid performance issues on rapid file changes.
 	public refreshCache = debounce(
 		() => {
+			logger.info("FolderSuggest: Refreshing folder cache.");
 			this.folderCache = this.app.vault
 				.getAllLoadedFiles()
 				.filter((file): file is TFolder => file instanceof TFolder)
 				.map((folder) => folder.path)
 				.sort();
 		},
-		250,
-		true,
+		250, // Debounce delay of 250ms.
+		true, // Immediate execution on first call.
 	);
 
 	getSuggestions(query: string): string[] {

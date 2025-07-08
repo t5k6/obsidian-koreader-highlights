@@ -4,6 +4,7 @@ import type { TemplateManager } from "src/services/TemplateManager";
 import type { TemplateDefinition } from "src/types";
 import { FolderSuggest } from "src/ui/FolderSuggest";
 import { TemplatePreviewModal } from "src/ui/TemplatePreviewModal";
+import { booleanSetting } from "../SettingHelpers";
 import { SettingsSection } from "../SettingsSection";
 
 const DEFAULT_TEMPLATE_DIR = "Koreader/templates";
@@ -23,18 +24,18 @@ export class TemplateSettingsSection extends SettingsSection {
 	}
 
 	protected renderContent(containerEl: HTMLElement): void {
-		new Setting(containerEl)
-			.setName("Use custom template")
-			.setDesc("Override default formatting for highlight notes.")
-			.addToggle((toggle) => {
-				toggle
-					.setValue(this.plugin.settings.template.useCustomTemplate)
-					.onChange(async (value) => {
-						this.plugin.settings.template.useCustomTemplate = value;
-						await this.plugin.saveSettings();
-						this.plugin.settingTab.display();
-					});
-			});
+		booleanSetting(
+			containerEl,
+			"Use custom template",
+			"Override default formatting for highlight notes.",
+			() => this.plugin.settings.template.useCustomTemplate,
+			async (value) => {
+				this.plugin.settings.template.useCustomTemplate = value;
+				await this.plugin.saveSettings();
+				// Re-render the entire settings tab to show/hide dependent settings
+				this.plugin.settingTab.display();
+			},
+		);
 
 		this.addTemplateSelector(containerEl);
 	}

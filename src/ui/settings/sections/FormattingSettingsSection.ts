@@ -1,58 +1,57 @@
 import { Setting } from "obsidian";
-import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import { FrontmatterFieldModal } from "src/ui/FrontmatterFieldModal";
+import { booleanSetting } from "../SettingHelpers";
 import { SettingsSection } from "../SettingsSection";
 
-class FrontmatterFieldSetting {
-	constructor(containerEl: HTMLElement, plugin: KoreaderImporterPlugin) {
+export class FormattingSettingsSection extends SettingsSection {
+	protected renderContent(containerEl: HTMLElement): void {
 		new Setting(containerEl)
 			.setName("Frontmatter fields")
 			.setDesc("Choose which standard fields to EXCLUDE from frontmatter.")
 			.addButton((btn) =>
 				btn.setButtonText("Manage Fields").onClick(() =>
 					new FrontmatterFieldModal(
-						plugin.app,
-						plugin.settings.frontmatter,
+						this.app,
+						this.plugin.settings.frontmatter,
 						(updated) => {
-							plugin.settings.frontmatter = updated;
-							plugin.saveSettings();
+							this.plugin.settings.frontmatter = updated;
+							this.plugin.saveSettings();
 						},
 					).open(),
 				),
 			);
-	}
-}
 
-export class FormattingSettingsSection extends SettingsSection {
-	protected renderContent(containerEl: HTMLElement): void {
-		new FrontmatterFieldSetting(containerEl, this.plugin);
-		
-		new Setting(containerEl)
-			.setName("Auto-merge on addition")
-			.setDesc(
-				"Automatically merge imports if they only add new highlights, without showing the duplicate dialog.",
-			)
-			.addToggle((tgl) =>
-				tgl
-					.setValue(this.plugin.settings.autoMergeOnAddition)
-					.onChange(async (v) => {
-						this.plugin.settings.autoMergeOnAddition = v;
-						await this.plugin.saveSettings();
-					}),
-			);
+		booleanSetting(
+			containerEl,
+			"Auto-merge on addition",
+			"Automatically merge imports if they only add new highlights, without showing the duplicate dialog.",
+			() => this.plugin.settings.autoMergeOnAddition,
+			async (value) => {
+				this.plugin.settings.autoMergeOnAddition = value;
+				await this.plugin.saveSettings();
+			},
+		);
 
-		new Setting(containerEl)
-			.setName("Enable full vault duplicate check")
-			.setDesc(
-				"Checks the entire vault for duplicates (slower). When off, only the highlights folder is scanned (faster).",
-			)
-			.addToggle((tgl) =>
-				tgl
-					.setValue(this.plugin.settings.enableFullDuplicateCheck)
-					.onChange(async (v) => {
-						this.plugin.settings.enableFullDuplicateCheck = v;
-						await this.plugin.saveSettings();
-					}),
-			);
+		booleanSetting(
+			containerEl,
+			"Enable full vault duplicate check",
+			"Checks the entire vault for duplicates (slower). When off, only the highlights folder is scanned (faster).",
+			() => this.plugin.settings.enableFullDuplicateCheck,
+			async (value) => {
+				this.plugin.settings.enableFullDuplicateCheck = value;
+				await this.plugin.saveSettings();
+			},
+		);
+
+		booleanSetting(
+			containerEl,
+			"Use 'Unknown Author' placeholder",
+			"When an author is not found, use 'Unknown Author' as a placeholder instead of omitting the field.",
+			() => this.plugin.settings.frontmatter.useUnknownAuthor,
+			async (value) => {
+				this.plugin.settings.frontmatter.useUnknownAuthor = value;
+				await this.plugin.saveSettings();
+			},
+		);
 	}
 }

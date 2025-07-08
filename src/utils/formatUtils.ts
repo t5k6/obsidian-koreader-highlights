@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { parse } from "node:path";
 import type { Annotation } from "../types";
-import { devWarn } from "./logging";
+import { logger } from "./logging";
 
 const DEFAULT_AUTHOR = "Unknown Author";
 const DEFAULT_TITLE = "Untitled";
@@ -70,24 +71,28 @@ export function generateObsidianFileName(
 			? simplifySdrName(sdrBaseName)
 			: DEFAULT_TITLE;
 		baseName = `${authorsString}${TITLE_SEPARATOR}${titleFallback}`;
-		devWarn(
-			`Using filename based on author and SDR/default title: ${baseName}`,
+		logger.warn(
+			`formatUtils: Using filename based on author and SDR/default title: ${baseName}`,
 		);
 	} else if (!isTitleEffectivelyMissing) {
 		// Case 3: Title is known, but author is missing.
 		baseName = normalizeFileNamePiece(effectiveTitle);
-		devWarn(`Using filename based on title (author missing): ${baseName}`);
+		logger.warn(
+			`formatUtils: Using filename based on title (author missing): ${baseName}`,
+		);
 	} else {
 		// Case 4: BOTH are missing. Use ONLY the original SDR name (skip docProps.authors entirely).
 		baseName = sdrBaseName ? simplifySdrName(sdrBaseName) : DEFAULT_TITLE;
-		devWarn(`Using cleaned SDR name (author/title missing): ${baseName}`);
+		logger.warn(
+			`formatUtils: Using cleaned SDR name (author/title missing): ${baseName}`,
+		);
 	}
 
 	// Final safety net: if baseName is somehow empty, use DEFAULT_TITLE.
 	if (!baseName?.trim()) {
 		baseName = DEFAULT_TITLE;
-		devWarn(
-			`Filename defaulted to "${DEFAULT_TITLE}" due to empty base after processing.`,
+		logger.warn(
+			`formatUtils: Filename defaulted to "${DEFAULT_TITLE}" due to empty base after processing.`,
 		);
 	}
 
@@ -96,8 +101,8 @@ export function generateObsidianFileName(
 		maxTotalPathLength - FOLDER_PATH_MARGIN - FILE_EXTENSION.length;
 
 	if (maxLengthForName <= 0) {
-		devWarn(
-			`highlightsFolder path is too long; falling back to default file name.`,
+		logger.warn(
+			`formatUtils: highlightsFolder path is too long; falling back to default file name "${DEFAULT_TITLE}${FILE_EXTENSION}".`,
 		);
 		return DEFAULT_TITLE + FILE_EXTENSION;
 	}
@@ -105,13 +110,13 @@ export function generateObsidianFileName(
 	let finalName = baseName;
 	if (baseName.length > maxLengthForName) {
 		finalName = baseName.slice(0, maxLengthForName);
-		devWarn(
-			`Filename truncated: "${baseName}${FILE_EXTENSION}" -> "${finalName}${FILE_EXTENSION}" due to path length constraints.`,
+		logger.warn(
+			`formatUtils: Filename truncated: "${baseName}${FILE_EXTENSION}" -> "${finalName}${FILE_EXTENSION}" due to path length constraints.`,
 		);
 	}
 
 	const fullPath = `${highlightsFolder}/${finalName}${FILE_EXTENSION}`;
-	devWarn(`Full path length: ${fullPath.length}, Path: ${fullPath}`);
+	logger.warn(`Full path length: ${fullPath.length}, Path: ${fullPath}`);
 
 	return `${finalName}${FILE_EXTENSION}`;
 }
@@ -177,7 +182,12 @@ export function simplifySdrName(raw: string, delimiter = " - "): string {
 		}
 	}
 
-	return tokens.join(delimiter) || "Untitled";
+	const finalName = tokens.join(delimiter);
+	// If the resulting name contains no letters or numbers, it's likely not a real title.
+	if (finalName && !/[a-zA-Z0-9]/.test(finalName)) {
+		return "Untitled";
+	}
+	return finalName || "Untitled";
 }
 
 export function normalizeFileNamePiece(
@@ -186,8 +196,8 @@ export function normalizeFileNamePiece(
 	if (!piece) return "";
 	// Remove invalid file system characters, trim, replace multiple spaces/underscores
 	return piece
-		.replace(/[\\/:*?"<>|#%&{}[\]]/g, "_") // More comprehensive removal list
-		.replace(/\s+/g, " ") // Consolidate whitespace
+		.replace(/[\\/:*?"<>|#%&{}[\]]+/g, "_")
+		.replace(/\s+/g, " ")
 		.trim();
 }
 
@@ -232,7 +242,7 @@ export function parseCfi(cfi: string): CfiParts | null {
 	const match = cfi.match(CFI_REGEX_COMBINED);
 
 	if (!match) {
-		devWarn(`Could not parse CFI: ${cfi}`);
+		logger.warn(`formatUtils: Could not parse CFI string: "${cfi}"`);
 		return null;
 	}
 
@@ -249,7 +259,9 @@ export function parseCfi(cfi: string): CfiParts | null {
 		textNodeIndexStr = match[5];
 		offsetStr = match[6];
 	} else {
-		devWarn(`Could not determine offset structure in CFI: ${cfi}`);
+		logger.warn(
+			`formatUtils: Could not determine offset structure in CFI: "${cfi}"`,
+		);
 		return null;
 	}
 
@@ -257,7 +269,9 @@ export function parseCfi(cfi: string): CfiParts | null {
 	const offset = Number.parseInt(offsetStr, 10);
 
 	if (Number.isNaN(offset) || Number.isNaN(textNodeIndex)) {
-		devWarn(`Error parsing offset/text node index from CFI: ${cfi}`);
+		logger.warn(
+			`formatUtils: Error parsing offset/text node index from CFI: "${cfi}"`,
+		);
 		return null;
 	}
 
@@ -426,4 +440,10 @@ export function levenshteinDistance(a: string, b: string): number {
 	}
 
 	return matrix[bLower.length][aLower.length];
+}
+
+export function computeAnnotationId(annotation: Annotation): string {
+	const { pageno, pos0, pos1, text } = annotation;
+	const input = `${pageno}|${pos0}|${pos1}|${(text ?? "").trim()}`;
+	return createHash("sha1").update(input).digest("hex").slice(0, 16);
 }

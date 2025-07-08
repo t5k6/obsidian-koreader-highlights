@@ -1,16 +1,16 @@
-import { Notice, normalizePath, TFile, type Vault } from "obsidian";
+import { normalizePath, Notice, TFile, type Vault } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
-import type { TemplateData } from "src/types";
+import { ensureFolderExists } from "src/utils/fileUtils";
+import { formatDate } from "src/utils/formatUtils";
 import { styleHighlight } from "src/utils/highlightStyle";
+import { logger } from "src/utils/logging";
 import type {
 	Annotation,
 	KoreaderHighlightImporterSettings,
 	RenderContext,
+	TemplateData,
 	TemplateDefinition,
 } from "../types";
-import { ensureFolderExists } from "../utils/fileUtils";
-import { formatDate } from "../utils/formatUtils";
-import { devError, devLog, devWarn } from "../utils/logging";
 
 export const FALLBACK_TEMPLATE_ID = "default";
 const DARK_THEME_CLASS = "theme-dark";
@@ -53,14 +53,16 @@ export class TemplateManager {
 		this.plugin.registerEvent(
 			this.plugin.app.workspace.on("css-change", this.updateTheme),
 		);
-		devLog(`TemplateManager initialized. Dark theme: ${this.isDarkTheme}`);
+		logger.info(`TemplateManager initialized. Dark theme: ${this.isDarkTheme}`);
 	}
 
 	private updateTheme(): void {
 		const newThemeState = document.body.classList.contains(DARK_THEME_CLASS);
 		if (this.isDarkTheme !== newThemeState) {
 			this.isDarkTheme = newThemeState;
-			devLog(`Theme changed. Dark theme: ${this.isDarkTheme}`);
+			logger.info(
+				`TemplateManager: Theme changed. Dark theme: ${this.isDarkTheme}`,
+			);
 		}
 	}
 
@@ -110,7 +112,7 @@ export class TemplateManager {
 			// eslint-disable-next-line no-new-func
 			return new Function("d", functionBody) as CompiledTemplate;
 		} catch (error) {
-			devError("Failed to compile template.", error, {
+			logger.error("TemplateManager: Failed to compile template.", error, {
 				template: functionBody,
 			});
 			return () => "Error: Template compilation failed.";
@@ -147,9 +149,14 @@ export class TemplateManager {
 				});
 			}
 		} catch (error) {
-			devError("Failed to parse built-in templates.", error);
+			logger.error(
+				"TemplateManager: Failed to parse built-in templates.",
+				error,
+			);
 		}
-		devLog(`Loaded ${this.builtInTemplates.size} built-in templates.`);
+		logger.info(
+			`TemplateManager: Loaded ${this.builtInTemplates.size} built-in templates.`,
+		);
 	}
 
 	updateSettings(newSettings: KoreaderHighlightImporterSettings): void {
@@ -165,7 +172,9 @@ export class TemplateManager {
 
 		if (templateChanged) {
 			this.clearCache();
-			devLog("Template settings changed, all caches cleared.");
+			logger.info(
+				"TemplateManager: Template settings changed, all caches cleared.",
+			);
 		}
 	}
 
@@ -231,7 +240,10 @@ export class TemplateManager {
 			new Notice(
 				`Template "${templateId}" has errors. Falling back to Default.`,
 			);
-			devError("Template validation failed:", validation.errors);
+			logger.error(
+				"TemplateManager: Template validation failed:",
+				validation.errors,
+			);
 			templateContent =
 				this.builtInTemplates.get(FALLBACK_TEMPLATE_ID)?.content ?? "";
 		}
@@ -264,7 +276,9 @@ export class TemplateManager {
 		const normalizedPath = normalizePath(vaultPath);
 		const file = this.vault.getAbstractFileByPath(normalizedPath);
 		if (file instanceof TFile) return this.vault.read(file);
-		devWarn(`Custom template file not found: "${vaultPath}"`);
+		logger.warn(
+			`TemplateManager: Custom template file not found: "${vaultPath}"`,
+		);
 		return null;
 	}
 
@@ -288,7 +302,9 @@ export class TemplateManager {
 			async (template) => {
 				const filePath = normalizePath(`${templateDir}/${template.id}.md`);
 				if (!(await this.vault.adapter.exists(filePath))) {
-					devLog(`Creating built-in template file: ${filePath}`);
+					logger.info(
+						`TemplateManager: Creating built-in template file: ${filePath}`,
+					);
 					const fileContent = `---\ndescription: ${template.description}\n---\n${template.content}`;
 					await this.vault.create(filePath, fileContent);
 				}
@@ -300,7 +316,7 @@ export class TemplateManager {
 	clearCache(): void {
 		this.rawTemplateCache.clear();
 		this.compiledTemplateCache.clear();
-		devLog("TemplateManager caches cleared.");
+		logger.info("TemplateManager: TemplateManager caches cleared.");
 	}
 
 	public renderGroup(
@@ -332,16 +348,11 @@ export class TemplateManager {
 	): string {
 		if (group.length === 1) {
 			const h = group[0];
-			return styleHighlight(h.text ?? "", h.color, h.drawer, this.isDarkTheme);
+			return styleHighlight(h.text ?? "", h.color, h.drawer);
 		}
 		return group
 			.map((h, idx) => {
-				const styled = styleHighlight(
-					h.text ?? "",
-					h.color,
-					h.drawer,
-					this.isDarkTheme,
-				);
+				const styled = styleHighlight(h.text ?? "", h.color, h.drawer);
 				return (idx > 0 ? (separators[idx - 1] ?? " ") : "") + styled;
 			})
 			.join("");

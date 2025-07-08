@@ -5,13 +5,8 @@ import type {
 	TableKeyString,
 	TableValue,
 } from "luaparse/lib/ast";
-import type {
-	Annotation,
-	DocProps,
-	KoreaderHighlightImporterSettings,
-	LuaMetadata,
-} from "../types";
-import { devError, devLog, devWarn } from "../utils/logging";
+import { logger } from "src/utils/logging";
+import type { Annotation, DocProps, LuaMetadata } from "../types";
 import type { SDRFinder } from "./SDRFinder";
 
 const parsedMetadataCache = new Map<string, LuaMetadata>();
@@ -24,12 +19,14 @@ function sanitizeString(rawValue: string): string {
 	const cached = STRING_CACHE.get(rawValue);
 	if (cached) return cached;
 	let cleaned = rawValue.trim();
+	// Remove surrounding quotes if present
 	if (
 		(cleaned.startsWith('"') && cleaned.endsWith('"')) ||
 		(cleaned.startsWith("'") && cleaned.endsWith("'"))
 	) {
 		cleaned = cleaned.slice(1, -1);
 	}
+	// Decode common Lua escape sequences
 	cleaned = cleaned.replace(/\\\n/g, "\n");
 	cleaned = cleaned.replace(/ΓÇö/g, "—");
 	cleaned = cleaned.replace(/\\\\/g, "\\");
@@ -38,6 +35,8 @@ function sanitizeString(rawValue: string): string {
 	cleaned = cleaned.replace(/\\n/g, "\n");
 	cleaned = cleaned.replace(/\\t/g, "\t");
 	cleaned = cleaned.replace(/\\r/g, "\r");
+
+	// Cache the result for performance
 	if (STRING_CACHE.size > 2000) STRING_CACHE.clear();
 	STRING_CACHE.set(rawValue, cleaned);
 	return cleaned;
@@ -53,25 +52,24 @@ const DEFAULT_DOC_PROPS: DocProps = {
 };
 
 export class MetadataParser {
-	constructor(
-		private settings: KoreaderHighlightImporterSettings,
-		private sdrFinder: SDRFinder,
-	) {}
+	constructor(private sdrFinder: SDRFinder) {}
 
 	async parseFile(sdrDirectoryPath: string): Promise<LuaMetadata | null> {
 		const cached = parsedMetadataCache.get(sdrDirectoryPath);
 		if (cached) {
-			devLog(`Using cached metadata for: ${sdrDirectoryPath}`);
+			logger.info(
+				`MetadataParser: Using cached metadata for: ${sdrDirectoryPath}`,
+			);
 			return cached;
 		}
 
-		devLog(`Parsing metadata for: ${sdrDirectoryPath}`);
+		logger.info(`MetadataParser: Parsing metadata for: ${sdrDirectoryPath}`);
 		try {
 			const luaContent =
 				await this.sdrFinder.readMetadataFileContent(sdrDirectoryPath);
 			if (!luaContent) {
-				devWarn(
-					`No metadata content found or readable in: ${sdrDirectoryPath}`,
+				logger.warn(
+					`MetadataParser: No metadata content found or readable in: ${sdrDirectoryPath}`,
 				);
 				return null;
 			}
@@ -86,7 +84,10 @@ export class MetadataParser {
 			parsedMetadataCache.set(sdrDirectoryPath, fullMetadata);
 			return fullMetadata;
 		} catch (error) {
-			devError(`Error parsing metadata file in ${sdrDirectoryPath}:`, error);
+			logger.error(
+				`MetadataParser: Error parsing metadata file in ${sdrDirectoryPath}:`,
+				error,
+			);
 			return null;
 		}
 	}
@@ -116,15 +117,17 @@ export class MetadataParser {
 				ast.body.length === 0 ||
 				ast.body[0].type !== "ReturnStatement"
 			) {
-				devWarn("Invalid Lua structure: Expected top-level return statement.");
+				logger.warn(
+					"MetadataParser: Invalid Lua structure: Expected top-level return statement.",
+				);
 				return result;
 			}
 
 			const returnArg = ast.body[0]
 				.arguments![0] as luaparser.TableConstructorExpression;
 			if (!returnArg || returnArg.type !== "TableConstructorExpression") {
-				devWarn(
-					"Invalid Lua structure: Expected return statement to return a table.",
+				logger.warn(
+					"MetadataParser: Invalid Lua structure: Expected return statement to return a table.",
 				);
 				return result;
 			}
@@ -155,7 +158,7 @@ export class MetadataParser {
 
 			let extractedAnnotations: Annotation[] = [];
 			if (modernAnnotationsData) {
-				devLog("Processing modern 'annotations' table.");
+				logger.info("MetadataParser: Processing modern 'annotations' table.");
 				extractedAnnotations = this.extractAnnotations(
 					modernAnnotationsData,
 					"modern",
@@ -166,8 +169,8 @@ export class MetadataParser {
 			}
 
 			if (!hasProcessedModernAnnotations && legacyHighlightData) {
-				devLog(
-					"No modern annotations found or they were empty, processing legacy 'highlight' table.",
+				logger.info(
+					"MetadataParser: No modern annotations found or they were empty, processing legacy 'highlight' table.",
 				);
 				extractedAnnotations = this.extractAnnotations(
 					legacyHighlightData,
@@ -179,20 +182,18 @@ export class MetadataParser {
 				(a) => a?.text && a.text.trim() !== "",
 			);
 
-			devLog(
-				`Parsed metadata with ${result.annotations.length} valid annotations. Modern processed: ${hasProcessedModernAnnotations}`,
+			logger.info(
+				`MetadataParser: Parsed metadata with ${result.annotations.length} valid annotations. Modern processed: ${hasProcessedModernAnnotations}`,
 			);
 			return result;
 		} catch (error) {
 			if (error instanceof Error && "line" in error && "column" in error) {
-				devError(
-					`Lua parsing error at Line ${(error as any).line}, Column ${
-						(error as any).column
-					}: ${error.message}`,
+				logger.error(
+					`MetadataParser: Lua parsing error at Line ${(error as any).line}, Column ${(error as any).column}: ${error.message}`,
 					error.stack,
 				);
 			} else {
-				devError("Error parsing Lua content:", error);
+				logger.error("MetadataParser: Error parsing Lua content:", error);
 			}
 			throw error; // Re-throw the error for parseFile to catch and return null
 		}
@@ -203,7 +204,7 @@ export class MetadataParser {
 	private extractDocProps(valueNode: Expression): DocProps {
 		const docProps = { ...DEFAULT_DOC_PROPS };
 		if (valueNode.type !== "TableConstructorExpression") {
-			devWarn("doc_props was not a table, using defaults.");
+			logger.warn("MetadataParser: doc_props was not a table, using defaults.");
 			return docProps;
 		}
 
@@ -228,7 +229,8 @@ export class MetadataParser {
 					// Check against known DocProps keys
 					(docProps as any)[propKey] = extractedValue;
 				} else {
-					// devWarn(`Unknown doc_prop key encountered: ${propKey}`); // Optional: be less noisy
+					// Optional: log unknown keys if you want to detect them
+					// logger.warn(`MetadataParser: Unknown doc_prop key encountered: ${propKey}`);
 				}
 			} // If extractedValue is null, the default from DEFAULT_DOC_PROPS remains
 		}
@@ -273,8 +275,8 @@ export class MetadataParser {
 				const pageNumStr = this.extractKeyAsString(pageField.key);
 				const pageNum = pageNumStr ? Number.parseInt(pageNumStr, 10) : null;
 				if (pageNum === null || Number.isNaN(pageNum)) {
-					devWarn(
-						`Invalid page number key in legacy 'highlight' table: ${pageNumStr}`,
+					logger.warn(
+						`MetadataParser: Invalid page number key in legacy 'highlight' table: ${pageNumStr}`,
 					);
 					continue;
 				}
@@ -344,7 +346,9 @@ export class MetadataParser {
 					if (drawerVal && allowedDrawers.includes(drawerVal)) {
 						annotation.drawer = drawerVal;
 					} else if (drawerVal) {
-						devWarn(`Invalid/unhandled drawer value: ${drawerVal}`);
+						logger.warn(
+							`MetadataParser: Invalid/unhandled drawer value: ${drawerVal}`,
+						);
 					}
 					break;
 				}
@@ -369,11 +373,13 @@ export class MetadataParser {
 		if (!annotation.text || annotation.text.trim() === "") return null;
 		if (!annotation.datetime) {
 			annotation.datetime = new Date().toISOString();
-			devWarn("Annotation missing datetime, using current time.");
+			logger.warn(
+				`MetadataParser: Annotation missing datetime, using current time.`,
+			);
 		}
 		if (!annotation.pos0 || !annotation.pos1) {
-			devWarn(
-				`Annotation for text "${annotation.text.slice(
+			logger.info(
+				`MetadataParser: Annotation for text "${annotation.text.slice(
 					0,
 					20,
 				)}..." missing pos0/pos1.`,
@@ -393,7 +399,9 @@ export class MetadataParser {
 		if (keyNode.type === "Identifier") {
 			return keyNode.name;
 		}
-		devWarn(`Cannot extract string key from node type: ${keyNode.type}`);
+		logger.warn(
+			`MetadataParser: Cannot extract string key from node type: ${keyNode.type}`,
+		);
 		return null;
 	}
 
@@ -409,7 +417,7 @@ export class MetadataParser {
 		if (valueNode.type === "BooleanLiteral") {
 			return valueNode.value.toString();
 		}
-		// devWarn(`Expected StringLiteral, got ${valueNode.type}`);
+		// logger.warn(`Expected StringLiteral, got ${valueNode.type}`);
 		return null;
 	}
 
@@ -421,13 +429,13 @@ export class MetadataParser {
 			const num = Number.parseFloat(sanitizeString(valueNode.raw));
 			if (!Number.isNaN(num)) return num;
 		}
-		// devWarn(`Expected NumericLiteral, got ${valueNode.type}`);
+		// logger.warn(`Expected NumericLiteral, got ${valueNode.type}`);
 		return null;
 	}
 
 	clearCache(): void {
 		parsedMetadataCache.clear();
 		STRING_CACHE.clear();
-		devLog("MetadataParser cache cleared.");
+		logger.info("MetadataParser: Caches cleared.");
 	}
 }

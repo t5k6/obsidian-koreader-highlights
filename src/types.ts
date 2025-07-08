@@ -20,7 +20,13 @@ export interface BaseMetadata {
 
 export interface DocProps extends BaseMetadata {}
 
+export interface PositionObject {
+	x: number;
+	y: number;
+}
+
 export interface Annotation {
+	id?: string;
 	chapter?: string;
 	datetime: string;
 	datetime_updated?: string;
@@ -30,8 +36,8 @@ export interface Annotation {
 	note?: string;
 	color?: string;
 	drawer?: "lighten" | "underscore" | "strikeout" | "invert";
-	pos0?: string;
-	pos1?: string;
+	pos0?: string | PositionObject;
+	pos1?: string | PositionObject;
 }
 
 // --- Database Related ---
@@ -115,6 +121,7 @@ export interface FrontmatterContent {
 export interface FrontmatterSettings {
 	disabledFields: string[];
 	customFields: string[];
+	useUnknownAuthor: boolean;
 }
 
 export interface KoreaderTemplateSettings {
@@ -126,7 +133,7 @@ export interface KoreaderTemplateSettings {
 
 // Main Plugin Settings Interface
 export interface KoreaderHighlightImporterSettings {
-	koboMountPoint: string;
+	koreaderMountPoint: string;
 	excludedFolders: string[];
 	allowedFileTypes: string[];
 	highlightsFolder: string;
@@ -143,7 +150,12 @@ export interface KoreaderHighlightImporterSettings {
 
 // --- UI / Modal Related Types ---
 
-export type DuplicateChoice = "replace" | "merge" | "keep-both" | "skip" | "automerge";
+export type DuplicateChoice =
+	| "replace"
+	| "merge"
+	| "keep-both"
+	| "skip"
+	| "automerge";
 
 export interface DuplicateMatch {
 	file: TFile;
@@ -151,6 +163,7 @@ export interface DuplicateMatch {
 	newHighlights: number;
 	modifiedHighlights: number;
 	luaMetadata: LuaMetadata;
+	canMergeSafely: boolean;
 }
 
 export interface IDuplicateHandlingModal {
@@ -182,3 +195,27 @@ export interface TemplateDefinition {
 	description: string;
 	content: string;
 }
+
+export interface Summary {
+	created: number;
+	merged: number;
+	automerged: number;
+	skipped: number;
+	errors: number;
+}
+
+export const blankSummary = (): Summary => ({
+	created: 0,
+	merged: 0,
+	automerged: 0,
+	skipped: 0,
+	errors: 0,
+});
+
+export const addSummary = (a: Summary, b: Summary): Summary => ({
+	created: a.created + b.created,
+	merged: a.merged + b.merged,
+	automerged: a.automerged + b.automerged,
+	skipped: a.skipped + b.skipped,
+	errors: a.errors + b.errors,
+});

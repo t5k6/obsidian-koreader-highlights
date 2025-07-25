@@ -60,29 +60,6 @@ const contrast = (a: RGB, b: RGB) => {
 };
 
 /* ------------------------------------------------------------------ */
-/* 2 ▸ CSS-var accessors (memoised)                                   */
-/* ------------------------------------------------------------------ */
-
-const getCssVar = (name: string, fallback: string): string => {
-	if (!(getCssVar as { _cache?: Record<string, string> })._cache) {
-		(getCssVar as { _cache?: Record<string, string> })._cache = {};
-	}
-	const cache = (getCssVar as { _cache?: Record<string, string> })._cache!;
-
-	if (cache[name]) return cache[name];
-
-	try {
-		cache[name] =
-			getComputedStyle(document.documentElement)
-				.getPropertyValue(name)
-				.trim() || fallback;
-	} catch {
-		cache[name] = fallback;
-	}
-	return cache[name];
-};
-
-/* ------------------------------------------------------------------ */
 /* 3 ▸ Public API                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -105,48 +82,53 @@ export function styleHighlight(
 ): string {
 	if (!text.trim()) return "";
 
-	const safe = esc(text);
+	// 1. Process paragraphs using the now-confirmed backslash separator.
+	const paragraphs = text
+		// In a JS string literal, a single backslash is written as '\\'.
+		.split("\\")
+		.map((p) => esc(p.trim())) // Trim whitespace from each paragraph and escape it.
+		.filter(Boolean); // Remove any empty paragraphs resulting from the split.
+
+	// Join with inline-safe <br><br> to create visual paragraph breaks.
+	const processedText = paragraphs.join("<br><br>");
+
+	// 2. Determine the wrapper function. Default to no wrapper.
+	let wrapper: ((content: string) => string) | null = null;
 	const key = koColor?.toLowerCase().trim() as ColourName | undefined;
 	const isPaletteColor = !!key && !!KOReaderHighlightColors[key];
-	const bg = isPaletteColor ? KOReaderHighlightColors[key!] : koColor;
 
 	switch (drawer) {
 		case "underscore":
-			return `<u>${safe}</u>`;
+			wrapper = (content) => `<u>${content}</u>`;
+			break;
 		case "strikeout":
-			return `<s>${safe}</s>`;
+			wrapper = (content) => `<s>${content}</s>`;
+			break;
 		case "invert": {
 			const fg = isPaletteColor ? toBgVar(key!) : "var(--text-accent)";
-			return mark(safe, "transparent", fg);
+			wrapper = (content) =>
+				`<mark style="background:transparent;color:${fg};">${content}</mark>`;
+			break;
 		}
-		// FIX: Combine cases to prevent fallthrough warning
 		case "lighten":
 		case undefined:
 		default: {
-			if (!bg) return safe;
-
-			// Special case from original logic: "lighten" drawer with "gray" color
 			if (drawer === "lighten" && key === "gray") {
-				return safe;
+				break;
 			}
-
-			let fg: string | null;
-			if (isPaletteColor) {
-				fg = toFgVar(key!);
-			} else {
-				fg = bestBW(bg);
+			if (koColor) {
+				const bg = isPaletteColor ? KOReaderHighlightColors[key!] : koColor;
+				const fg = isPaletteColor ? toFgVar(key!) : bestBW(koColor);
+				wrapper = (content) =>
+					`<mark style="background:${bg};color:${fg ?? "inherit"};">${content}</mark>`;
 			}
-
-			// If fg is null, it means bestBW failed (e.g., invalid hex). Return plain text.
-			if (!fg) {
-				return safe;
-			}
-
-			return mark(safe, bg, fg);
+			break;
 		}
 	}
-}
 
+	// 3. Apply the wrapper if determined, otherwise return the processed plain text.
+	return wrapper ? wrapper(processedText) : processedText;
+}
 /* quick black/white chooser if colour is not in our palette */
 function bestBW(hex: string): string | null {
 	const rgb = toRgb(hex);
@@ -155,6 +137,3 @@ function bestBW(hex: string): string | null {
 	const black = [0, 0, 0] as RGB;
 	return contrast(black, rgb) >= contrast(white, rgb) ? "#000" : "#fff";
 }
-
-const mark = (txt: string, bg: string, fg: string) =>
-	`<mark style="background:${bg};color:${fg};">${txt}</mark>`;

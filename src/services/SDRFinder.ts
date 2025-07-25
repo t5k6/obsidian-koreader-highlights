@@ -14,7 +14,7 @@ import { logger } from "src/utils/logging";
 
 const SDR_SUFFIX = ".sdr";
 const METADATA_REGEX = /^metadata\.(.+)\.lua$/i;
-const MAX_PARALLEL_IO = 64;
+const MAX_PARALLEL_IO = 32;
 
 /* ------------------------------------------------------------------ */
 /*                 Simple concurrency limiter (generic)               */

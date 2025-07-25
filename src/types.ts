@@ -25,6 +25,14 @@ export interface PositionObject {
 	y: number;
 }
 
+export const DRAWER_TYPES = [
+	"lighten",
+	"underscore",
+	"strikeout",
+	"invert",
+] as const;
+export type DrawerType = (typeof DRAWER_TYPES)[number];
+
 export interface Annotation {
 	id?: string;
 	chapter?: string;
@@ -35,7 +43,7 @@ export interface Annotation {
 	text?: string;
 	note?: string;
 	color?: string;
-	drawer?: "lighten" | "underscore" | "strikeout" | "invert";
+	drawer?: DrawerType;
 	pos0?: string | PositionObject;
 	pos1?: string | PositionObject;
 }
@@ -186,7 +194,9 @@ export interface TemplateData {
 	isFirstInChapter?: boolean;
 	note?: string;
 	notes?: string[];
-	date?: string;
+	date?: string; // Stable "en-US" format
+	localeDate?: string; // system locale format
+	dailyNoteLink?: string; // daily note link format
 }
 
 export interface TemplateDefinition {

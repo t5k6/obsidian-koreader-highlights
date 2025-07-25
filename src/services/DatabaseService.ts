@@ -8,11 +8,13 @@ import { SQLITE_WASM } from "src/binaries/sql-wasm-base64";
 import type { Disposable } from "src/core/DIContainer";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import { debounce } from "src/utils/debounce";
+import { isFileMissing, writeFileEnsured } from "src/utils/fileUtils";
 import {
 	levenshteinDistance,
 	normalizeFileNamePiece,
 } from "src/utils/formatUtils";
-import { logger } from "src/utils/logging";
+import { createLogger, logger } from "src/utils/logging";
+import { LruCache } from "src/utils/LruCache";
 import type {
 	BookStatistics,
 	DocProps,
@@ -25,36 +27,6 @@ import type {
 /* ------------------------------------------------------------------ */
 /*                      SHARED HELPER CLASSES                         */
 /* ------------------------------------------------------------------ */
-
-class LruCache<K, V> {
-	constructor(
-		private readonly max = 200,
-		private readonly map = new Map<K, V>(),
-	) {}
-	get(key: K): V | undefined {
-		const value = this.map.get(key);
-		if (value !== undefined) {
-			// refresh LRU order
-			this.map.delete(key);
-			this.map.set(key, value);
-		}
-		return value;
-	}
-	set(key: K, value: V): void {
-		if (this.map.has(key)) this.map.delete(key);
-		this.map.set(key, value);
-		if (this.map.size > this.max) {
-			const first = this.map.keys().next().value;
-			if (first !== undefined) this.map.delete(first);
-		}
-	}
-	delete(key: K): void {
-		this.map.delete(key);
-	}
-	clear(): void {
-		this.map.clear();
-	}
-}
 
 type SQLDatabase = InstanceType<
 	Awaited<ReturnType<typeof initSqlJs>>["Database"]
@@ -78,6 +50,8 @@ CREATE TABLE IF NOT EXISTS book(
 CREATE INDEX IF NOT EXISTS idx_book_path ON book(vault_path);
 `;
 
+const log = createLogger("DatabaseService");
+
 /* ------------------------------------------------------------------ */
 /*                            MAIN CLASS                              */
 /* ------------------------------------------------------------------ */
@@ -90,8 +64,8 @@ export class DatabaseService implements Disposable {
 		if (DatabaseService.sqlJsInstance) return DatabaseService.sqlJsInstance;
 		if (DatabaseService.sqlJsInit) return DatabaseService.sqlJsInit;
 
-		const binary = Buffer.from(SQLITE_WASM, "base64");
-		DatabaseService.sqlJsInit = initSqlJs({ wasmBinary: binary as Uint8Array })
+		const binary = Buffer.from(SQLITE_WASM, "base64").buffer;
+		DatabaseService.sqlJsInit = initSqlJs({ wasmBinary: binary })
 			.then((sql) => {
 				DatabaseService.sqlJsInstance = sql;
 				DatabaseService.sqlJsInit = null;
@@ -130,10 +104,7 @@ export class DatabaseService implements Disposable {
 			),
 		);
 
-		this.persistIndexDebounced = debounce(
-			() => this.persistIndex(),
-			2_500,
-		) as DebouncedFunction<() => Promise<void>>;
+		this.persistIndexDebounced = debounce(() => this.persistIndex(), 2_500);
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -263,7 +234,7 @@ export class DatabaseService implements Disposable {
 				derived: this.calculateDerivedStatistics(bookRow, sessions),
 			};
 		} catch (error: any) {
-			if (error?.code === "ENOENT") {
+			if (isFileMissing(error)) {
 				logger.info(
 					"DatabaseService: Statistics DB not found (normal on indirect device sync).",
 				);
@@ -425,8 +396,7 @@ export class DatabaseService implements Disposable {
 		logger.info("DatabaseService: Persisting index database to disk...");
 		try {
 			const data = this.idxDb.export();
-			await fsp.mkdir(path.dirname(this.idxPath), { recursive: true });
-			await fsp.writeFile(this.idxPath, Buffer.from(data));
+			await writeFileEnsured(this.idxPath, data);
 			logger.info("DatabaseService: Index database persisted successfully.");
 		} catch (error) {
 			logger.error("DatabaseService: Failed to persist index database.", error);

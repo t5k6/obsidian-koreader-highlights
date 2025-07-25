@@ -1,8 +1,14 @@
-import { diff3Merge, type MergeRegion } from "node-diff3";
+import type { MergeRegion } from "node-diff3";
+import { diff3Merge } from "node-diff3";
 import { type App, TFile, type Vault } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import { ConfirmModal } from "src/ui/ConfirmModal";
-import { compareAnnotations, computeAnnotationId } from "src/utils/formatUtils";
+import { createFileSafely } from "src/utils/fileUtils";
+import {
+	compareAnnotations,
+	computeAnnotationId,
+	generateObsidianFileName,
+} from "src/utils/formatUtils";
 import { extractHighlights } from "src/utils/highlightExtractor";
 import { logger } from "src/utils/logging";
 import { getFrontmatterAndBody } from "src/utils/obsidianUtils";
@@ -18,6 +24,8 @@ import type { ContentGenerator } from "./ContentGenerator";
 import type { DatabaseService } from "./DatabaseService";
 import type { FrontmatterGenerator } from "./FrontmatterGenerator";
 import type { SnapshotManager } from "./SnapshotManager";
+
+type ResolveStatus = "created" | "merged" | "automerged" | "skipped";
 
 export class DuplicateHandler {
 	currentMatch: NonNullable<DuplicateMatch> | null = null;
@@ -55,113 +63,83 @@ export class DuplicateHandler {
 		logger.info("DuplicateHandler: potential duplicates cache cleared.");
 	}
 
-	private async ensureSnapshot(file: TFile): Promise<boolean> {
-		if (await this.snapshotManager.getSnapshotContent(file)) {
-			return true;
+	/**
+	 * Primary entry point for handling a potential new book import.
+	 * It finds duplicates, decides on a course of action (including auto-merge),
+	 * and returns the final status and file.
+	 */
+	public async resolveDuplicate(
+		luaMetadata: LuaMetadata,
+		contentProvider: () => Promise<string>,
+	): Promise<{ status: ResolveStatus; file: TFile | null }> {
+		const potentialDuplicates = await this.findPotentialDuplicates(
+			luaMetadata.docProps,
+		);
+
+		if (potentialDuplicates.length === 0) {
+			return this.createNewFile(luaMetadata, contentProvider);
 		}
-		try {
-			await this.snapshotManager.createSnapshot(file);
+
+		const analyses: DuplicateMatch[] = await Promise.all(
+			potentialDuplicates.map((file) =>
+				this.analyzeDuplicate(file, luaMetadata.annotations, luaMetadata),
+			),
+		);
+		analyses.sort(
+			(a, b) =>
+				a.newHighlights +
+				a.modifiedHighlights -
+				(b.newHighlights + b.modifiedHighlights),
+		);
+		const bestMatch = analyses[0];
+
+		const snapshotExists = await this.snapshotManager.getSnapshotContent(
+			bestMatch.file,
+		);
+		const autoMergeEnabled = this.plugin.settings.autoMergeOnAddition;
+		const isUpdateOnly =
+			bestMatch.matchType === "updated" && bestMatch.modifiedHighlights === 0;
+
+		if (autoMergeEnabled && isUpdateOnly && snapshotExists) {
 			logger.info(
-				`DuplicateHandler: Created on-the-fly snapshot for ${file.path}`,
+				`DuplicateHandler: Auto-merging additions into ${bestMatch.file.path} via safe 3-way merge.`,
 			);
-			return true;
-		} catch (err) {
-			logger.error(
-				`DuplicateHandler: Unable to create snapshot for ${file.path}`,
-				err,
+			const { file } = await this.handleDuplicate(
+				bestMatch,
+				contentProvider,
+				true,
 			);
-			return false;
+			return { status: file ? "automerged" : "skipped", file };
+		}
+
+		if (autoMergeEnabled && isUpdateOnly && !snapshotExists) {
+			logger.info(
+				`DuplicateHandler: Skipping auto-merge for ${bestMatch.file.path} because no snapshot exists. Prompting user.`,
+			);
+		}
+
+		const { choice, file } = await this.handleDuplicate(
+			bestMatch,
+			contentProvider,
+			false,
+		);
+
+		switch (choice) {
+			case "merge":
+			case "replace":
+				return { status: "merged", file };
+			case "automerge":
+				return { status: "automerged", file };
+			case "skip":
+				return { status: "skipped", file: null };
+			case "keep-both":
+				return this.createNewFile(luaMetadata, contentProvider);
+			default:
+				logger.warn(`DuplicateHandler: Unhandled choice: ${choice}`);
+				return { status: "skipped", file: null };
 		}
 	}
 
-	/**
-	 * Handles a detected duplicate file. Presents a modal to the user or uses
-	 * existing 'apply to all' preferences to decide how to proceed.
-	 */
-	public async handleDuplicate(
-		analysis: DuplicateMatch,
-		newAnn: Annotation[],
-		luaMeta: LuaMetadata,
-		contentProvider: string | (() => Promise<string>),
-		isAutoMerge = false,
-	): Promise<{ choice: DuplicateChoice; file: TFile | null }> {
-		/* -----------------------------------------------------------
-		   1️⃣  Acquire a lock so that only ONE modal runs at a time.
-		----------------------------------------------------------- */
-		let unlock: () => void;
-
-		const lock = new Promise<void>((resolve) => {
-			unlock = resolve;
-		});
-		const prev = this.modalLock;
-		this.modalLock = prev.then(() => lock);
-
-		try {
-			await prev;
-			let choice: DuplicateChoice | null;
-
-			if (isAutoMerge) {
-				// Programmatic merge, no user interaction.
-				choice = "automerge";
-				logger.info("DuplicateHandler: Auto-merging based on settings.");
-			} else if (this.applyToAll && this.applyToAllChoice) {
-				// User already picked “apply to all” earlier in this run.
-				logger.info(
-					`DuplicateHandler: Using cached duplicate action '${this.applyToAllChoice}'.`,
-				);
-				choice = this.applyToAllChoice;
-			} else {
-				// Need to ask the user.
-				const modal = this.modalFactory(
-					this.app,
-					analysis,
-					"Duplicate detected – choose an action",
-				);
-
-				const res = await modal.openAndGetChoice(); // {choice, applyToAll}
-				choice = res.choice ?? "skip";
-
-				/* --------------------------------------------------------------
-				Only *set* apply-to-all flags the FIRST time the user ticks the
-				checkbox.
-				-------------------------------------------------------------- */
-				if (!this.applyToAll && res.applyToAll) {
-					this.applyToAll = true;
-					this.applyToAllChoice = choice;
-				}
-			}
-
-			const finalChoice = choice ?? "skip";
-			/* ------------------------------------------------------- */
-			/*  Resolve content lazily + execute the choice            */
-			/* ------------------------------------------------------- */
-
-			let newContent: string | null = null;
-			if (["replace", "merge", "automerge"].includes(finalChoice)) {
-				newContent =
-					typeof contentProvider === "function"
-						? await contentProvider()
-						: contentProvider;
-			}
-
-			const { file } = await this.executeChoice(
-				analysis.file,
-				finalChoice,
-				newAnn,
-				luaMeta,
-				newContent,
-			);
-
-			return { choice: finalChoice, file };
-		} finally {
-			unlock!(); // release lock so next queued call can run
-		}
-	}
-
-	/**
-	 * Finds potential duplicate files in the vault based on book metadata.
-	 * Uses KOReaderImporter's database to find existing files with the same book key.
-	 */
 	public async findPotentialDuplicates(docProps: DocProps): Promise<TFile[]> {
 		const bookKey = this.databaseService.bookKeyFromDocProps(docProps);
 		if (this.potentialDuplicatesCache.has(bookKey)) {
@@ -187,7 +165,7 @@ export class DuplicateHandler {
 		return files;
 	}
 
-	async analyzeDuplicate(
+	public async analyzeDuplicate(
 		existingFile: TFile,
 		newAnnotations: Annotation[],
 		luaMetadata: LuaMetadata,
@@ -195,13 +173,10 @@ export class DuplicateHandler {
 		logger.info(
 			`DuplicateHandler: Analyzing duplicate content: ${existingFile.path}`,
 		);
-		const existingContent = await this.vault.read(existingFile);
-		const fileCache = this.app.metadataCache.getFileCache(existingFile);
-
-		// Get body content after frontmatter using Obsidian's metadata
-		const existingBody = fileCache?.frontmatterPosition
-			? existingContent.slice(fileCache.frontmatterPosition.end.offset)
-			: existingContent;
+		const { body: existingBody } = await getFrontmatterAndBody(
+			this.app,
+			existingFile,
+		);
 
 		const existingHighlights = extractHighlights(existingBody);
 
@@ -219,7 +194,6 @@ export class DuplicateHandler {
 			if (!existingMatch) {
 				newHighlightCount++;
 			} else {
-				// Check if text content differs significantly (case-insensitive, whitespace normalized)
 				if (
 					!this.isHighlightTextEqual(
 						existingMatch.text || "",
@@ -245,7 +219,6 @@ export class DuplicateHandler {
 							`DuplicateHandler: Note also differs for modified highlight (Page ${newHighlight.pageno})`,
 						);
 					} else {
-						// Text is same, but note differs - count as modified
 						modifiedHighlightCount++;
 						logger.info(
 							`DuplicateHandler: Note differs for existing highlight (Page ${newHighlight.pageno}):\n  Old: "${existingMatch.note?.slice(
@@ -280,13 +253,106 @@ export class DuplicateHandler {
 		};
 	}
 
-	private async executeChoice(
-		file: TFile,
-		choice: DuplicateChoice,
-		newAnnotations: Annotation[],
+	private async createNewFile(
 		luaMetadata: LuaMetadata,
+		contentProvider: () => Promise<string>,
+	): Promise<{ status: "created"; file: TFile }> {
+		const content = await contentProvider();
+		const fileName = generateObsidianFileName(
+			luaMetadata.docProps,
+			this.plugin.settings.highlightsFolder,
+			luaMetadata.originalFilePath,
+		);
+
+		const targetFile = await createFileSafely(
+			this.app.vault,
+			this.plugin.settings.highlightsFolder,
+			fileName.replace(/\.md$/, ""),
+			content,
+		);
+
+		return { status: "created", file: targetFile };
+	}
+
+	private async ensureSnapshot(file: TFile): Promise<boolean> {
+		if (await this.snapshotManager.getSnapshotContent(file)) {
+			return true;
+		}
+		try {
+			await this.snapshotManager.createSnapshot(file);
+			logger.info(
+				`DuplicateHandler: Created on-the-fly snapshot for ${file.path}`,
+			);
+			return true;
+		} catch (err) {
+			logger.error(
+				`DuplicateHandler: Unable to create snapshot for ${file.path}`,
+				err,
+			);
+			return false;
+		}
+	}
+
+	private async handleDuplicate(
+		analysis: DuplicateMatch,
+		contentProvider: () => Promise<string>,
+		isAutoMerge = false,
+	): Promise<{ choice: DuplicateChoice; file: TFile | null }> {
+		let unlock: () => void;
+		const lock = new Promise<void>((resolve) => {
+			unlock = resolve;
+		});
+		const prev = this.modalLock;
+		this.modalLock = prev.then(() => lock);
+
+		try {
+			await prev;
+			let choice: DuplicateChoice | null;
+
+			if (isAutoMerge) {
+				choice = "automerge";
+			} else if (this.applyToAll && this.applyToAllChoice) {
+				choice = this.applyToAllChoice;
+			} else {
+				const modal = this.modalFactory(
+					this.app,
+					analysis,
+					"Duplicate detected – choose an action",
+				);
+				const res = await modal.openAndGetChoice();
+				choice = res.choice ?? "skip";
+
+				if (!this.applyToAll && res.applyToAll) {
+					this.applyToAll = true;
+					this.applyToAllChoice = choice;
+				}
+			}
+
+			const finalChoice = choice ?? "skip";
+			let newContent: string | null = null;
+			if (["replace", "merge", "automerge"].includes(finalChoice)) {
+				newContent = await contentProvider();
+			}
+
+			const { file } = await this.executeChoice(
+				analysis,
+				finalChoice,
+				newContent,
+			);
+
+			return { choice: finalChoice, file };
+		} finally {
+			unlock!();
+		}
+	}
+
+	private async executeChoice(
+		analysis: DuplicateMatch,
+		choice: DuplicateChoice,
 		newContent: string | null,
 	): Promise<{ status: "created" | "merged" | "skipped"; file: TFile | null }> {
+		const { file, luaMetadata } = analysis;
+
 		switch (choice) {
 			case "skip":
 				return { status: "skipped", file: null };
@@ -295,23 +361,18 @@ export class DuplicateHandler {
 				if (newContent === null) {
 					throw new Error("newContent missing for replace action");
 				}
+				await this.snapshotManager.createBackup(file);
 				await this.app.vault.modify(file, newContent);
 				return { status: "merged", file };
 			}
 
 			case "merge":
 			case "automerge": {
-				// Step 1: Make sure a base snapshot is available.
 				let base = await this.snapshotManager.getSnapshotContent(file);
-				if (!base) {
-					// Try to create one automatically if it's missing.
-					if (await this.ensureSnapshot(file)) {
-						base = await this.snapshotManager.getSnapshotContent(file);
-					}
+				if (!base && (await this.ensureSnapshot(file))) {
+					base = await this.snapshotManager.getSnapshotContent(file);
 				}
 
-				// Step 2: If still no base, a 3-way merge is impossible.
-				// For manual merges, ask the user. Auto-merges should just skip.
 				if (!base) {
 					if (choice === "automerge") {
 						logger.warn(
@@ -326,16 +387,13 @@ export class DuplicateHandler {
 						"A 3-way merge is not possible without a snapshot of the last import. Local edits may be lost.\n\nDo you want to proceed with a 2-way merge?",
 					).openAndConfirm();
 
-					if (!confirmed) {
-						return { status: "skipped", file: null };
-					}
+					if (!confirmed) return { status: "skipped", file: null };
 					logger.warn(
 						`DuplicateHandler: User confirmed 2-way merge for ${file.path} despite missing snapshot.`,
 					);
-					return this.execute2WayMerge(file, newAnnotations, luaMetadata);
+					return this.execute2WayMerge(file, luaMetadata);
 				}
 
-				// Step 3: Proceed with the safe 3-way merge.
 				if (newContent === null) {
 					throw new Error("newContent missing for 3-way merge");
 				}
@@ -352,16 +410,16 @@ export class DuplicateHandler {
 
 	private async execute2WayMerge(
 		file: TFile,
-		newAnnotations: Annotation[],
 		luaMetadata: LuaMetadata,
 	): Promise<{ status: "merged"; file: TFile }> {
+		await this.snapshotManager.createBackup(file);
 		const { frontmatter: existingFm, body: existingBody } =
 			await getFrontmatterAndBody(this.app, file);
 		const existingAnnotations = extractHighlights(existingBody);
 
 		const mergedAnnotations = this.mergeAnnotationArrays(
 			existingAnnotations,
-			newAnnotations,
+			luaMetadata.annotations,
 		);
 
 		const newBody =
@@ -383,78 +441,95 @@ export class DuplicateHandler {
 		return { status: "merged", file };
 	}
 
+	private performSynchronousDiff3(
+		ours: string,
+		base: string,
+		theirs: string,
+	): MergeRegion<string>[] {
+		return diff3Merge(ours.split("\n"), base.split("\n"), theirs.split("\n"));
+	}
+
 	private async execute3WayMerge(
 		file: TFile,
 		baseContent: string,
 		newFileContent: string,
 		luaMetadata: LuaMetadata,
 	): Promise<{ status: "merged"; file: TFile }> {
-		// 1. Split all three versions into frontmatter and body.
-		const { body: baseBody } = await getFrontmatterAndBody(this.app, {
-			content: baseContent,
-		});
-		const { frontmatter: ourFm, body: ourBody } = await getFrontmatterAndBody(
-			this.app,
-			file,
-		);
-		const { body: theirBody } = await getFrontmatterAndBody(this.app, {
-			content: newFileContent,
-		});
+		await this.snapshotManager.createBackup(file);
 
-		// 2. Perform 3-way merge on the body content, splitting it into lines.
-		const mergeRegions: MergeRegion<string>[] = diff3Merge(
-			ourBody.split("\n"),
-			baseBody.split("\n"),
-			theirBody.split("\n"),
+		const parse = async (source: TFile | string) => {
+			const content = typeof source === "string" ? { content: source } : source;
+			return getFrontmatterAndBody(this.app, content);
+		};
+
+		const base = await parse(baseContent);
+		const ours = await parse(file);
+		const theirs = await parse(newFileContent);
+
+		const mergeRegions = this.performSynchronousDiff3(
+			ours.body,
+			base.body,
+			theirs.body,
 		);
 
-		// 3. Process the merge regions to build the final body and detect conflicts.
 		const mergedLines: string[] = [];
 		let hasConflict = false;
+		let initialConflictCalloutAdded = false;
 
 		for (const region of mergeRegions) {
 			if (region.ok) {
-				// This is a stable, non-conflicting chunk.
 				mergedLines.push(...region.ok);
-			}
-			if (region.conflict) {
-				// This is a conflict. Mark it and add conflict markers.
+			} else if (region.conflict) {
 				hasConflict = true;
-				mergedLines.push("<<<<<<< YOUR VERSION");
-				mergedLines.push(...region.conflict.a);
-				mergedLines.push("=======");
-				mergedLines.push(...region.conflict.b);
-				mergedLines.push(">>>>>>> INCOMING VERSION");
+
+				if (!initialConflictCalloutAdded) {
+					mergedLines.push(
+						`> [!caution] Merge Conflict Detected`,
+						`> This note contains conflicting changes between the version in your vault and the new version from KOReader. Please resolve the conflicts below and then remove the conflict blocks.`,
+					);
+					initialConflictCalloutAdded = true;
+				}
+
+				mergedLines.push(
+					`\n> [!conflict]- Conflict Start: Your Edits (Vault)`,
+					...region.conflict.a.map((line) => `> ${line}`),
+					`> [!tip]- Incoming Changes (KOReader)`,
+					...region.conflict.b.map((line) => `> ${line}`),
+					`> [!conflict]- Conflict End`,
+					`\n`,
+				);
 			}
 		}
 		const mergedBody = mergedLines.join("\n");
 
-		// 4. Re-assemble the final file content with SMART frontmatter merging.
-		let finalContent: string;
 		const mergedFm = this.frontmatterGenerator.mergeFrontmatterData(
-			ourFm ?? {},
+			ours.frontmatter ?? {},
 			luaMetadata,
 			this.plugin.settings.frontmatter,
 		);
+
+		mergedFm["last-merged"] = new Date().toISOString().slice(0, 10);
+		if (hasConflict) {
+			mergedFm.conflicts = "unresolved";
+		}
+
 		const finalFm = this.frontmatterGenerator.formatDataToYaml(mergedFm, {
 			useFriendlyKeys: true,
 			sortKeys: true,
 		});
 
+		const finalContent = `${finalFm}\n\n${mergedBody}`;
+
 		if (hasConflict) {
 			logger.warn(
-				`DuplicateHandler: Merge conflict detected in ${file.path}. Adding conflict markers.`,
+				`DuplicateHandler: Merge conflict detected in ${file.path}. Adding conflict callouts.`,
 			);
-			const conflictCallout = `> [!caution] Merge Conflict Detected\n> This note contains conflicting changes between the version in your vault and the new version from KOReader. Please search for \`<<<<<<<\` to resolve them manually.\n\n`;
-			finalContent = `${finalFm}\n\n${conflictCallout}${mergedBody}`;
 		} else {
 			logger.info(
 				`DuplicateHandler: Successfully merged content for ${file.path} without conflicts.`,
 			);
-			finalContent = `${finalFm}\n\n${mergedBody}`;
 		}
 
-		// 5. Write the result back to the vault.
 		await this.vault.modify(file, finalContent);
 		return { status: "merged", file };
 	}
@@ -463,16 +538,12 @@ export class DuplicateHandler {
 		existing: Annotation[],
 		incoming: Annotation[],
 	): Annotation[] {
-		const key = (a: Annotation) =>
-			`${a.pageno}|${a.pos0}|${a.pos1}|${(a.text || "").trim()}`;
-
-		// Use a map to store existing annotations, keyed for quick lookup.
-		// This preserves the full `existing` annotation object on collision.
-		const map = new Map(existing.map((ann) => [key(ann), ann]));
+		const map = new Map(
+			existing.map((ann) => [this.getHighlightKey(ann), ann]),
+		);
 
 		for (const ann of incoming) {
-			const k = key(ann);
-			// Only add the incoming annotation if its key is not already in the map.
+			const k = this.getHighlightKey(ann);
 			if (!map.has(k)) {
 				map.set(k, ann);
 			}
@@ -481,19 +552,16 @@ export class DuplicateHandler {
 		return Array.from(map.values()).sort(compareAnnotations);
 	}
 
-	/** Normalizes text for comparison (trim, collapse whitespace, lowercase). */
 	private normalizeForComparison(text?: string): string {
 		return text?.trim().replace(/\s+/g, " ").toLowerCase() ?? "";
 	}
 
-	/** Checks if two highlight text blocks are functionally equal (ignore whitespace/case). */
 	private isHighlightTextEqual(text1: string, text2: string): boolean {
 		return (
 			this.normalizeForComparison(text1) === this.normalizeForComparison(text2)
 		);
 	}
 
-	/** Checks if two notes are functionally equal (ignore whitespace/case). */
 	private isNoteTextEqual(note1?: string, note2?: string): boolean {
 		return (
 			this.normalizeForComparison(note1) === this.normalizeForComparison(note2)
@@ -506,7 +574,7 @@ export class DuplicateHandler {
 	): DuplicateMatch["matchType"] {
 		if (newCount === 0 && modifiedCount === 0) return "exact";
 		if (modifiedCount > 0) return "divergent";
-		if (newCount > 0) return "updated"; // Only new highlights added
+		if (newCount > 0) return "updated";
 		return "exact";
 	}
 

@@ -1,9 +1,14 @@
 import { normalizePath, Notice, TFile, type Vault } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import { ensureFolderExists } from "src/utils/fileUtils";
-import { formatDate } from "src/utils/formatUtils";
+import {
+	formatDate,
+	formatDateAsDailyNote,
+	formatDateLocale,
+} from "src/utils/formatUtils";
 import { styleHighlight } from "src/utils/highlightStyle";
-import { logger } from "src/utils/logging";
+import { createLogger, logger } from "src/utils/logging";
+import { LruCache } from "src/utils/LruCache";
 import type {
 	Annotation,
 	KoreaderHighlightImporterSettings,
@@ -38,10 +43,12 @@ export interface TemplateValidationResult {
 	suggestions: string[];
 }
 
+const log = createLogger("TemplateManager");
+
 export class TemplateManager {
 	private isDarkTheme: boolean = true;
-	private rawTemplateCache: Map<string, string> = new Map();
-	private compiledTemplateCache = new Map<string, CachedTemplate>();
+	private rawTemplateCache = new LruCache<string, string>(10);
+	private compiledTemplateCache = new LruCache<string, CachedTemplate>(10);
 	public builtInTemplates: Map<string, TemplateDefinition> = new Map();
 
 	constructor(
@@ -327,7 +334,9 @@ export class TemplateManager {
 		const head = group[0];
 		const data: TemplateData = {
 			pageno: head.pageno ?? 0,
-			date: formatDate(head.datetime),
+			date: formatDate(head.datetime), // Stable en-US date
+			localeDate: formatDateLocale(head.datetime), // User's system locale date
+			dailyNoteLink: formatDateAsDailyNote(head.datetime), // [[YYYY-MM-DD]] link
 			chapter: head.chapter?.trim() || "",
 			isFirstInChapter: (ctx as any).isFirstInChapter ?? false,
 			highlight: this.mergeHighlightText(
@@ -346,16 +355,37 @@ export class TemplateManager {
 		group: Annotation[],
 		separators: (" " | " [...] ")[],
 	): string {
-		if (group.length === 1) {
-			const h = group[0];
-			return styleHighlight(h.text ?? "", h.color, h.drawer);
+		if (group.length === 0) {
+			return "";
 		}
-		return group
-			.map((h, idx) => {
-				const styled = styleHighlight(h.text ?? "", h.color, h.drawer);
-				return (idx > 0 ? (separators[idx - 1] ?? " ") : "") + styled;
-			})
-			.join("");
+
+		// First, style each annotation individually. `styleHighlight` already handles
+		// internal paragraphs correctly with `<br><br>`.
+		const styledHighlights = group.map((ann) =>
+			styleHighlight(ann.text ?? "", ann.color, ann.drawer),
+		);
+
+		if (styledHighlights.length === 1) {
+			return styledHighlights[0];
+		}
+
+		// Now, join the already-styled highlights with the correct inter-highlight separator.
+		let result = styledHighlights[0];
+
+		for (let i = 1; i < styledHighlights.length; i++) {
+			const separator = separators[i - 1]; // Separator between (i-1) and (i)
+
+			if (separator === " ") {
+				// Contiguous highlights, just join with a space.
+				result += " " + styledHighlights[i];
+			} else {
+				// A significant gap exists. Use a visual separator with paragraph breaks.
+				// The <br><br> ensures a blank line appears.
+				result += `<br><br>[...]<br><br>` + styledHighlights[i];
+			}
+		}
+
+		return result;
 	}
 
 	private mergeNotes(group: Annotation[]): string {

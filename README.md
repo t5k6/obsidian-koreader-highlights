@@ -71,6 +71,7 @@ Customize your notes by creating your own templates in the folder specified in t
 - **Automatic Note Formatting**: The plugin automatically prefixes each line of a `{{note}}` with `> ` for blockquote formatting if you don't do it yourself.
 - **Variables**: Use the following variables in your templates.
 
+
 | Variable | Description |
 |:--- |:--- |
 | `{{highlight}}` | The highlighted text, with styling (`<mark>`, `<u>`, etc.) applied. |
@@ -78,8 +79,10 @@ Customize your notes by creating your own templates in the folder specified in t
 | `{{notes}}` | An array of all notes in a merged highlight group. |
 | `{{pageno}}` | The page number where the highlight appears. |
 | `{{chapter}}` | The name of the chapter containing the highlight. |
-| `{{date}}` | The date the highlight was made (formatted like "Jan 1, 2024"). |
-| `{{isFirstInChapter}}`| A boolean (`true`/`false`) you can use for conditional logic. |
+| `{{date}}` | The date the highlight was made, in a stable `en-US` format (e.g., `Jan 1, 2024`). |
+| `{{localeDate}}` | The date formatted according to your computer's local settings (e.g., `1. Jan. 2024` or `1/1/2024`). |
+| `{{dailyNoteLink}}`| An Obsidian wikilink to the daily note for that date (e.g., `[[2024-01-01]]`). |
+| `{{isFirstInChapter}}`| A boolean (`true`/`false`) you can use for conditional logic, such as printing a chapter heading only once. |
 
 
 **Troubleshooting**

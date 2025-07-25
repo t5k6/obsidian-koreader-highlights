@@ -4,13 +4,20 @@ import { logger } from "./logging";
 export async function runPluginAction(
 	action: () => Promise<void>,
 	options: {
+		successNotice?: string;
 		failureNotice: string;
 		button?: ButtonComponent;
 		inProgressText?: string;
 		completedText?: string;
 	},
 ): Promise<void> {
-	const { button, failureNotice, inProgressText, completedText } = options;
+	const {
+		button,
+		successNotice,
+		failureNotice,
+		inProgressText,
+		completedText,
+	} = options;
 
 	try {
 		if (button) {
@@ -30,6 +37,11 @@ export async function runPluginAction(
 			if (completedText) {
 				button.setButtonText(completedText);
 			}
+		}
+
+		// Show success notice after button state is restored
+		if (successNotice) {
+			new Notice(successNotice);
 		}
 	}
 }

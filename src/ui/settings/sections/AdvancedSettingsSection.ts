@@ -1,4 +1,4 @@
-import { Notice, Setting } from "obsidian";
+import { Setting } from "obsidian";
 import type { KoreaderHighlightImporterSettings } from "src/types";
 import { DebugLevel } from "src/utils/logging";
 import { booleanSetting, dropdownSetting } from "../SettingHelpers";
@@ -16,8 +16,7 @@ export class AdvancedSettingsSection extends SettingsSection {
 					.setButtonText("Clear Now")
 					.setWarning()
 					.onClick(async () => {
-						await this.plugin.clearCaches();
-						new Notice("KOReader Importer caches cleared.");
+						await this.plugin.triggerClearCaches();
 					}),
 			);
 

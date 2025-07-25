@@ -5,38 +5,36 @@ import { logger } from "src/utils/logging";
 
 export class SnapshotManager {
 	private snapshotDir: string;
+	private backupDir: string;
 
 	constructor(
 		private app: App,
 		private plugin: KoreaderImporterPlugin,
 		private vault: Vault,
 	) {
-		this.snapshotDir = normalizePath(
-			`${this.plugin.app.vault.configDir}/plugins/${this.plugin.manifest.id}/snapshots`,
-		);
+		const pluginDataDir = `${this.plugin.app.vault.configDir}/plugins/${this.plugin.manifest.id}`;
+		this.snapshotDir = normalizePath(`${pluginDataDir}/snapshots`);
+		this.backupDir = normalizePath(`${pluginDataDir}/backups`);
 	}
 
-	private async ensureSnapshotDir(): Promise<void> {
+	private async ensureDir(dirPath: string): Promise<void> {
 		try {
 			const adapter = this.vault.adapter;
-			const dirExists = await adapter.exists(this.snapshotDir);
-			if (!dirExists) {
-				await adapter.mkdir(this.snapshotDir);
-				logger.info(
-					`SnapshotManager: Snapshot directory created at ${this.snapshotDir}`,
-				);
+			if (!(await adapter.exists(dirPath))) {
+				await adapter.mkdir(dirPath);
+				logger.info(`SnapshotManager: Directory created at ${dirPath}`);
 			}
 		} catch (error) {
 			logger.error(
-				"SnapshotManager: Failed to create snapshot directory",
+				`SnapshotManager: Failed to create directory: ${dirPath}`,
 				error,
 			);
-			throw new Error("Failed to ensure snapshot directory exists.");
+			throw new Error(`Failed to ensure directory exists: ${dirPath}`);
 		}
 	}
 
 	public async createSnapshot(targetFile: TFile): Promise<void> {
-		await this.ensureSnapshotDir();
+		await this.ensureDir(this.snapshotDir);
 		const snapshotFileName = SnapshotManager.generateSnapshotFileName(
 			targetFile.path,
 		);
@@ -53,6 +51,26 @@ export class SnapshotManager {
 		} catch (error) {
 			logger.error(
 				`SnapshotManager: Failed to write snapshot for ${targetFile.path}`,
+				error,
+			);
+		}
+	}
+
+	public async createBackup(targetFile: TFile): Promise<void> {
+		await this.ensureDir(this.backupDir);
+		const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+		const backupFileName = `${targetFile.basename}-${timestamp}.md`;
+		const backupPath = normalizePath(`${this.backupDir}/${backupFileName}`);
+
+		try {
+			const content = await this.vault.read(targetFile);
+			await this.vault.adapter.write(backupPath, content);
+			logger.info(
+				`SnapshotManager: Created backup for ${targetFile.path} at ${backupPath}`,
+			);
+		} catch (error) {
+			logger.error(
+				`SnapshotManager: Failed to create backup for ${targetFile.path}`,
 				error,
 			);
 		}
@@ -81,8 +99,6 @@ export class SnapshotManager {
 	}
 
 	static generateSnapshotFileName(filePath: string): string {
-		// Use a hash of the file path to create a stable, filesystem-safe name
-		// IMPORTANT: Do not change the hash algorithm from sha1 to avoid breaking existing snapshots.
 		const hash = createHash("sha1").update(filePath).digest("hex");
 		return `${hash}.md`;
 	}

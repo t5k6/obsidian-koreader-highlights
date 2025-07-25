@@ -1,6 +1,6 @@
 {
 	"name": "koreader-highlights-importer",
-	"version": "1.2.0",
+	"version": "1.2.1",
 	"description": "Imports highlights and metadata from KOReader into Obsidian notes (https://obsidian.md)",
 	"main": "main.js",
 	"type": "commonjs",
@@ -27,7 +27,7 @@
 		"sql.js": "^1.13.0"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.1.0",
+		"@biomejs/biome": "^2.1.2",
 		"@types/diff3": "^0.0.2",
 		"@types/js-yaml": "^4.0.9",
 		"@types/luaparse": "^0.2.12",
@@ -36,10 +36,12 @@
 		"@types/sql.js": "^1.4.9",
 		"@vitest/coverage-v8": "^3.2.4",
 		"cross-env": "^7.0.3",
-		"esbuild": "^0.25.6",
+		"esbuild": "^0.25.8",
 		"js-yaml": "^4.1.0",
+		"jsdom": "^26.1.0",
 		"tslib": "2.8.1",
 		"typescript": "^5.8.3",
+		"vite-tsconfig-paths": "^5.1.4",
 		"vitest": "^3.2.4"
 	}
 }

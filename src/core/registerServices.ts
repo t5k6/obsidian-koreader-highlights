@@ -1,4 +1,5 @@
 import type { App } from "obsidian";
+import { CommandManager } from "src/services/CommandManager";
 import { ContentGenerator } from "src/services/ContentGenerator";
 import { DatabaseService } from "src/services/DatabaseService";
 import { DuplicateHandler } from "src/services/DuplicateHandler";
@@ -78,5 +79,11 @@ export function registerServices(
 		.registerSingleton(ImportManager, importManager)
 		.registerSingleton(ScanManager, scanManager);
 
-	return { importManager, scanManager, dbService, sdrFinder };
+	/* ---------- command/action coordinator ---------- */
+	const commandManager = new CommandManager(
+		importManager,
+		scanManager,
+		mountPointService,
+	);
+	container.registerSingleton(CommandManager, commandManager);
 }

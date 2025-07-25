@@ -2,9 +2,8 @@ import { normalizePath, Notice, Setting } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import type { TemplateManager } from "src/services/TemplateManager";
 import type { TemplateDefinition } from "src/types";
-import { FolderSuggest } from "src/ui/FolderSuggest";
 import { TemplatePreviewModal } from "src/ui/TemplatePreviewModal";
-import { booleanSetting } from "../SettingHelpers";
+import { booleanSetting, pathSetting } from "../SettingHelpers";
 import { SettingsSection } from "../SettingsSection";
 
 const DEFAULT_TEMPLATE_DIR = "Koreader/templates";
@@ -134,26 +133,24 @@ export class TemplateSettingsSection extends SettingsSection {
 	}
 
 	private addTemplateDirSetting(containerEl: HTMLElement): void {
-		new Setting(containerEl)
-			.setName("Template directory")
-			.setDesc("Folder where your custom templates are stored.")
-			.addText((text) => {
-				text
-					.setPlaceholder(DEFAULT_TEMPLATE_DIR)
-					.setValue(this.plugin.settings.template.templateDir)
-					.onChange(async (value) => {
-						const newDir = normalizePath(value.trim() || DEFAULT_TEMPLATE_DIR);
-						if (this.plugin.settings.template.templateDir === newDir) return;
-
-						this.plugin.settings.template.templateDir = newDir;
-						await this.plugin.saveSettings();
-						this.plugin.settingTab.display();
-					});
-
-				new FolderSuggest(this.app, text.inputEl, (v) => {
-					text.setValue(v);
-					text.inputEl.dispatchEvent(new Event("change"));
-				});
-			});
+		pathSetting(
+			containerEl,
+			this.app,
+			this.plugin,
+			"Template directory",
+			"Folder where your custom templates are stored.",
+			{
+				placeholder: DEFAULT_TEMPLATE_DIR,
+				defaultPath: DEFAULT_TEMPLATE_DIR,
+				requireFolder: true,
+				// isExternal is omitted, so it defaults to false. No button will be rendered.
+			},
+			() => this.plugin.settings.template.templateDir,
+			async (v) => {
+				this.plugin.settings.template.templateDir = v;
+				await this.plugin.saveSettings();
+				this.plugin.settingTab.display(); // Re-render to update dropdown
+			},
+		);
 	}
 }

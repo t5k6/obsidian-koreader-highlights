@@ -1,4 +1,6 @@
-import { normalizePath, Notice, TFile, type Vault } from "obsidian";
+import { promises as fsp } from "node:fs";
+import path from "node:path";
+import { Notice, normalizePath, type TFile, type Vault } from "obsidian";
 import { logger } from "./logging";
 
 /* ------------------------------------------------------------------ */
@@ -185,4 +187,23 @@ export function handleFileSystemError(
 		);
 	}
 	return err;
+}
+
+/**
+ * Creates parent directories if they don't exist, then writes the file.
+ * For use with the Node.js filesystem, not the Obsidian Vault adapter.
+ */
+export async function writeFileEnsured(
+	filePath: string,
+	data: string | Uint8Array,
+): Promise<void> {
+	await fsp.mkdir(path.dirname(filePath), { recursive: true });
+	await fsp.writeFile(filePath, data);
+}
+
+/**
+ * Checks if a filesystem error is a 'File Not Found' error.
+ */
+export function isFileMissing(err: unknown): boolean {
+	return (err as { code?: string })?.code === "ENOENT";
 }

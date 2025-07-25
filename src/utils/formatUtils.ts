@@ -356,6 +356,70 @@ export function formatDate(dateStr: string): string {
 	});
 }
 
+/**
+ * Formats a given date string using a custom format string.
+ *
+ * Supported tokens:
+ * - YYYY: Full year (e.g., 2025)
+ * - MM:   Month with leading zero (01-12)
+ * - DD:   Day with leading zero (01-31)
+ *
+ * @param dateStr The ISO-like date string to format.
+ * @param format The format string.
+ * @returns The formatted date string, or an empty string on error.
+ */
+export function formatDateWithFormat(dateStr: string, format: string): string {
+	if (!dateStr || !format) return "";
+	try {
+		const date = new Date(dateStr);
+		// getTime() returns NaN for invalid dates
+		if (Number.isNaN(date.getTime())) {
+			throw new Error("Invalid date");
+		}
+
+		return format
+			.replace(/YYYY/g, String(date.getFullYear()))
+			.replace(/MM/g, String(date.getMonth() + 1).padStart(2, "0"))
+			.replace(/DD/g, String(date.getDate()).padStart(2, "0"));
+	} catch (e) {
+		logger.warn(
+			`formatDateWithFormat: Could not parse or format date "${dateStr}" with format "${format}"`,
+			e,
+		);
+		return ""; // Return empty string on failure
+	}
+}
+
+/**
+ * Formats a date string according to the user's system locale settings.
+ * @param dateStr The ISO-like date string.
+ * @returns A locale-specific date string.
+ */
+export function formatDateLocale(dateStr: string): string {
+	try {
+		return new Date(dateStr).toLocaleDateString(undefined, {
+			// 'undefined' uses the system locale
+			year: "numeric",
+			month: "short",
+			day: "numeric",
+		});
+	} catch (e) {
+		logger.warn(`formatDateLocale: Could not format date "${dateStr}"`, e);
+		return "";
+	}
+}
+
+/**
+ * Creates a formatted Obsidian daily note link from a date string.
+ * e.g., [[2025-07-22]]
+ * @param dateStr The ISO-like date string.
+ * @returns A string containing the Markdown link.
+ */
+export function formatDateAsDailyNote(dateStr: string): string {
+	const formattedDate = formatDateWithFormat(dateStr, "YYYY-MM-DD");
+	return formattedDate ? `[[${formattedDate}]]` : "";
+}
+
 export function secondsToHoursMinutesSeconds(totalSeconds: number): string {
 	if (totalSeconds < 0) totalSeconds = 0;
 
@@ -420,26 +484,28 @@ export function isWithinGap(
 	return a.pageno === b.pageno && distanceBetweenHighlights(a, b) <= maxGap;
 }
 
-export function levenshteinDistance(a: string, b: string): number {
+export function levenshteinDistance(a: string, b: string, max = 50): number {
+	if (Math.abs(a.length - b.length) > max) return max + 1; // impossible
+
 	const aLower = a.toLowerCase();
 	const bLower = b.toLowerCase();
-	const matrix = Array.from({ length: bLower.length + 1 }, (_, i) => [i]);
-	for (let j = 1; j <= aLower.length; j++) {
-		matrix[0][j] = j;
-	}
 
-	for (let i = 1; i <= bLower.length; i++) {
-		for (let j = 1; j <= aLower.length; j++) {
-			const cost = aLower[j - 1] === bLower[i - 1] ? 0 : 1;
-			matrix[i][j] = Math.min(
-				matrix[i - 1][j] + 1, // deletion
-				matrix[i][j - 1] + 1, // insertion
-				matrix[i - 1][j - 1] + cost, // substitution
-			);
+	// classic DP but we bail out when current row min > max
+	const prev = new Uint16Array(bLower.length + 1).map((_, i) => i);
+	for (let i = 1; i <= aLower.length; i++) {
+		prev[0] = i;
+		let min = i;
+		let upper = prev[0] - 1;
+		for (let j = 1; j <= bLower.length; j++) {
+			const cost = aLower[i - 1] === bLower[j - 1] ? 0 : 1;
+			const val = Math.min(prev[j] + 1, prev[j - 1] + 1, upper + cost);
+			upper = prev[j];
+			prev[j] = val;
+			if (val < min) min = val;
 		}
+		if (min > max) return max + 1; // early-exit row
 	}
-
-	return matrix[bLower.length][aLower.length];
+	return prev[bLower.length];
 }
 
 export function computeAnnotationId(annotation: Annotation): string {

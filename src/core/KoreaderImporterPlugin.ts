@@ -1,13 +1,10 @@
 import { Notice, Plugin } from "obsidian";
 import { registerServices } from "src/core/registerServices";
+import { CommandManager } from "src/services/CommandManager";
 import { DatabaseService } from "src/services/DatabaseService";
-import type { ImportManager } from "src/services/ImportManager";
-import { MountPointService } from "src/services/MountPointService";
-import type { ScanManager } from "src/services/ScanManager";
 import { SDRFinder } from "src/services/SDRFinder";
 import { TemplateManager } from "src/services/TemplateManager";
 import { SettingsTab } from "src/ui/SettingsTab";
-import { runPluginAction } from "src/utils/actionUtils";
 import { logger } from "src/utils/logging";
 import type { KoreaderHighlightImporterSettings } from "../types";
 import { DIContainer } from "./DIContainer";
@@ -38,11 +35,8 @@ export default class KoreaderImporterPlugin extends Plugin {
 	private pluginSettings!: PluginSettings;
 	private diContainer = new DIContainer();
 	private servicesInitialized = false;
-	private importManager!: ImportManager;
-	private scanManager!: ScanManager;
 	private migrationManager!: MigrationManager;
 	public templateManager!: TemplateManager;
-	private mountPointService!: MountPointService;
 
 	async onload() {
 		console.log("KOReaderImporterPlugin: Loading...");
@@ -74,21 +68,12 @@ export default class KoreaderImporterPlugin extends Plugin {
 
 		try {
 			// Initialize Services
-			const { importManager, scanManager } = registerServices(
-				this.diContainer,
-				this,
-				this.app,
-			);
+			registerServices(this.diContainer, this, this.app);
 
-			// Assign the core services returned by the registration function
-			this.importManager = importManager;
-			this.scanManager = scanManager;
-
+			// Resolve services needed by the plugin itself
 			this.templateManager =
 				this.diContainer.resolve<TemplateManager>(TemplateManager);
 			await this.templateManager.loadBuiltInTemplates();
-			this.mountPointService =
-				this.diContainer.resolve<MountPointService>(MountPointService);
 			this.migrationManager = new MigrationManager(this);
 
 			this.servicesInitialized = true;
@@ -153,7 +138,7 @@ export default class KoreaderImporterPlugin extends Plugin {
 	async onunload() {
 		console.log("KOReaderImporterPlugin: Unloading...");
 
-		await logger.dispose(); // Flush & close file sink before DI disposal
+		await logger.dispose();
 		await this.diContainer.dispose();
 
 		this.servicesInitialized = false;
@@ -174,50 +159,23 @@ export default class KoreaderImporterPlugin extends Plugin {
 		return true;
 	}
 
-	// --- Methods Called by SettingsTab ---
+	// --- Methods Called by UI Elements ---
 	async triggerImport(): Promise<void> {
-		logger.info("KOReaderImporterPlugin: Import triggered.");
 		if (!this.checkServiceStatus("import")) return;
-		if (!(await this.mountPointService.ensureMountPoint())) {
-			new Notice(
-				"KOReader device not found. Please check the mount point in settings.",
-			);
-			return;
-		}
-
-		await runPluginAction(() => this.importManager.importHighlights(), {
-			failureNotice: "An unexpected error occurred during import",
-		}).catch((error) => {
-			if (error.name !== "AbortError") {
-				logger.error(
-					"KOReader Importer Plugin: Import failed with an unexpected error",
-					error,
-				);
-				new Notice("Import failed. Check console for details.");
-			}
-			// If it is an AbortError, it's already handled by the modal, so we do nothing.
-		});
+		const commandManager = this.diContainer.resolve<CommandManager>(CommandManager);
+		await commandManager.executeImport();
 	}
 
 	async triggerScan(): Promise<void> {
-		logger.info("KOReaderImporterPlugin: Scan triggered.");
 		if (!this.checkServiceStatus("scan")) return;
-		if (!(await this.mountPointService.ensureMountPoint())) return;
-
-		await runPluginAction(() => this.scanManager.scanForHighlights(), {
-			failureNotice: "An unexpected error occurred during scan",
-		});
+		const commandManager = this.diContainer.resolve<CommandManager>(CommandManager);
+		await commandManager.executeScan();
 	}
 
-	async clearCaches(): Promise<void> {
-		logger.info(
-			"KOReaderImporterPlugin: Cache clear triggered from settings tab.",
-		);
+	async triggerClearCaches(): Promise<void> {
 		if (!this.checkServiceStatus("cache clearing")) return;
-
-		await runPluginAction(() => this.importManager.clearCaches(), {
-			failureNotice: "Failed to clear caches",
-		});
+		const commandManager = this.diContainer.resolve<CommandManager>(CommandManager);
+		await commandManager.executeClearCaches();
 	}
 
 	async saveSettings(): Promise<void> {

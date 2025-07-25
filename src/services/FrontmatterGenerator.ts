@@ -1,10 +1,15 @@
+/**********************************************************************
+ * FrontmatterGenerator
+ * – creates / merges front-matter from KOReader Lua metadata
+ *********************************************************************/
+
 import { stringifyYaml } from "obsidian";
 import {
 	formatDate,
+	formatDateWithFormat,
 	formatPercent,
 	secondsToHoursMinutesSeconds,
 } from "src/utils/formatUtils";
-import { logger } from "src/utils/logging";
 import type {
 	DocProps,
 	FrontmatterData,
@@ -13,7 +18,11 @@ import type {
 	ParsedFrontmatter,
 } from "../types";
 
-const FRIENDLY_KEY_MAP: Record<string, string> = {
+/* ------------------------------------------------------------------ */
+/*               1.  Key mapping / helpers (typed)                    */
+/* ------------------------------------------------------------------ */
+
+const FRIENDLY_KEY_MAP = {
 	title: "Title",
 	authors: "Author(s)",
 	description: "Description",
@@ -29,340 +38,260 @@ const FRIENDLY_KEY_MAP: Record<string, string> = {
 	progress: "Reading Progress",
 	readingStatus: "Status",
 	averageTimePerPage: "Avg. Time Per Page",
-};
+} satisfies Record<keyof FrontmatterData, string>;
 
-function toTitleCase(str: string): string {
-	if (!str) return "";
-	const spaced = str.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/_/g, " ");
-	return spaced
-		.split(" ")
-		.map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-		.join(" ");
+type ProgKey = keyof typeof FRIENDLY_KEY_MAP;
+const ALWAYS_UPDATE: ReadonlySet<ProgKey> = new Set([
+	"lastRead",
+	"firstRead",
+	"totalReadTime",
+	"progress",
+	"readingStatus",
+	"averageTimePerPage",
+	"highlightCount",
+	"noteCount",
+	"pages",
+]);
+
+const reverseMap = new Map(
+	Object.entries(FRIENDLY_KEY_MAP).map(([k, v]) => [v.toLowerCase(), k]),
+);
+
+/* ------------------------------------------------------------------ */
+/*               2.  Value normalisers / formatters                   */
+/* ------------------------------------------------------------------ */
+
+function isValid(value: unknown): boolean {
+	return value !== undefined && value !== null && String(value).trim() !== "";
 }
 
-function getFriendlyKey(key: string): string {
-	return FRIENDLY_KEY_MAP[key] || toTitleCase(key);
+function splitAndTrim(s: string, rx: RegExp): string[] {
+	return s
+		.split(rx)
+		.map((x) => x.trim())
+		.filter(Boolean);
 }
+
+function formatDocProp(key: keyof DocProps, v: unknown): string | string[] {
+	const str = String(v);
+	switch (key) {
+		case "authors": {
+			// Return plain string or array, do not format as links
+			const arr = splitAndTrim(str, /\s*[,;\n]\s*/);
+			return arr.length === 1 ? arr[0] : arr;
+		}
+		case "keywords":
+			return splitAndTrim(str, /,/);
+		case "description":
+			return str.replace(/<[^>]+>/g, ""); // strip html
+		default:
+			return str.trim();
+	}
+}
+
+function formatStat(key: ProgKey, v: unknown): string | number {
+	switch (key) {
+		case "lastRead":
+		case "firstRead":
+			return v instanceof Date
+				? formatDate(v.toISOString())
+				: typeof v === "string"
+					? formatDate(v)
+					: "";
+		case "totalReadTime":
+			return secondsToHoursMinutesSeconds(Number(v));
+		case "averageTimePerPage":
+			return secondsToHoursMinutesSeconds(Number(v) * 60);
+		case "progress":
+			return formatPercent(Number(v));
+		default:
+			return typeof v === "number" ? v : String(v);
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/*                    3.  Generator class                             */
+/* ------------------------------------------------------------------ */
 
 export class FrontmatterGenerator {
-	constructor() {}
-
-	public createFrontmatterData(
-		metadata: LuaMetadata,
-		settings: FrontmatterSettings,
+	/* --------- creation from scratch ---------- */
+	createFrontmatterData(
+		meta: LuaMetadata,
+		opts: FrontmatterSettings,
 	): FrontmatterData {
-		const { docProps, statistics, annotations } = metadata;
-		const frontmatter: Partial<FrontmatterData> = {};
+		const fm: Record<string, unknown> = {}; // Use a flexible record to build the object
+		const disabled = new Set(opts.disabledFields ?? []);
+		const extra = new Set(opts.customFields ?? []);
 
-		const disabled = new Set(settings?.disabledFields || []);
-		const customFields = settings?.customFields || [];
-
-		// --- 1. Add ALL DocProps fields if not disabled ---
-		if (docProps) {
-			for (const key in docProps) {
-				const typedKey = key as keyof DocProps;
-				if (!disabled.has(typedKey) && this.isValidValue(docProps[typedKey])) {
-					(frontmatter as any)[typedKey] = docProps[typedKey];
-				}
+		/*  1️⃣  DocProps */
+		for (const [k, val] of Object.entries(meta.docProps ?? {}) as [
+			keyof DocProps,
+			unknown,
+		][]) {
+			if (!disabled.has(k) && isValid(val)) {
+				fm[k] = formatDocProp(k, val);
 			}
 		}
 
-		// Default title/authors if they weren't in docProps
-		if (!frontmatter.title) {
-			frontmatter.title = ""; // Always have a title, even if empty
+		if (!fm.title) fm.title = "";
+		if (!fm.authors && !disabled.has("authors")) {
+			fm.authors = opts.useUnknownAuthor ? "Unknown Author" : undefined;
 		}
 
-		if (!frontmatter.authors && !disabled.has("authors")) {
-			frontmatter.authors = settings.useUnknownAuthor
-				? "Unknown Author"
-				: undefined;
-		}
+		/*  2️⃣  Highlight stats */
+		const hl = meta.annotations?.length ?? 0;
+		const notes = meta.annotations?.filter((a) => a.note?.trim()).length ?? 0;
+		if (!disabled.has("highlightCount")) fm.highlightCount = hl;
+		if (!disabled.has("noteCount")) fm.noteCount = notes;
 
-		// --- 2. Calculate and add Highlight/Note Counts ---
-		const highlightCount = annotations?.length ?? 0;
-		const noteCount =
-			annotations?.filter((a) => a.note && a.note.trim().length > 0).length ??
-			0;
+		/*  3️⃣  Reading statistics */
+		const s = meta.statistics;
+		if (s?.book && s.derived) {
+			const m = {
+				pages: s.book.pages,
+				lastRead: s.derived.lastReadDate,
+				firstRead: s.derived.firstReadDate,
+				totalReadTime: s.book.total_read_time,
+				progress: s.derived.percentComplete,
+				readingStatus: s.derived.readingStatus,
+				averageTimePerPage: s.derived.averageTimePerPage,
+			} as const;
 
-		if (!disabled.has("highlightCount")) {
-			frontmatter.highlightCount = highlightCount;
-		}
-		if (!disabled.has("noteCount")) frontmatter.noteCount = noteCount;
-
-		// --- 3. Add RAW statistics fields if not disabled ---
-		if (statistics?.derived && statistics.book) {
-			const statsMap = {
-				pages: statistics.book.pages,
-				lastRead: statistics.derived.lastReadDate,
-				totalReadTime: statistics.book.total_read_time,
-				progress: statistics.derived.percentComplete,
-				readingStatus: statistics.derived.readingStatus,
-				averageTimePerPage: statistics.derived.averageTimePerPage,
-				firstRead: statistics.derived.firstReadDate,
-			};
-
-			for (const key in statsMap) {
-				const typedKey = key as keyof typeof statsMap;
-				if (
-					!disabled.has(typedKey) &&
-					this.isValidStatValue(statsMap[typedKey])
-				) {
-					// Assign the RAW value, do not format it here.
-					(frontmatter as any)[typedKey] = statsMap[typedKey];
-				}
+			for (const [k, val] of Object.entries(m) as [ProgKey, unknown][]) {
+				if (!disabled.has(k) && isValid(val)) fm[k] = val;
 			}
 		}
 
-		// --- 4. Add custom fields ---
-		if (docProps) {
-			for (const field of customFields) {
-				if (
-					!disabled.has(field) &&
-					(frontmatter as any)[field] === undefined &&
-					this.isValidValue(docProps[field as keyof DocProps])
-				) {
-					(frontmatter as any)[field] = docProps[field as keyof DocProps];
-				}
+		/*  4️⃣  extra custom fields */
+		for (const k of extra) {
+			const docPropKey = k as keyof DocProps;
+			if (!disabled.has(k) && isValid(meta.docProps?.[docPropKey])) {
+				fm[k] = meta.docProps?.[docPropKey];
 			}
 		}
 
-		return frontmatter as FrontmatterData;
+		return fm as FrontmatterData;
 	}
 
-	public mergeFrontmatterData(
-		existingFm: ParsedFrontmatter,
-		newMetadata: LuaMetadata,
-		settings: FrontmatterSettings,
+	/* --------- merge existing ↔ new ---------- */
+	mergeFrontmatterData(
+		existing: ParsedFrontmatter,
+		meta: LuaMetadata,
+		opts: FrontmatterSettings,
 	): FrontmatterData {
-		// 1. Generate the ideal frontmatter object from the new data.
-		const theirData = this.createFrontmatterData(newMetadata, settings);
+		const theirs = this.createFrontmatterData(meta, opts);
 
-		// 2. Convert existing frontmatter (friendly keys) to programmatic keys
-		const reverseKeyMap = new Map(
-			Object.entries(FRIENDLY_KEY_MAP).map(([pKey, fKey]) => [fKey, pKey]),
-		);
-
-		const ourData: Record<string, any> = {};
-		for (const friendlyKey in existingFm) {
-			const progKey = reverseKeyMap.get(friendlyKey) ?? friendlyKey;
-			ourData[progKey] = existingFm[friendlyKey];
-		}
-
-		// 3. Define keys to always update from the new import.
-		const alwaysUpdateKeys = new Set([
-			"lastRead",
-			"firstRead",
-			"totalReadTime",
-			"progress",
-			"readingStatus",
-			"averageTimePerPage",
-			"highlightCount",
-			"noteCount",
-			"pages",
-		]);
-
-		// 4. Perform the merge. Start with ourData to preserve user edits by default.
-		const mergedData: Record<string, any> = { ...ourData };
-
-		for (const key in theirData) {
-			if (alwaysUpdateKeys.has(key) || !Object.hasOwn(mergedData, key)) {
-				(mergedData as any)[key] = (theirData as any)[key];
-			}
-		}
-
-		// 5. Preserve all custom fields from existing frontmatter that weren't handled above
-		for (const friendlyKey in existingFm) {
-			// If the friendly key isn't a value in FRIENDLY_KEY_MAP, it's a custom field
-			const isCustomField =
-				!Object.values(FRIENDLY_KEY_MAP).includes(friendlyKey);
-			if (
-				isCustomField && // Not a standard field
-				!alwaysUpdateKeys.has(friendlyKey) && // Not an always-update field
-				!mergedData[friendlyKey] // Not already set
-			) {
-				mergedData[friendlyKey] = existingFm[friendlyKey];
-			}
-		}
-
-		// Ensure required fields like title/authors exist, even if empty.
-		if (mergedData.title === undefined)
-			mergedData.title = theirData.title || "";
-		if (mergedData.authors === undefined)
-			mergedData.authors = theirData.authors || "";
-
-		return mergedData as FrontmatterData;
-	}
-
-	private isValidValue(value: unknown): boolean {
-		if (value === null || value === undefined) return false;
-		if (typeof value === "string") return value.trim().length > 0;
-		return true; // Allow numbers, booleans etc.
-	}
-
-	private isValidStatValue(value: unknown): boolean {
-		return value !== undefined && value !== null;
-	}
-
-	private formatDocPropValue(key: string, value: string): string | string[] {
-		// Ensure value is a string before processing, or handle other types if necessary
-		const strValue = String(value);
-
-		switch (key) {
-			case "authors": {
-				const authorsList = strValue
-					.split(/\s*[,;\n]\s*|\s*\n\s*/) // Split by comma, semicolon, or newline
-					.map((a) => a.trim())
-					.filter(Boolean);
-
-				if (authorsList.length === 0) {
-					return ""; // No valid authors found
+		/* map existing friendly -> programmatic, preserving custom keys */
+		const ours: Record<string, unknown> = {};
+		for (const [fKey, val] of Object.entries(existing)) {
+			const lowerFKey = fKey.toLowerCase();
+			// Only use the reverse map if the key is a known friendly key.
+			// Otherwise, use the key as-is (for custom fields like "Status").
+			if (reverseMap.has(lowerFKey)) {
+				const progKey = reverseMap.get(lowerFKey);
+				if (progKey) {
+					ours[progKey] = val;
 				}
-				// Format as Obsidian links
-				const linkedAuthors = authorsList.map((author) => `[[${author}]]`);
-
-				// Return single string for one author, array for multiple for proper YAML list
-				return linkedAuthors.length === 1 ? linkedAuthors[0] : linkedAuthors;
+			} else {
+				// Preserve custom fields with original casing
+				ours[fKey] = val;
 			}
-			case "description":
-				// Basic HTML tag removal
-				return this.decodeHtmlEntities(strValue.replace(/<[^>]+>/g, ""));
-			case "keywords":
-				return strValue
-					.split(",")
-					.map((k) => k.trim())
-					.filter(Boolean);
-			default:
-				return strValue.trim();
 		}
-	}
 
-	private formatStatValue(key: string, value: unknown): string | number {
-		switch (key) {
-			case "lastRead":
-			case "firstRead":
-				return value instanceof Date
-					? formatDate(value.toISOString())
-					: typeof value === "string" && value
-						? formatDate(value)
-						: "";
-			case "totalReadTime":
-				return secondsToHoursMinutesSeconds(value as number);
-			case "averageTimePerPage":
-				return secondsToHoursMinutesSeconds((value as number) * 60);
-
-			// value is in minutes
-			case "progress": {
-				const numericValue = parseInt(String(value), 10);
-				if (Number.isNaN(numericValue)) {
-					logger.warn(
-						`FrontmatterGenerator: Could not parse numeric value for progress: ${value}`,
-					);
-					return "0%"; // Return a sensible default on failure
-				}
-				return formatPercent(numericValue);
+		const merged: Record<string, unknown> = { ...theirs, ...ours };
+		for (const key of ALWAYS_UPDATE) {
+			if (key in theirs) {
+				merged[key] = theirs[key];
+			} else {
+				delete merged[key];
 			}
-
-			case "pages":
-			case "highlightCount":
-			case "noteCount":
-				return typeof value === "number" ? value : 0;
-			case "readingStatus":
-				return String(value ?? "");
-			default:
-				return String(value ?? "");
 		}
+
+		// guarantee presence
+		merged.title ??= "";
+		merged.authors ??= opts.useUnknownAuthor ? "Unknown Author" : "";
+
+		/* ───────────────────────────────────────────────────────────────
+        Preserve *custom* keys exactly as written by the user.
+        (Not contained in FRIENDLY_KEY_MAP and not already copied.)
+     	─────────────────────────────────────────────────────────────── */
+		for (const [friendlyKey, value] of Object.entries(existing)) {
+			const isStandard = friendlyKey.toLowerCase() in reverseMap;
+			if (!isStandard && merged[friendlyKey] === undefined) {
+				merged[friendlyKey] = value;
+			}
+		}
+
+		return merged as FrontmatterData;
 	}
 
-	private decodeHtmlEntities(str: string): string {
-		const entities: Record<string, string> = {
-			"&": "&",
-			"<": "<",
-			">": ">",
-		};
-		return str.replace(/&[#\w]+;/g, (match) => entities[match] || match);
-	}
-
-	public generateYamlFromLuaMetadata(
-		metadata: LuaMetadata,
-		settings: FrontmatterSettings,
-	): string {
-		const data = this.createFrontmatterData(metadata, settings);
-		return this.formatDataToYaml(data, {
-			useFriendlyKeys: true,
-			sortKeys: true,
-		});
-	}
-
-	public formatDataToYaml(
+	/* --------- YAML generation ---------- */
+	formatDataToYaml(
 		data: FrontmatterData | ParsedFrontmatter,
-		options: {
-			useFriendlyKeys?: boolean;
-			sortKeys?: boolean;
-		} = {},
+		{ useFriendlyKeys = true, sortKeys = true } = {},
 	): string {
-		const { useFriendlyKeys = true, sortKeys = true } = options;
-		const finalObject: Record<string, any> = {};
+		const out: Record<string, unknown> = {};
 
-		const entries = Object.entries(data);
+		let entries = Object.entries(data);
+		if (sortKeys) entries = entries.sort(([a], [b]) => a.localeCompare(b));
 
-		if (sortKeys) {
-			entries.sort(([aKey], [bKey]) => aKey.localeCompare(bKey));
-		}
-
-		for (const [key, rawValue] of entries) {
-			if (rawValue === undefined || rawValue === null) continue;
+		for (const [k, raw] of entries) {
+			if (raw === undefined || raw === null) continue;
 			if (
 				useFriendlyKeys &&
-				(key === "highlightCount" || key === "noteCount") &&
-				rawValue === 0
+				(k === "highlightCount" || k === "noteCount") &&
+				raw === 0
 			)
 				continue;
 
-			const formattedKey = useFriendlyKeys ? getFriendlyKey(key) : key;
+			const progKey = k as ProgKey;
+			let value: unknown = raw;
 
-			let finalValue = rawValue;
-			if (
-				[
-					"lastRead",
-					"firstRead",
-					"totalReadTime",
-					"averageTimePerPage",
-					"progress",
-					"readingStatus",
-				].includes(key)
-			) {
-				finalValue = this.formatStatValue(key, rawValue);
-			} else if (["authors", "description", "keywords"].includes(key)) {
-				if (key === "authors") {
-					const isSingleLink =
-						typeof rawValue === "string" && rawValue.startsWith("[[");
-					const isArrayOfLinks =
-						Array.isArray(rawValue) &&
-						rawValue.every((item) => String(item).startsWith("[["));
-
-					if (isSingleLink || isArrayOfLinks) {
-						finalValue = rawValue; // Already formatted, pass through.
-					} else {
-						// Not formatted, so apply formatting.
-						finalValue = this.formatDocPropValue(key, String(rawValue));
-					}
-				} else {
-					// For other fields like description/keywords, format as usual.
-					finalValue = this.formatDocPropValue(key, String(rawValue));
-				}
+			const formatter = metaFieldFormatters[progKey];
+			if (formatter) {
+				value = formatter(raw); // Safely call the formatter
 			}
 
-			if (finalValue === "" && !Array.isArray(finalValue)) continue;
-
-			finalObject[formattedKey] = finalValue;
+			const keyOut = useFriendlyKeys ? (FRIENDLY_KEY_MAP[progKey] ?? k) : k;
+			if ((value !== "" || Array.isArray(value)) && value !== null) {
+				out[keyOut] = value;
+			}
 		}
 
-		if (Object.keys(finalObject).length === 0) {
-			return "";
-		}
+		return Object.keys(out).length ? `---\n${stringifyYaml(out)}---` : "";
+	}
 
-		const yamlString = stringifyYaml(finalObject);
-
-		return `---\n${yamlString}---`;
+	generateYamlFromLuaMetadata(
+		md: LuaMetadata,
+		opts: FrontmatterSettings,
+	): string {
+		const data = this.createFrontmatterData(md, opts);
+		return this.formatDataToYaml(data);
 	}
 }
+
+/* helpers for formatDataToYaml */
+const metaFieldFormatters: Partial<Record<ProgKey, (v: unknown) => unknown>> = {
+	lastRead: (v) => {
+		const dateStr = v instanceof Date ? v.toISOString() : String(v);
+		return formatDateWithFormat(dateStr, "YYYY-MM-DD");
+	},
+	firstRead: (v) => {
+		const dateStr = v instanceof Date ? v.toISOString() : String(v);
+		return formatDateWithFormat(dateStr, "YYYY-MM-DD");
+	},
+	totalReadTime: (v) => formatStat("totalReadTime", v),
+	averageTimePerPage: (v) => formatStat("averageTimePerPage", v),
+	progress: (v) => formatStat("progress", v),
+	readingStatus: (v) => String(v ?? ""),
+	description: (v) => String(v ?? "").replace(/<[^>]+>/g, ""), // strip html
+	authors: (v) => {
+		if (Array.isArray(v)) return v; // Already formatted as a list of links
+		if (typeof v === "string" && v.startsWith("[[")) return v; // Already a single link
+		// Not formatted, so apply formatting
+		const arr = splitAndTrim(String(v), /\s*[,;\n]\s*/);
+		const links = arr.map((a) => `[[${a}]]`);
+		return links.length === 1 ? links[0] : links;
+	},
+	keywords: (v) => (Array.isArray(v) ? v : splitAndTrim(String(v), /,/)),
+};

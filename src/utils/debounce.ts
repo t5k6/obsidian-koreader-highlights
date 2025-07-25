@@ -1,8 +1,13 @@
+export interface DebouncedFunction<T extends (...args: any[]) => any> {
+	(...args: Parameters<T>): void;
+	cancel(): void;
+}
+
 export function debounce(
 	fn: (...args: any[]) => void,
 	delay: number,
 	immediate = false,
-) {
+): DebouncedFunction<typeof fn> {
 	let timeout: NodeJS.Timeout | null;
 
 	const debounced = function (this: any, ...args: any[]) {

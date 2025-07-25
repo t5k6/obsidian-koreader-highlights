@@ -5,13 +5,19 @@ import type {
 	TableKeyString,
 	TableValue,
 } from "luaparse/lib/ast";
-import { logger } from "src/utils/logging";
-import type { Annotation, DocProps, LuaMetadata } from "../types";
+import { LruCache } from "src/utils/LruCache";
+import { createLogger, logger } from "src/utils/logging";
+import {
+	type Annotation,
+	type DocProps,
+	DRAWER_TYPES,
+	type LuaMetadata,
+} from "../types";
 import type { SDRFinder } from "./SDRFinder";
 
-const parsedMetadataCache = new Map<string, LuaMetadata>();
-
-const STRING_CACHE = new Map<string, string>();
+const log = createLogger("MetadataParser");
+const parsedMetadataCache = new LruCache<string, LuaMetadata>(50);
+const STRING_CACHE = new LruCache<string, string>(2000);
 
 // --- Helper: Clean and sanitize strings ---
 function sanitizeString(rawValue: string): string {
@@ -37,7 +43,6 @@ function sanitizeString(rawValue: string): string {
 	cleaned = cleaned.replace(/\\r/g, "\r");
 
 	// Cache the result for performance
-	if (STRING_CACHE.size > 2000) STRING_CACHE.clear();
 	STRING_CACHE.set(rawValue, cleaned);
 	return cleaned;
 }
@@ -92,6 +97,50 @@ export class MetadataParser {
 		}
 	}
 
+	private collectAnnotations(
+		node: luaparser.TableConstructorExpression,
+		pageOverride?: number,
+	): Annotation[] {
+		const out: Annotation[] = [];
+
+		for (const field of node.fields) {
+			let annotationNode: luaparser.TableConstructorExpression | null = null;
+
+			// Check if the field itself is a table containing an annotation
+			if (
+				(field.type === "TableValue" || field.type === "TableKey") &&
+				field.value.type === "TableConstructorExpression"
+			) {
+				annotationNode = field.value;
+			}
+
+			if (annotationNode) {
+				// This node could be an annotation OR a page-keyed table in the legacy format.
+				// First, try to parse it as a single annotation.
+				const ann = this.createAnnotationFromFields(annotationNode.fields);
+
+				if (ann?.text?.trim()) {
+					// A valid annotation must have text
+					if (pageOverride !== undefined) {
+						ann.pageno = pageOverride;
+					}
+					out.push(ann);
+				} else if (pageOverride === undefined && field.type === "TableKey") {
+					// If it wasn't a valid annotation, it might be a legacy page-keyed table.
+					// We only do this check at the top level (no pageOverride).
+					const pageNumStr = this.extractKeyAsString(field.key);
+					const pageNum = pageNumStr ? Number(pageNumStr) : NaN;
+
+					if (Number.isFinite(pageNum)) {
+						// It's a page number. Recurse into its value.
+						out.push(...this.collectAnnotations(annotationNode, pageNum));
+					}
+				}
+			}
+		}
+		return out;
+	}
+
 	private parseLuaContent(
 		luaContent: string,
 	): Omit<LuaMetadata, "originalFilePath" | "statistics"> {
@@ -101,10 +150,6 @@ export class MetadataParser {
 			annotations: [],
 			md5: undefined,
 		};
-
-		let hasProcessedModernAnnotations = false;
-		let modernAnnotationsData: TableKey | null = null;
-		let legacyHighlightData: TableKey | null = null;
 
 		try {
 			const ast = luaparser.parse(luaContent, {
@@ -132,6 +177,9 @@ export class MetadataParser {
 				return result;
 			}
 
+			let modernAnnotationsData: luaparser.TableKey | null = null;
+			let legacyHighlightData: luaparser.TableKey | null = null;
+
 			for (const field of returnArg.fields) {
 				if (field.type !== "TableKey" || field.key.type !== "StringLiteral")
 					continue;
@@ -142,7 +190,7 @@ export class MetadataParser {
 						result.docProps = this.extractDocProps(field.value);
 						break;
 					case "doc_pages":
-						result.pages = this.extractNumericValue(field.value) ?? 0; // Ensure pages is number
+						result.pages = this.extractNumericValue(field.value) ?? 0;
 						break;
 					case "partial_md5_checksum":
 						result.md5 = this.extractStringValue(field.value) ?? undefined;
@@ -156,35 +204,29 @@ export class MetadataParser {
 				}
 			}
 
-			let extractedAnnotations: Annotation[] = [];
-			if (modernAnnotationsData) {
-				logger.info("MetadataParser: Processing modern 'annotations' table.");
-				extractedAnnotations = this.extractAnnotations(
-					modernAnnotationsData,
-					"modern",
-				);
-				if (extractedAnnotations.length > 0) {
-					hasProcessedModernAnnotations = true;
-				}
+			let annotations: Annotation[] = [];
+
+			// 1. Try to process the modern 'annotations' table first.
+			if (modernAnnotationsData?.value.type === "TableConstructorExpression") {
+				log.info("Processing modern 'annotations' table.");
+				annotations = this.collectAnnotations(modernAnnotationsData.value);
 			}
 
-			if (!hasProcessedModernAnnotations && legacyHighlightData) {
-				logger.info(
-					"MetadataParser: No modern annotations found or they were empty, processing legacy 'highlight' table.",
+			// 2. If no modern annotations were found, fall back to the legacy 'highlight' table.
+			if (
+				annotations.length === 0 &&
+				legacyHighlightData?.value.type === "TableConstructorExpression"
+			) {
+				log.info(
+					"No modern annotations found. Processing legacy 'highlight' table.",
 				);
-				extractedAnnotations = this.extractAnnotations(
-					legacyHighlightData,
-					"legacy",
-				);
+				annotations = this.collectAnnotations(legacyHighlightData.value);
 			}
 
-			result.annotations = extractedAnnotations.filter(
-				(a) => a?.text && a.text.trim() !== "",
-			);
+			// 3. Filter out any annotations that might be empty.
+			result.annotations = annotations.filter((a) => a.text?.trim());
 
-			logger.info(
-				`MetadataParser: Parsed metadata with ${result.annotations.length} valid annotations. Modern processed: ${hasProcessedModernAnnotations}`,
-			);
+			log.info(`Parsed ${result.annotations.length} valid annotation(s).`);
 			return result;
 		} catch (error) {
 			if (error instanceof Error && "line" in error && "column" in error) {
@@ -237,68 +279,6 @@ export class MetadataParser {
 		return docProps;
 	}
 
-	private extractAnnotations(
-		field: TableKey,
-		format: "modern" | "legacy",
-	): Annotation[] {
-		if (field.value.type !== "TableConstructorExpression") return [];
-		const annotations: Annotation[] = [];
-
-		if (format === "modern") {
-			for (const entry of field.value.fields) {
-				let annotationFields:
-					| Array<TableKey | TableKeyString | TableValue>
-					| undefined;
-				if (
-					entry.type === "TableValue" &&
-					entry.value.type === "TableConstructorExpression"
-				) {
-					annotationFields = entry.value.fields;
-				} else if (
-					entry.type === "TableKey" &&
-					entry.value.type === "TableConstructorExpression"
-				) {
-					annotationFields = entry.value.fields;
-				}
-				if (annotationFields) {
-					const annotation = this.createAnnotationFromFields(annotationFields);
-					if (annotation) annotations.push(annotation);
-				}
-			}
-		} else if (format === "legacy") {
-			for (const pageField of field.value.fields) {
-				if (
-					pageField.type !== "TableKey" ||
-					pageField.value.type !== "TableConstructorExpression"
-				)
-					continue;
-				const pageNumStr = this.extractKeyAsString(pageField.key);
-				const pageNum = pageNumStr ? Number.parseInt(pageNumStr, 10) : null;
-				if (pageNum === null || Number.isNaN(pageNum)) {
-					logger.warn(
-						`MetadataParser: Invalid page number key in legacy 'highlight' table: ${pageNumStr}`,
-					);
-					continue;
-				}
-				for (const highlightGroupField of pageField.value.fields) {
-					if (
-						highlightGroupField.type !== "TableKey" ||
-						highlightGroupField.value.type !== "TableConstructorExpression"
-					)
-						continue;
-					const annotation = this.createAnnotationFromFields(
-						highlightGroupField.value.fields,
-					);
-					if (annotation) {
-						annotation.pageno = pageNum;
-						annotations.push(annotation);
-					}
-				}
-			}
-		}
-		return annotations;
-	}
-
 	private createAnnotationFromFields(
 		fields: Array<TableKey | TableKeyString | TableValue>,
 	): Annotation | null {
@@ -319,12 +299,6 @@ export class MetadataParser {
 			pos0: "pos0",
 			pos1: "pos1",
 		};
-		const allowedDrawers: Annotation["drawer"][] = [
-			"lighten",
-			"underscore",
-			"strikeout",
-			"invert",
-		];
 
 		for (const field of fields) {
 			if (field.type !== "TableKey") continue;
@@ -340,11 +314,12 @@ export class MetadataParser {
 					break;
 				}
 				case "drawer": {
-					const drawerVal = this.extractStringValue(
-						valueNode,
-					)?.toLowerCase() as Annotation["drawer"];
-					if (drawerVal && allowedDrawers.includes(drawerVal)) {
-						annotation.drawer = drawerVal;
+					const drawerVal = this.extractStringValue(valueNode)?.toLowerCase();
+					if (
+						drawerVal &&
+						(DRAWER_TYPES as readonly string[]).includes(drawerVal)
+					) {
+						annotation.drawer = drawerVal as any;
 					} else if (drawerVal) {
 						logger.warn(
 							`MetadataParser: Invalid/unhandled drawer value: ${drawerVal}`,

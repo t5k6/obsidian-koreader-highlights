@@ -4,6 +4,10 @@ export class LruCache<K, V> {
 		private readonly map = new Map<K, V>(),
 	) {}
 
+	get size(): number {
+		return this.map.size;
+	}
+
 	get(key: K): V | undefined {
 		const value = this.map.get(key);
 		if (value !== undefined) {

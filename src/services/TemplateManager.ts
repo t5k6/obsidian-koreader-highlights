@@ -1,5 +1,8 @@
 import { normalizePath, Notice, TFile, type Vault } from "obsidian";
+import { DEFAULT_TEMPLATES_FOLDER } from "src/constants";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import type { CacheManager } from "src/utils/cache/CacheManager";
+import { LruCache } from "src/utils/cache/LruCache";
 import { ensureFolderExists } from "src/utils/fileUtils";
 import {
 	formatDate,
@@ -8,7 +11,6 @@ import {
 } from "src/utils/formatUtils";
 import { styleHighlight } from "src/utils/highlightStyle";
 import { createLogger, logger } from "src/utils/logging";
-import { LruCache } from "src/utils/LruCache";
 import type {
 	Annotation,
 	KoreaderHighlightImporterSettings,
@@ -54,7 +56,14 @@ export class TemplateManager {
 	constructor(
 		public plugin: KoreaderImporterPlugin,
 		private vault: Vault,
+		private cacheManager: CacheManager,
 	) {
+		this.rawTemplateCache = cacheManager.createLru("template.raw", 10);
+		this.compiledTemplateCache = cacheManager.createLru(
+			"template.compiled",
+			10,
+		);
+
 		this.updateTheme = this.updateTheme.bind(this);
 		this.updateTheme();
 		this.plugin.registerEvent(
@@ -178,9 +187,9 @@ export class TemplateManager {
 		this.plugin.settings = newSettings;
 
 		if (templateChanged) {
-			this.clearCache();
+			this.cacheManager.clear("template.*");
 			logger.info(
-				"TemplateManager: Template settings changed, all caches cleared.",
+				"TemplateManager: Template settings changed, relevant caches cleared.",
 			);
 		}
 	}
@@ -296,27 +305,52 @@ export class TemplateManager {
 
 	async ensureTemplates(): Promise<void> {
 		const templateDir = normalizePath(
-			this.plugin.settings.template.templateDir || "KOReader/templates",
+			this.plugin.settings.template.templateDir || DEFAULT_TEMPLATES_FOLDER,
 		);
+
 		try {
+			// Await the folder creation.
 			await ensureFolderExists(this.vault, templateDir);
 		} catch (err) {
-			return;
+			// If we can't even create the directory, we can't proceed.
+			logger.error(
+				`TemplateManager: Failed to create template directory at ${templateDir}`,
+				err,
+			);
+			new Notice(`Failed to create template directory: ${templateDir}`);
+			return; // Exit the function.
 		}
-		if (this.builtInTemplates.size === 0) await this.loadBuiltInTemplates();
 
+		// Load built-in templates if they haven't been already.
+		if (this.builtInTemplates.size === 0) {
+			await this.loadBuiltInTemplates();
+		}
+
+		// Now that we are sure the directory exists, we can safely write the files.
 		const writePromises = Array.from(this.builtInTemplates.values()).map(
 			async (template) => {
 				const filePath = normalizePath(`${templateDir}/${template.id}.md`);
+
+				// Check if the file already exists to avoid unnecessary writes.
 				if (!(await this.vault.adapter.exists(filePath))) {
 					logger.info(
 						`TemplateManager: Creating built-in template file: ${filePath}`,
 					);
-					const fileContent = `---\ndescription: ${template.description}\n---\n${template.content}`;
-					await this.vault.create(filePath, fileContent);
+					const fileContent = `---\ndescription: ${template.description}\n---\n\n${template.content}`;
+
+					try {
+						await this.vault.create(filePath, fileContent);
+					} catch (writeError) {
+						logger.error(
+							`TemplateManager: Failed to write template file ${filePath}`,
+							writeError,
+						);
+					}
 				}
 			},
 		);
+
+		// Wait for all file writes to complete.
 		await Promise.all(writePromises);
 	}
 

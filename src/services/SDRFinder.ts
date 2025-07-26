@@ -4,6 +4,7 @@ import { platform } from "node:os";
 import { join as joinPath } from "node:path";
 import { Notice } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import { type CacheManager, memoizeAsync } from "src/utils/cache/CacheManager";
 import { ConcurrencyLimiter } from "src/utils/concurrency";
 import { handleFileSystemError } from "src/utils/fileUtils";
 import { logger } from "src/utils/logging";
@@ -28,11 +29,24 @@ const io = <T>(fn: () => Promise<T>) => ioLimiter.schedule(fn);
 /* ------------------------------------------------------------------ */
 
 export class SDRFinder {
-	private sdrDirCache = new Map<string, Promise<string[]>>();
-	private metadataNameCache = new Map<string, string | null>();
+	private sdrDirCache: Map<string, Promise<string[]>>;
+	private metadataNameCache: Map<string, string | null>;
+	private findSdrDirectoriesWithMetadataMemoized: (
+		key: string,
+	) => Promise<string[]>;
 	private cacheKey: string | null = null;
 
-	constructor(private plugin: KoreaderImporterPlugin) {
+	constructor(
+		private plugin: KoreaderImporterPlugin,
+		private cacheManager: CacheManager,
+	) {
+		this.sdrDirCache = cacheManager.createMap("sdr.dirPromise");
+		this.metadataNameCache = cacheManager.createMap("sdr.metaName");
+
+		this.findSdrDirectoriesWithMetadataMemoized = memoizeAsync(
+			this.sdrDirCache,
+			(key: string) => this.scan(key),
+		);
 		this.updateCacheKey();
 	}
 
@@ -41,7 +55,10 @@ export class SDRFinder {
 	updateSettings(): void {
 		const prevKey = this.cacheKey;
 		this.updateCacheKey();
-		if (this.cacheKey !== prevKey) this.clearCache();
+		if (this.cacheKey !== prevKey) {
+			this.cacheManager.clear("sdr.*");
+			logger.info("SDRFinder: settings changed, SDR caches cleared.");
+		}
 	}
 
 	async *iterSdrDirectories(): AsyncGenerator<string> {
@@ -50,12 +67,7 @@ export class SDRFinder {
 
 	async findSdrDirectoriesWithMetadata(): Promise<string[]> {
 		if (!this.cacheKey) return [];
-		let inFlight = this.sdrDirCache.get(this.cacheKey);
-		if (!inFlight) {
-			inFlight = this.scan();
-			this.sdrDirCache.set(this.cacheKey, inFlight);
-		}
-		return inFlight;
+		return this.findSdrDirectoriesWithMetadataMemoized(this.cacheKey);
 	}
 
 	async readMetadataFileContent(sdrDir: string): Promise<string | null> {
@@ -90,7 +102,8 @@ export class SDRFinder {
 		].join("::");
 	}
 
-	private async scan(): Promise<string[]> {
+	private async scan(cacheKey: string): Promise<string[]> {
+		if (this.cacheKey !== cacheKey) return []; // Stale call check
 		if (!(await this.checkMountPoint())) return [];
 
 		const { koreaderMountPoint, excludedFolders } = this.plugin.settings;

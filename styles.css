@@ -287,3 +287,38 @@ mark[style*="#00ff00"] {
     margin-top: 0.5rem;
     /* Padding and other styles are usually handled by the theme's pre/code styling */
 }
+
+/* ─────────────────────────────────────────────────────────────────── */
+/*  Settings Panel UI                                                  */
+/* ─────────────────────────────────────────────────────────────────── */
+
+/* Make all text inputs and textareas in our settings panel have a consistent width */
+.koreader-importer-settings .setting-item-control:has(input[type="text"]),
+.koreader-importer-settings .setting-item-control:has(textarea) {
+    max-width: 450px;
+    width: 100%;
+    flex: 1 1 auto;
+    justify-content: flex-end;
+}
+
+/* Make the input/textarea itself fill its now-constrained container */
+.koreader-importer-settings .setting-item-control input[type="text"],
+.koreader-importer-settings .setting-item-control textarea {
+    width: 100%;
+}
+
+/* Special handling for the template selector to align dropdown and buttons */
+.koreader-template-selector .setting-item-control {
+    display: flex;
+    justify-content: flex-end;
+    /* Align to the right side */
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    max-width: 450px;
+}
+
+.koreader-template-selector .setting-item-control .dropdown {
+    flex-grow: 1;
+    /* Allow dropdown to take up available space */
+}

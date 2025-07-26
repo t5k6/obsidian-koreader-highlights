@@ -1,5 +1,4 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
-import * as fs from "node:fs";
 import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { normalizePath } from "obsidian";
@@ -7,6 +6,7 @@ import initSqlJs, { type SqlJsStatic } from "sql.js";
 import { SQLITE_WASM } from "src/binaries/sql-wasm-base64";
 import type { Disposable } from "src/core/DIContainer";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import { LruCache } from "src/utils/cache/LruCache";
 import { debounce } from "src/utils/debounce";
 import { isFileMissing, writeFileEnsured } from "src/utils/fileUtils";
 import {
@@ -14,7 +14,6 @@ import {
 	normalizeFileNamePiece,
 } from "src/utils/formatUtils";
 import { createLogger, logger } from "src/utils/logging";
-import { LruCache } from "src/utils/LruCache";
 import type {
 	BookStatistics,
 	DocProps,
@@ -407,8 +406,7 @@ export class DatabaseService implements Disposable {
 	/*                             CLEAN-UP                               */
 	/* ------------------------------------------------------------------ */
 
-	public dispose() {
-		// Cancel any pending debounced operations
+	public async dispose(): Promise<void> {
 		this.persistIndexDebounced.cancel();
 
 		if (this.db) {
@@ -416,15 +414,9 @@ export class DatabaseService implements Disposable {
 			this.db = null;
 		}
 		if (this.idxDb) {
-			// final synchronous flush – happens on unload when UI is idle
 			try {
 				const data = this.idxDb.export();
-				const dir = path.dirname(this.idxPath);
-				// Ensure directory exists synchronously
-				if (!fs.existsSync(dir)) {
-					fs.mkdirSync(dir, { recursive: true });
-				}
-				fs.writeFileSync(this.idxPath, Buffer.from(data));
+				await writeFileEnsured(this.idxPath, data);
 			} catch (e) {
 				logger.error("DatabaseService: Unable to write index DB on dispose", e);
 			}

@@ -2,11 +2,10 @@ import { normalizePath, Notice, Setting } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import type { TemplateManager } from "src/services/TemplateManager";
 import type { TemplateDefinition } from "src/types";
+import { PromptModal } from "src/ui/PromptModal";
 import { TemplatePreviewModal } from "src/ui/TemplatePreviewModal";
 import { booleanSetting, pathSetting } from "../SettingHelpers";
 import { SettingsSection } from "../SettingsSection";
-
-const DEFAULT_TEMPLATE_DIR = "Koreader/templates";
 
 export class TemplateSettingsSection extends SettingsSection {
 	private readonly templateManager: TemplateManager;
@@ -29,7 +28,24 @@ export class TemplateSettingsSection extends SettingsSection {
 			"Override default formatting for highlight notes.",
 			() => this.plugin.settings.template.useCustomTemplate,
 			async (value) => {
-				this.plugin.settings.template.useCustomTemplate = value;
+				const { template } = this.plugin.settings;
+				template.useCustomTemplate = value;
+
+				if (value === true) {
+					// Switching TO custom. We need to select a valid custom template.
+					const folder = normalizePath(template.templateDir);
+					const customTemplates = this.app.vault
+						.getFiles()
+						.filter((f) => f.path.startsWith(`${folder}/`));
+
+					// Set the selection to the first available custom template, or empty if none.
+					template.selectedTemplate =
+						customTemplates.length > 0 ? customTemplates[0].path : "";
+				} else {
+					// Switching TO built-in. Reset to a known-good default.
+					template.selectedTemplate = "default";
+				}
+
 				await this.plugin.saveSettings();
 				// Re-render the entire settings tab to show/hide dependent settings
 				this.plugin.settingTab.display();
@@ -71,86 +87,156 @@ export class TemplateSettingsSection extends SettingsSection {
 		const { template } = this.plugin.settings;
 		const isCustom = template.useCustomTemplate;
 		const folder = normalizePath(template.templateDir);
+		const lowerCaseFolder = folder.toLowerCase();
 
 		const settingName = isCustom
 			? "Select custom template"
 			: "Select built-in template";
-		const settingDesc = isCustom
-			? `Choose a template file from "${folder}".`
-			: "Choose a built-in style for your notes.";
-
-		const setting = new Setting(containerEl)
-			.setName(settingName)
-			.setDesc(settingDesc);
+		const setting = new Setting(containerEl).setName(settingName);
 
 		if (isCustom) {
+			setting.setDesc(`Choose a template file from "${folder}".`); // Show user the original case
 			this.addTemplateDirSetting(containerEl);
-		}
 
-		setting.addDropdown((dd) => {
-			const current = template.selectedTemplate ?? "default";
+			const customTemplates = this.app.vault.getFiles().filter(
+				(f) =>
+					// Compare both paths in lowercase ---
+					f.path.toLowerCase().startsWith(`${lowerCaseFolder}/`) &&
+					["md", "txt"].includes(f.extension),
+			);
 
-			if (isCustom) {
-				const userFiles = this.app.vault
-					.getFiles()
-					.filter(
-						(f) =>
-							f.path.startsWith(`${folder}/`) &&
-							["md", "txt"].includes(f.extension),
-					)
-					.map((f) => f.path);
-
-				if (userFiles.length === 0) {
-					setting.setDesc(`No custom templates found in "${folder}".`);
-				} else {
-					userFiles.forEach((p) => {
-						const fileName = p.slice(folder.length + 1).replace(/\.md$/, "");
-						dd.addOption(p, fileName);
+			if (customTemplates.length > 0) {
+				setting.addDropdown((dd) => {
+					customTemplates.forEach((f) => {
+						const fileName = f.path
+							.slice(folder.length + 1)
+							.replace(/\.md$/, "");
+						dd.addOption(f.path, fileName);
 					});
-				}
+					dd.setValue(template.selectedTemplate);
+					dd.onChange(async (val) => {
+						template.selectedTemplate = val;
+						await this.plugin.saveSettings();
+					});
+				});
 			} else {
-				const templateManager = this.templateManager;
-				for (const t of templateManager.builtInTemplates.values()) {
-					dd.addOption(t.id, `${t.name} - ${t.description}`);
-				}
+				setting.setDesc(`No custom templates found in "${folder}".`);
 			}
 
-			dd.setValue(current);
-			dd.onChange(async (val) => {
-				template.selectedTemplate = val;
-				await this.plugin.saveSettings();
-				this.plugin.settingTab.display();
-			});
-		});
+			setting.addButton((btn) =>
+				btn
+					.setButtonText("Preview")
+					.setDisabled(
+						customTemplates.length === 0 || !template.selectedTemplate,
+					)
+					.onClick(() =>
+						this.showPreviewModal(template.selectedTemplate, true),
+					),
+			);
+		} else {
+			// --- BUILT-IN TEMPLATE LOGIC ---
+			setting.setDesc("Choose a built-in style for your notes.");
 
-		setting.addButton((btn) =>
-			btn.setButtonText("Preview").onClick(() => {
-				const selected =
-					this.plugin.settings.template.selectedTemplate || "default";
-				this.showPreviewModal(selected, isCustom);
-			}),
+			// The dropdown for built-in templates should always appear.
+			setting.addDropdown((dd) => {
+				for (const t of this.templateManager.builtInTemplates.values()) {
+					dd.addOption(t.id, `${t.name} - ${t.description}`);
+				}
+				dd.setValue(template.selectedTemplate);
+				dd.onChange(async (val) => {
+					template.selectedTemplate = val;
+					await this.plugin.saveSettings();
+				});
+			});
+
+			setting.addButton((btn) =>
+				btn
+					.setButtonText("Preview")
+					.onClick(() =>
+						this.showPreviewModal(template.selectedTemplate, false),
+					),
+			);
+
+			setting.addButton((btn) =>
+				btn
+					.setButtonText("Create from Built-in...")
+					.onClick(async () => this.handleCreateFromBuiltIn()),
+			);
+		}
+	}
+
+	private async handleCreateFromBuiltIn(): Promise<void> {
+		const selectedBuiltInId =
+			this.plugin.settings.template.selectedTemplate || "default";
+		const builtInTemplate =
+			this.templateManager.builtInTemplates.get(selectedBuiltInId);
+
+		if (!builtInTemplate) {
+			new Notice(
+				`Error: Could not find built-in template '${selectedBuiltInId}'.`,
+			);
+			return;
+		}
+
+		const modal = new PromptModal(
+			this.app,
+			"Create New Template",
+			"Enter a name for the new template file...",
+			`${builtInTemplate.name} Custom`,
 		);
+		const newTemplateName = await modal.openAndGetValue();
+
+		if (!newTemplateName || !newTemplateName.trim()) {
+			new Notice("Template creation cancelled.");
+			return;
+		}
+
+		const sanitizedName = newTemplateName.replace(/[\\/:*?"<>|]+/g, "").trim();
+		const finalFileName = sanitizedName.endsWith(".md")
+			? sanitizedName
+			: `${sanitizedName}.md`;
+
+		const templateDir = normalizePath(
+			this.plugin.settings.template.templateDir,
+		);
+		const newTemplatePath = normalizePath(`${templateDir}/${finalFileName}`);
+
+		if (await this.app.vault.adapter.exists(newTemplatePath)) {
+			new Notice(
+				`Error: A template named "${finalFileName}" already exists in ${templateDir}.`,
+			);
+			return;
+		}
+
+		const contentToCopy = `---\ndescription: 'Custom template based on: ${builtInTemplate.name} - ${builtInTemplate.description}'\n---\n\n${builtInTemplate.content}`;
+
+		try {
+			await this.app.vault.create(newTemplatePath, contentToCopy);
+			new Notice(`Template created: ${newTemplatePath}`);
+
+			this.plugin.settings.template.useCustomTemplate = true;
+			this.plugin.settings.template.selectedTemplate = newTemplatePath;
+			await this.plugin.saveSettings();
+			this.plugin.settingTab.display();
+		} catch (error) {
+			new Notice(
+				"Error creating template file. Check the console for details.",
+			);
+			console.error("Failed to create custom template:", error);
+		}
 	}
 
 	private addTemplateDirSetting(containerEl: HTMLElement): void {
-		pathSetting(
-			containerEl,
-			this.app,
-			this.plugin,
-			"Template directory",
-			"Folder where your custom templates are stored.",
-			{
-				placeholder: DEFAULT_TEMPLATE_DIR,
-				defaultPath: DEFAULT_TEMPLATE_DIR,
-				requireFolder: true,
-				// isExternal is omitted, so it defaults to false. No button will be rendered.
-			},
-			() => this.plugin.settings.template.templateDir,
-			async (v) => {
+		pathSetting(containerEl, this.app, this.plugin, {
+			label: "Template directory",
+			desc: "Vault folder where your custom templates are stored.",
+			get: () => this.plugin.settings.template.templateDir,
+			setAndSave: async (v) => {
 				this.plugin.settings.template.templateDir = v;
 				await this.plugin.saveSettings();
 				this.plugin.settingTab.display(); // Re-render to update dropdown
 			},
-		);
+			requireFolder: true,
+		});
 	}
 }

@@ -3,7 +3,7 @@ import { SettingsSection } from "../SettingsSection";
 
 export class FilteringSettingsSection extends SettingsSection {
 	protected renderContent(containerEl: HTMLElement): void {
-		const [, excludedFoldersComponent] = stringArraySetting(
+		stringArraySetting(
 			containerEl,
 			"Excluded folders",
 			"Comma-separated list of folder names to ignore during scans.",
@@ -12,10 +12,10 @@ export class FilteringSettingsSection extends SettingsSection {
 				this.plugin.settings.excludedFolders = value;
 				this.debouncedSave();
 			},
+			".git, .stfolder",
 		);
-		excludedFoldersComponent.setPlaceholder(".git, .stfolder");
 
-		const [, allowedTypesComponent] = stringArraySetting(
+		stringArraySetting(
 			containerEl,
 			"Allowed file types",
 			"Process highlights for these book types only (empty = all).",
@@ -26,7 +26,7 @@ export class FilteringSettingsSection extends SettingsSection {
 				);
 				this.debouncedSave();
 			},
+			"epub, pdf, mobi",
 		);
-		allowedTypesComponent.setPlaceholder("epub, pdf, mobi");
 	}
 }

@@ -13,6 +13,7 @@ import { SnapshotManager } from "src/services/SnapshotManager";
 import { TemplateManager } from "src/services/TemplateManager";
 import type { DuplicateMatch, IDuplicateHandlingModal } from "src/types";
 import { DuplicateHandlingModal } from "src/ui/DuplicateModal";
+import { CacheManager } from "src/utils/cache/CacheManager";
 import type { DIContainer } from "./DIContainer";
 import type KoreaderImporterPlugin from "./KoreaderImporterPlugin";
 
@@ -22,14 +23,16 @@ export function registerServices(
 	app: App,
 ) {
 	/* ---------- core singletons ---------- */
-	const sdrFinder = new SDRFinder(plugin);
+	const cacheManager = new CacheManager();
+	const sdrFinder = new SDRFinder(plugin, cacheManager);
 	const dbService = new DatabaseService(plugin);
-	const templateManager = new TemplateManager(plugin, app.vault);
+	const templateManager = new TemplateManager(plugin, app.vault, cacheManager);
 	const frontmatterGen = new FrontmatterGenerator();
 	const snapshotManager = new SnapshotManager(app, plugin, app.vault);
 	const mountPointService = new MountPointService(sdrFinder);
 
 	container
+		.registerSingleton(CacheManager, cacheManager)
 		.registerSingleton(SDRFinder, sdrFinder)
 		.registerSingleton(DatabaseService, dbService)
 		.registerSingleton(TemplateManager, templateManager)
@@ -38,7 +41,7 @@ export function registerServices(
 		.registerSingleton(MountPointService, mountPointService);
 
 	/* ---------- dependent singletons ---------- */
-	const metadataParser = new MetadataParser(sdrFinder);
+	const metadataParser = new MetadataParser(sdrFinder, cacheManager);
 	const contentGen = new ContentGenerator(templateManager, plugin);
 
 	const modalFactory = (
@@ -56,6 +59,7 @@ export function registerServices(
 		contentGen,
 		dbService,
 		snapshotManager,
+		cacheManager,
 	);
 
 	const importManager = new ImportManager(
@@ -84,6 +88,7 @@ export function registerServices(
 		importManager,
 		scanManager,
 		mountPointService,
+		cacheManager,
 	);
 	container.registerSingleton(CommandManager, commandManager);
 }

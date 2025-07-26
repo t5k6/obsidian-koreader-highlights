@@ -1,5 +1,6 @@
 import { Notice } from "obsidian";
 import { runPluginAction } from "src/utils/actionUtils";
+import type { CacheManager } from "src/utils/cache/CacheManager";
 import { logger } from "src/utils/logging";
 import type { ImportManager } from "./ImportManager";
 import type { MountPointService } from "./MountPointService";
@@ -10,6 +11,7 @@ export class CommandManager {
 		private readonly importManager: ImportManager,
 		private readonly scanManager: ScanManager,
 		private readonly mountPointService: MountPointService,
+		private readonly cacheManager: CacheManager,
 	) {}
 
 	async executeImport(): Promise<void> {
@@ -56,7 +58,7 @@ export class CommandManager {
 	async executeClearCaches(): Promise<void> {
 		logger.info("CommandManager: Cache clear triggered from plugin.");
 
-		await runPluginAction(() => this.importManager.clearCaches(), {
+		await runPluginAction(() => Promise.resolve(this.cacheManager.clear()), {
 			successNotice: "KOReader Importer caches cleared.",
 			failureNotice: "Failed to clear caches",
 		});

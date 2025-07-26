@@ -229,3 +229,20 @@ export const addSummary = (a: Summary, b: Summary): Summary => ({
 	skipped: a.skipped + b.skipped,
 	errors: a.errors + b.errors,
 });
+
+/**
+ * A generic interface for a key-value cache.
+ * Both the built-in `Map` and our custom `LruCache` conform to this structure.
+ */
+export interface Cache<K, V> {
+	get(key: K): V | undefined;
+	set(key: K, value: V): void;
+	delete(key: K): boolean;
+	clear(): void;
+	readonly size: number;
+}
+
+/**
+ * A function signature for an asynchronous data loader, used with memoization.
+ */
+export type AsyncLoader<K, V> = (key: K) => Promise<V>;

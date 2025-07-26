@@ -1,5 +1,16 @@
 import type { Plugin } from "obsidian";
+import {
+	DEFAULT_HIGHLIGHTS_FOLDER,
+	DEFAULT_TEMPLATES_FOLDER,
+} from "src/constants";
+import { toVaultRelPath } from "src/utils/fileUtils";
 import { logger } from "src/utils/logging";
+import {
+	ensureBoolean,
+	ensureNumberInRange,
+	ensureString,
+	ensureStringArray,
+} from "src/utils/validationUtils";
 import type {
 	KoreaderHighlightImporterSettings,
 	KoreaderTemplateSettings,
@@ -39,7 +50,7 @@ export const DEFAULT_SETTINGS: KoreaderHighlightImporterSettings = {
 		useCustomTemplate: false,
 		source: "vault",
 		selectedTemplate: "default",
-		templateDir: "KOReader/templates",
+		templateDir: DEFAULT_TEMPLATES_FOLDER,
 	},
 };
 
@@ -104,13 +115,6 @@ const FIELD_RULES: FieldRule[] = [
 	},
 ];
 
-/* utilities for string-array fields */
-function sanitizeStringArray(arr: unknown, fallback: string[]): string[] {
-	if (!Array.isArray(arr) || !arr.every((x) => typeof x === "string"))
-		return [...fallback];
-	return arr.map((s) => s.trim()).filter(Boolean);
-}
-
 /* ------------------------------------------------------------------ */
 /*                      3.  MAIN CLASS                                 */
 /* ------------------------------------------------------------------ */
@@ -118,77 +122,89 @@ function sanitizeStringArray(arr: unknown, fallback: string[]): string[] {
 export class PluginSettings {
 	constructor(private plugin: Plugin) {}
 
-	/* ------------------------------ load ---------------------------- */
-
 	public async loadSettings(): Promise<KoreaderHighlightImporterSettings> {
 		logger.info("PluginSettings: Loading KOReader Importer settings…");
-		const raw =
-			((await this.plugin.loadData()) as Partial<KoreaderHighlightImporterSettings> | null) ??
-			{};
+		const raw: Partial<KoreaderHighlightImporterSettings> =
+			(await this.plugin.loadData()) ?? {};
 
-		/* start with deep-cloned defaults */
 		const settings: KoreaderHighlightImporterSettings =
 			structuredClone(DEFAULT_SETTINGS);
 
-		/* ---------- 3.1  validate flat primitive fields ----------- */
-		for (const rule of FIELD_RULES) {
-			const incoming = (raw as any)[rule.key];
-			const isValidType = typeof incoming === rule.type;
-			const passesCustom = rule.validate ? rule.validate(incoming) : true;
+		// Primitives
+		settings.koreaderMountPoint = ensureString(
+			raw.koreaderMountPoint,
+			DEFAULT_SETTINGS.koreaderMountPoint,
+		);
+		settings.debugMode = ensureBoolean(
+			raw.debugMode,
+			DEFAULT_SETTINGS.debugMode,
+		);
+		settings.enableFullDuplicateCheck = ensureBoolean(
+			raw.enableFullDuplicateCheck,
+			DEFAULT_SETTINGS.enableFullDuplicateCheck,
+		);
+		settings.autoMergeOnAddition = ensureBoolean(
+			raw.autoMergeOnAddition,
+			DEFAULT_SETTINGS.autoMergeOnAddition,
+		);
 
-			(settings as any)[rule.key] =
-				isValidType && passesCustom
-					? rule.normalize
-						? rule.normalize(incoming)
-						: incoming
-					: rule.default;
+		// Number with range validation
+		settings.debugLevel = ensureNumberInRange(
+			raw.debugLevel,
+			DEFAULT_SETTINGS.debugLevel,
+			[0, 1, 2, 3],
+		) as KoreaderHighlightImporterSettings["debugLevel"];
 
-			if (!isValidType || !passesCustom) {
-				logger.warn(
-					`PluginSettings: Corrected setting '${rule.key}' → default (${rule.default}).`,
-				);
-			}
-		}
+		// Sanitized path
+		const folder = ensureString(
+			raw.highlightsFolder,
+			DEFAULT_HIGHLIGHTS_FOLDER,
+		);
+		settings.highlightsFolder = toVaultRelPath(
+			folder || DEFAULT_HIGHLIGHTS_FOLDER,
+		);
 
-		/* ---------- 3.2  string-array fields ---------------------- */
-		settings.excludedFolders = sanitizeStringArray(
+		// Arrays
+		settings.excludedFolders = ensureStringArray(
 			raw.excludedFolders,
 			DEFAULT_SETTINGS.excludedFolders,
 		);
-		settings.allowedFileTypes = sanitizeStringArray(
+		settings.allowedFileTypes = ensureStringArray(
 			raw.allowedFileTypes,
 			DEFAULT_SETTINGS.allowedFileTypes,
 		).map((s) => s.toLowerCase());
 
-		/* ---------- 3.3  nested objects: frontmatter -------------- */
-		if (typeof raw.frontmatter === "object" && raw.frontmatter) {
-			settings.frontmatter = {
-				...DEFAULT_SETTINGS.frontmatter,
-				...raw.frontmatter,
-				disabledFields: sanitizeStringArray(
-					raw.frontmatter.disabledFields,
-					DEFAULT_SETTINGS.frontmatter.disabledFields,
-				),
-				customFields: sanitizeStringArray(
-					raw.frontmatter.customFields,
-					DEFAULT_SETTINGS.frontmatter.customFields,
-				),
-			};
+		// Nested Objects
+		if (typeof raw.frontmatter === "object" && raw.frontmatter !== null) {
+			settings.frontmatter.useUnknownAuthor = ensureBoolean(
+				raw.frontmatter.useUnknownAuthor,
+				DEFAULT_SETTINGS.frontmatter.useUnknownAuthor,
+			);
+			settings.frontmatter.disabledFields = ensureStringArray(
+				raw.frontmatter.disabledFields,
+				DEFAULT_SETTINGS.frontmatter.disabledFields,
+			);
+			settings.frontmatter.customFields = ensureStringArray(
+				raw.frontmatter.customFields,
+				DEFAULT_SETTINGS.frontmatter.customFields,
+			);
 		}
 
-		/* ---------- 3.4  nested objects: template ----------------- */
-		if (typeof raw.template === "object" && raw.template) {
+		// --- Nested Objects (Example: Template) ---
+		if (typeof raw.template === "object" && raw.template !== null) {
 			const tmp = raw.template as Partial<KoreaderTemplateSettings>;
-			settings.template = {
-				...DEFAULT_SETTINGS.template,
-				...tmp,
-				selectedTemplate: (
-					tmp.selectedTemplate ?? DEFAULT_SETTINGS.template.selectedTemplate
-				).trim(),
-				source: ["vault", "external"].includes(tmp.source as string)
-					? (tmp.source as "vault" | "external")
-					: DEFAULT_SETTINGS.template.source,
-			};
+			settings.template.useCustomTemplate = ensureBoolean(
+				tmp.useCustomTemplate,
+				DEFAULT_SETTINGS.template.useCustomTemplate,
+			);
+			settings.template.selectedTemplate = ensureString(
+				tmp.selectedTemplate,
+				DEFAULT_SETTINGS.template.selectedTemplate,
+			);
+			const source = ensureString(tmp.source, DEFAULT_SETTINGS.template.source);
+			settings.template.source = ["vault", "external"].includes(source)
+				? source
+				: DEFAULT_SETTINGS.template.source;
 		}
 
 		logger.info("PluginSettings: Settings validated:", settings);

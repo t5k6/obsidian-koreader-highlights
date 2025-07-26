@@ -3,6 +3,7 @@ import { diff3Merge } from "node-diff3";
 import { type App, TFile, type Vault } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import { ConfirmModal } from "src/ui/ConfirmModal";
+import type { CacheManager } from "src/utils/cache/CacheManager";
 import { createFileSafely } from "src/utils/fileUtils";
 import {
 	compareAnnotations,
@@ -31,8 +32,8 @@ export class DuplicateHandler {
 	currentMatch: NonNullable<DuplicateMatch> | null = null;
 	public applyToAll = false;
 	public applyToAllChoice: DuplicateChoice | null = null;
-	private potentialDuplicatesCache: Map<string, TFile[]> = new Map();
 	private modalLock: Promise<void> = Promise.resolve();
+	private potentialDuplicatesCache: Map<string, TFile[]>;
 
 	constructor(
 		private vault: Vault,
@@ -47,7 +48,12 @@ export class DuplicateHandler {
 		private contentGenerator: ContentGenerator,
 		private databaseService: DatabaseService,
 		private snapshotManager: SnapshotManager,
-	) {}
+		private cacheManager: CacheManager,
+	) {
+		this.potentialDuplicatesCache = cacheManager.createMap(
+			"duplicate.potential",
+		);
+	}
 
 	/** Resets the "Apply to All" state. Call before starting a new batch import. */
 	public resetApplyToAll(): void {

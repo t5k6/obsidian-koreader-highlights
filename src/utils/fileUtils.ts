@@ -1,6 +1,7 @@
 import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { Notice, normalizePath, type TFile, type Vault } from "obsidian";
+import { DEFAULT_HIGHLIGHTS_FOLDER } from "src/constants";
 import { logger } from "./logging";
 
 /* ------------------------------------------------------------------ */
@@ -49,20 +50,18 @@ const splitFileName = (f: string): { base: string; ext: string } => {
 
 export async function generateUniqueFilePath(
 	vault: Vault,
-	baseDir: string,
+	dir: string,
 	fileName: string,
-): Promise<string> {
-	const dir = normalizePath(baseDir);
-	const orig = normalizePath(fileName);
-	const { base, ext } = splitFileName(orig);
-
-	let counter = 0;
-	let candidate = normalizePath(`${dir}/${orig}`);
-
-	while (await vault.adapter.exists(candidate)) {
-		counter += 1;
-		candidate = normalizePath(`${dir}/${base} (${counter})${ext}`);
-	}
+) {
+	dir = toVaultRelPath(dir || DEFAULT_HIGHLIGHTS_FOLDER); // guard
+	const { base, ext } = path.parse(fileName);
+	let i = 0;
+	let candidate: string;
+	do {
+		const suffix = i ? ` (${i})` : "";
+		candidate = normalizePath(`${dir}/${base}${suffix}${ext}`);
+		i++;
+	} while (await vault.adapter.exists(candidate));
 	return candidate;
 }
 
@@ -207,3 +206,7 @@ export async function writeFileEnsured(
 export function isFileMissing(err: unknown): boolean {
 	return (err as { code?: string })?.code === "ENOENT";
 }
+
+/** Always returns a RELATIVE, slash-normalised path (no leading `/`). */
+export const toVaultRelPath = (raw: string): string =>
+	normalizePath(raw).replace(/^\/+/, "");

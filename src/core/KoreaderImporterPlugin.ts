@@ -138,8 +138,8 @@ export default class KoreaderImporterPlugin extends Plugin {
 	async onunload() {
 		console.log("KOReaderImporterPlugin: Unloading...");
 
-		await logger.dispose();
 		await this.diContainer.dispose();
+		await logger.dispose();
 
 		this.servicesInitialized = false;
 	}
@@ -162,19 +162,22 @@ export default class KoreaderImporterPlugin extends Plugin {
 	// --- Methods Called by UI Elements ---
 	async triggerImport(): Promise<void> {
 		if (!this.checkServiceStatus("import")) return;
-		const commandManager = this.diContainer.resolve<CommandManager>(CommandManager);
+		const commandManager =
+			this.diContainer.resolve<CommandManager>(CommandManager);
 		await commandManager.executeImport();
 	}
 
 	async triggerScan(): Promise<void> {
 		if (!this.checkServiceStatus("scan")) return;
-		const commandManager = this.diContainer.resolve<CommandManager>(CommandManager);
+		const commandManager =
+			this.diContainer.resolve<CommandManager>(CommandManager);
 		await commandManager.executeScan();
 	}
 
 	async triggerClearCaches(): Promise<void> {
 		if (!this.checkServiceStatus("cache clearing")) return;
-		const commandManager = this.diContainer.resolve<CommandManager>(CommandManager);
+		const commandManager =
+			this.diContainer.resolve<CommandManager>(CommandManager);
 		await commandManager.executeClearCaches();
 	}
 

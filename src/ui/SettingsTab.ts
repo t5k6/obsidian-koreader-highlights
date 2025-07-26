@@ -17,7 +17,7 @@ export class SettingsTab extends PluginSettingTab {
 	constructor(app: App, plugin: KoreaderImporterPlugin) {
 		super(app, plugin);
 
-		this.debouncedSave = debounce(() => plugin.saveSettings(), 500, true);
+		this.debouncedSave = debounce(() => plugin.saveSettings(), 500, false);
 		this.stateManager = new SectionStateManager();
 
 		// Register all settings sections

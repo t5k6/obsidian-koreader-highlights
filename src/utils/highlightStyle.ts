@@ -116,7 +116,7 @@ export function styleHighlight(
 			if (drawer === "lighten" && key === "gray") {
 				break;
 			}
-			if (koColor) {
+			if (koColor && (isPaletteColor || toRgb(koColor))) {
 				const bg = isPaletteColor ? KOReaderHighlightColors[key!] : koColor;
 				const fg = isPaletteColor ? toFgVar(key!) : bestBW(koColor);
 				wrapper = (content) =>
@@ -129,6 +129,7 @@ export function styleHighlight(
 	// 3. Apply the wrapper if determined, otherwise return the processed plain text.
 	return wrapper ? wrapper(processedText) : processedText;
 }
+
 /* quick black/white chooser if colour is not in our palette */
 function bestBW(hex: string): string | null {
 	const rgb = toRgb(hex);

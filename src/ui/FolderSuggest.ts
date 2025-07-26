@@ -1,37 +1,34 @@
-import { AbstractInputSuggest, type App, debounce, TFolder } from "obsidian";
-import { logger } from "src/utils/logging";
+import { AbstractInputSuggest, type App, type Plugin, TFolder } from "obsidian";
 
 export class FolderSuggest extends AbstractInputSuggest<string> {
 	private folderCache: string[] = [];
 
 	constructor(
 		app: App,
+		private plugin: Plugin,
 		inputEl: HTMLInputElement,
 		private onSubmit: (result: string) => void,
 	) {
 		super(app, inputEl);
-		this.refreshCache(); // Initial cache population
+		this.buildCache();
+		this.registerVaultEvents();
 	}
 
-	// Debounced refresh to avoid performance issues on rapid file changes.
-	public refreshCache = debounce(
-		() => {
-			logger.info("FolderSuggest: Refreshing folder cache.");
-			this.folderCache = this.app.vault
-				.getAllLoadedFiles()
-				.filter((file): file is TFolder => file instanceof TFolder)
-				.map((folder) => folder.path)
-				.sort();
-		},
-		250, // Debounce delay of 250ms.
-		true, // Immediate execution on first call.
-	);
+	private buildCache(): void {
+		this.folderCache = this.app.vault
+			.getAllLoadedFiles()
+			.filter((f): f is TFolder => f instanceof TFolder)
+			.map((f) => f.path)
+			.sort();
+	}
 
-	getSuggestions(query: string): string[] {
-		const lowerCaseQuery = query.toLowerCase();
-		return this.folderCache.filter((folderPath) =>
-			folderPath.toLowerCase().includes(lowerCaseQuery),
-		);
+	private registerVaultEvents(): void {
+		this.app.workspace.onLayoutReady(() => {
+			const rebuild = () => this.buildCache();
+			this.plugin.registerEvent(this.app.vault.on("create", rebuild));
+			this.plugin.registerEvent(this.app.vault.on("delete", rebuild));
+			this.plugin.registerEvent(this.app.vault.on("rename", rebuild));
+		});
 	}
 
 	renderSuggestion(suggestion: string, el: HTMLElement): void {
@@ -41,5 +38,13 @@ export class FolderSuggest extends AbstractInputSuggest<string> {
 	selectSuggestion(suggestion: string): void {
 		this.onSubmit(suggestion);
 		this.close();
+	}
+
+	getSuggestions(query: string): string[] {
+		const lowerCaseQuery = query.toLowerCase();
+		if (!query) return this.folderCache; // Show all folders on empty query
+		return this.folderCache.filter((folderPath) =>
+			folderPath.toLowerCase().includes(lowerCaseQuery),
+		);
 	}
 }

@@ -5,7 +5,8 @@ import type {
 	TableKeyString,
 	TableValue,
 } from "luaparse/lib/ast";
-import { LruCache } from "src/utils/LruCache";
+import type { CacheManager } from "src/utils/cache/CacheManager";
+import { LruCache } from "src/utils/cache/LruCache";
 import { createLogger, logger } from "src/utils/logging";
 import {
 	type Annotation,
@@ -16,36 +17,6 @@ import {
 import type { SDRFinder } from "./SDRFinder";
 
 const log = createLogger("MetadataParser");
-const parsedMetadataCache = new LruCache<string, LuaMetadata>(50);
-const STRING_CACHE = new LruCache<string, string>(2000);
-
-// --- Helper: Clean and sanitize strings ---
-function sanitizeString(rawValue: string): string {
-	if (typeof rawValue !== "string") return "";
-	const cached = STRING_CACHE.get(rawValue);
-	if (cached) return cached;
-	let cleaned = rawValue.trim();
-	// Remove surrounding quotes if present
-	if (
-		(cleaned.startsWith('"') && cleaned.endsWith('"')) ||
-		(cleaned.startsWith("'") && cleaned.endsWith("'"))
-	) {
-		cleaned = cleaned.slice(1, -1);
-	}
-	// Decode common Lua escape sequences
-	cleaned = cleaned.replace(/\\\n/g, "\n");
-	cleaned = cleaned.replace(/ΓÇö/g, "—");
-	cleaned = cleaned.replace(/\\\\/g, "\\");
-	cleaned = cleaned.replace(/\\"/g, '"');
-	cleaned = cleaned.replace(/\\'/g, "'");
-	cleaned = cleaned.replace(/\\n/g, "\n");
-	cleaned = cleaned.replace(/\\t/g, "\t");
-	cleaned = cleaned.replace(/\\r/g, "\r");
-
-	// Cache the result for performance
-	STRING_CACHE.set(rawValue, cleaned);
-	return cleaned;
-}
 
 const DEFAULT_DOC_PROPS: DocProps = {
 	authors: "",
@@ -57,10 +28,19 @@ const DEFAULT_DOC_PROPS: DocProps = {
 };
 
 export class MetadataParser {
-	constructor(private sdrFinder: SDRFinder) {}
+	private parsedMetadataCache: LruCache<string, LuaMetadata>;
+	private stringCache: LruCache<string, string>;
+
+	constructor(
+		private sdrFinder: SDRFinder,
+		private cacheManager: CacheManager,
+	) {
+		this.parsedMetadataCache = cacheManager.createLru("metadata.parsed", 50);
+		this.stringCache = cacheManager.createLru("metadata.strings", 2000);
+	}
 
 	async parseFile(sdrDirectoryPath: string): Promise<LuaMetadata | null> {
-		const cached = parsedMetadataCache.get(sdrDirectoryPath);
+		const cached = this.parsedMetadataCache.get(sdrDirectoryPath);
 		if (cached) {
 			logger.info(
 				`MetadataParser: Using cached metadata for: ${sdrDirectoryPath}`,
@@ -86,7 +66,7 @@ export class MetadataParser {
 				originalFilePath: sdrDirectoryPath,
 			};
 
-			parsedMetadataCache.set(sdrDirectoryPath, fullMetadata);
+			this.parsedMetadataCache.set(sdrDirectoryPath, fullMetadata);
 			return fullMetadata;
 		} catch (error) {
 			logger.error(
@@ -380,9 +360,32 @@ export class MetadataParser {
 		return null;
 	}
 
+	private sanitizeString(rawValue: string): string {
+		if (typeof rawValue !== "string") return "";
+		const cached = this.stringCache.get(rawValue);
+		if (cached) return cached;
+		let cleaned = rawValue.trim();
+		if (
+			(cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+			(cleaned.startsWith("'") && cleaned.endsWith("'"))
+		) {
+			cleaned = cleaned.slice(1, -1);
+		}
+		cleaned = cleaned.replace(/ΓÇö/g, "—");
+		cleaned = cleaned.replace(/\\\\/g, "\\");
+		cleaned = cleaned.replace(/\\"/g, '"');
+		cleaned = cleaned.replace(/\\'/g, "'");
+		cleaned = cleaned.replace(/\\n/g, "\n");
+		cleaned = cleaned.replace(/\\t/g, "\t");
+		cleaned = cleaned.replace(/\\r/g, "\r");
+
+		this.stringCache.set(rawValue, cleaned);
+		return cleaned;
+	}
+
 	private extractStringValue(valueNode: Expression): string | null {
 		if (valueNode.type === "StringLiteral") {
-			const sanitized = sanitizeString(valueNode.raw);
+			const sanitized = this.sanitizeString(valueNode.raw);
 			return sanitized;
 		}
 		// Handle numbers/booleans being represented as strings if necessary
@@ -401,7 +404,7 @@ export class MetadataParser {
 			return valueNode.value;
 		}
 		if (valueNode.type === "StringLiteral") {
-			const num = Number.parseFloat(sanitizeString(valueNode.raw));
+			const num = Number.parseFloat(this.sanitizeString(valueNode.raw));
 			if (!Number.isNaN(num)) return num;
 		}
 		// logger.warn(`Expected NumericLiteral, got ${valueNode.type}`);
@@ -409,8 +412,8 @@ export class MetadataParser {
 	}
 
 	clearCache(): void {
-		parsedMetadataCache.clear();
-		STRING_CACHE.clear();
+		this.parsedMetadataCache.clear();
+		this.stringCache.clear();
 		logger.info("MetadataParser: Caches cleared.");
 	}
 }

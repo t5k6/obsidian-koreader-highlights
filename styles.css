@@ -90,7 +90,7 @@ mark[style*="#00ff00"] {
 
 /*  badges */
 .duplicate-badge {
-    font-size: .75rem;
+    font-size: 0.75rem;
     padding: 4px 8px;
     border-radius: 4px;
     font-weight: 500;
@@ -127,7 +127,7 @@ mark[style*="#00ff00"] {
     align-items: center;
     gap: 8px;
     width: 100%;
-    transition: transform .15s;
+    transition: transform 0.15s;
 }
 
 .mod-button:hover:not(.mod-disabled) {
@@ -146,7 +146,7 @@ mark[style*="#00ff00"] {
 }
 
 .mod-disabled {
-    opacity: .5;
+    opacity: 0.5;
     cursor: not-allowed;
 }
 
@@ -281,7 +281,10 @@ mark[style*="#00ff00"] {
 }
 
 /* Style for the code block container rendered by MarkdownRenderer */
-.koreader-template-preview-modal .template-preview-code-block .markdown-rendered pre {
+.koreader-template-preview-modal
+    .template-preview-code-block
+    .markdown-rendered
+    pre {
     max-height: 40vh;
     overflow: auto;
     margin-top: 0.5rem;
@@ -291,6 +294,19 @@ mark[style*="#00ff00"] {
 /* ─────────────────────────────────────────────────────────────────── */
 /*  Settings Panel UI                                                  */
 /* ─────────────────────────────────────────────────────────────────── */
+
+/* Style section headings as H2 */
+.koreader-importer-settings summary {
+    color: var(--h2-color);
+    font-family: var(--h2-font);
+    font-style: var(--h2-style);
+    font-variant: var(--h2-variant);
+    line-height: var(--h2-line-height);
+    font-size: var(--font-ui-medium);
+    font-weight: var(--font-semibold);
+    margin-block-end: var(--p-spacing);
+    margin-block-start: var(--p-spacing);
+}
 
 /* Make all text inputs and textareas in our settings panel have a consistent width */
 .koreader-importer-settings .setting-item-control:has(input[type="text"]),

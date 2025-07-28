@@ -23,8 +23,8 @@ export async function pickDirectory(
 
     return path;
   } catch (err) {
-    console.error("KOReader-Importer: folder picker failed →", err);
-    new Notice("Unable to open system file-picker. Enter the path manually.");
+    console.error("KOReader Importer: utils: folder picker failed →", err);
+    new Notice("Unable to open system folder picker. Enter the path manually.");
     return undefined;
   }
 }

@@ -232,7 +232,10 @@ export class TemplateSettingsSection extends SettingsSection {
       new Notice(
         "Error creating template file. Check the console for details.",
       );
-      console.error("Failed to create custom template:", error);
+      console.error(
+        "KOReader Importer: TemplateSettingsSection: Failed to create custom template:",
+        error,
+      );
     }
   }
 }

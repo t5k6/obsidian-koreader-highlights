@@ -14,7 +14,10 @@ import { DEFAULT_LOGS_FOLDER } from "src/constants";
 /*                      1.  small utilities                            */
 /* ------------------------------------------------------------------ */
 
-const dayStamp = () => new Date().toISOString().slice(0, 10);
+const LOG_PREFIX = "KOReader Importer:";
+const datestamp = () => new Date().toISOString().slice(0, 10);
+const timestamp = () =>
+  new Date().toISOString().split(".")[0].replace(/[-:]/g, "");
 
 function formatArgs(args: unknown[]): string {
   return args
@@ -128,18 +131,21 @@ class FileSink {
     if (!this.curFile) return;
 
     const text = `${batch
-      .map((i) => `[${new Date(i.ts).toISOString()}] [${i.lvl}] ${i.msg}`)
+      .map(
+        (i) =>
+          `${new Date(i.ts).toISOString()} ${i.lvl.padEnd(5, " ")} ${i.msg}`,
+      )
       .join("\n")}\n`;
 
     try {
       await this.vault.adapter.append(this.curFile.path, text);
       this.curSize += text.length;
     } catch (e) {
-      console.error("KOReader Logger: append failed", e);
+      console.error(LOG_PREFIX, "logging: append failed", e);
       return;
     }
 
-    if (this.curSize >= this.MAX_FILE_SIZE || dayStamp() !== this.curDate) {
+    if (this.curSize >= this.MAX_FILE_SIZE || datestamp() !== this.curDate) {
       this.rotating = this.rotate();
     }
   }
@@ -149,18 +155,15 @@ class FileSink {
       await mkdirp(this.vault, this.dir);
 
       // create at most one file per day unless size exceeded
-      const date = dayStamp();
+      const date = datestamp();
       if (this.curDate === date && this.curSize < this.MAX_FILE_SIZE) return;
 
       this.curDate = date;
-      const path = normalizePath(`${this.dir}/log_${date}_${Date.now()}.md`);
-      this.curFile = await this.vault.create(
-        path,
-        `# KOReader Importer Log\nCreated ${new Date().toISOString()}\n\n`,
-      );
+      const path = normalizePath(`${this.dir}/log_${timestamp()}.md`);
+      this.curFile = await this.vault.create(path, `# ${path}` + "\n\n```\n");
       this.curSize = 0;
     } catch (e) {
-      console.error("KOReader Logger: rotate failed", e);
+      console.error(LOG_PREFIX, "logging: rotate failed", e);
       this.curFile = null;
     }
     await this.cleanup();
@@ -190,7 +193,7 @@ class FileSink {
           // eslint-disable-next-line no-await-in-loop
           await this.vault.adapter.remove(child.path);
         } catch (e) {
-          console.error("KOReader Logger: gzip error", e);
+          console.error(LOG_PREFIX, "logging: gzip error", e);
         }
       }
     }
@@ -206,7 +209,7 @@ class FileSink {
         // eslint-disable-next-line no-await-in-loop
         await this.vault.adapter.remove(f.path);
       } catch (e) {
-        console.error("KOReader Logger: delete old log failed", e);
+        console.error(LOG_PREFIX, "logging: delete old log failed", e);
       }
     }
   }
@@ -221,10 +224,10 @@ class FileSink {
 /* ------------------------------------------------------------------ */
 
 export enum LogLevel {
-  INFO = 0,
-  WARN = 1,
-  ERROR = 2,
-  NONE = 3,
+  NONE = 0,
+  ERROR = 1,
+  WARN = 2,
+  INFO = 3,
 }
 
 class Logger {
@@ -278,14 +281,14 @@ class Logger {
 
   /* ----------- internals ----------- */
   private emit(tag: string, lvl: LogLevel, args: unknown[]) {
-    if (this.level <= lvl) {
+    if (this.level >= lvl) {
       const msg = formatArgs(args);
       // eslint-disable-next-line no-console
       (lvl === LogLevel.ERROR
         ? console.error
         : lvl === LogLevel.WARN
           ? console.warn
-          : console.log)(msg);
+          : console.log)(LOG_PREFIX, msg);
 
       if (this.sink) this.queue.enqueue({ ts: Date.now(), lvl: tag, msg });
     }

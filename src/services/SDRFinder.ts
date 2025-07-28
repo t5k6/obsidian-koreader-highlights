@@ -102,12 +102,6 @@ export class SDRFinder {
 		}
 	}
 
-	clearCache(): void {
-		this.sdrDirCache.clear();
-		this.metadataNameCache.clear();
-		logger.info("SDRFinder: caches cleared");
-	}
-
 	/* ------------------------- Private ----------------------------- */
 
 	/**
@@ -134,7 +128,11 @@ export class SDRFinder {
 		if (!(await this.checkMountPoint())) return [];
 
 		const { koreaderMountPoint, excludedFolders } = this.plugin.settings;
-		const root = koreaderMountPoint!;
+		if (koreaderMountPoint === null) {
+			logger.warn(`SDRFinder: Found mountpoint to be null.`);
+			return [];
+		}
+		const root = koreaderMountPoint;
 		const excluded = new Set(
 			excludedFolders.map((e) => e.trim().toLowerCase()),
 		);

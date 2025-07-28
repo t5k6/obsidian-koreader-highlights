@@ -7,7 +7,7 @@
 	"scripts": {
 		"dev": "cross-env NODE_ENV=development node esbuild.config.cjs --watch",
 		"build": "cross-env NODE_ENV=production  node esbuild.config.cjs",
-		"lint": "@biomejs/biome check --write",
+		"lint": "biome check --write",
 		"test": "vitest"
 	},
 	"keywords": [

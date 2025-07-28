@@ -4,7 +4,12 @@ import { ProgressModal } from "src/ui/ProgressModal";
 import { asyncPool } from "src/utils/concurrency";
 import { getFileNameWithoutExt } from "src/utils/formatUtils";
 import { logger } from "src/utils/logging";
-import { addSummary, blankSummary, type LuaMetadata, type Summary } from "../types";
+import {
+	addSummary,
+	blankSummary,
+	type LuaMetadata,
+	type Summary,
+} from "../types";
 import type { ContentGenerator } from "./ContentGenerator";
 import type { DatabaseService } from "./DatabaseService";
 import type { DuplicateHandler } from "./DuplicateHandler";
@@ -111,13 +116,6 @@ export class ImportManager {
 		}
 	}
 
-	async clearCaches(): Promise<void> {
-		this.sdrFinder.clearCache();
-		this.metadataParser.clearCache();
-		this.duplicateHandler.clearCache();
-		logger.info("ImportManager: Import-related caches cleared.");
-	}
-
 	/**
 	 * Processes a single SDR directory to extract and save highlights.
 	 * @param sdrPath - Path to the SDR directory containing metadata.lua
@@ -194,7 +192,9 @@ export class ImportManager {
 	 * @param luaMetadata - The metadata containing highlights to save
 	 * @returns Summary object with counts of the operation results
 	 */
-	private async saveHighlightsToFile(luaMetadata: LuaMetadata): Promise<Summary> {
+	private async saveHighlightsToFile(
+		luaMetadata: LuaMetadata,
+	): Promise<Summary> {
 		const summary = blankSummary();
 
 		// Create a lazy provider for the file content

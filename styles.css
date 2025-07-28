@@ -2,15 +2,15 @@
 /* 0 ▸ KOReader RAW  (do NOT override – used as reference only)       */
 /* ─────────────────────────────────────────────────────────────────── */
 :root {
-    --khl-red-raw: #ff3300;
-    --khl-orange-raw: #ff8800;
-    --khl-yellow-raw: #ffff33;
-    --khl-green-raw: #00aa66;
-    --khl-olive-raw: #88ff77;
-    --khl-cyan-raw: #00ffee;
-    --khl-blue-raw: #0066ff;
-    --khl-purple-raw: #ee00ff;
-    --khl-gray-raw: #808080;
+	--khl-red-raw: #ff3300;
+	--khl-orange-raw: #ff8800;
+	--khl-yellow-raw: #ffff33;
+	--khl-green-raw: #00aa66;
+	--khl-olive-raw: #88ff77;
+	--khl-cyan-raw: #00ffee;
+	--khl-blue-raw: #0066ff;
+	--khl-purple-raw: #ee00ff;
+	--khl-gray-raw: #808080;
 }
 
 /* ─────────────────────────────────────────────────────────────────── */
@@ -18,251 +18,251 @@
 /*    Dark & light themes can override only this block!               */
 /* ─────────────────────────────────────────────────────────────────── */
 :root {
-    --khl-red: var(--khl-red-raw);
-    --khl-orange: var(--khl-orange-raw);
-    --khl-yellow: var(--khl-yellow-raw);
-    --khl-green: #28c828;
-    /* softened green for light mode   */
-    --khl-olive: var(--khl-olive-raw);
-    --khl-cyan: var(--khl-cyan-raw);
-    --khl-blue: var(--khl-blue-raw);
-    --khl-purple: var(--khl-purple-raw);
-    --khl-gray: var(--khl-gray-raw);
+	--khl-red: var(--khl-red-raw);
+	--khl-orange: var(--khl-orange-raw);
+	--khl-yellow: var(--khl-yellow-raw);
+	--khl-green: #28c828;
+	/* softened green for light mode   */
+	--khl-olive: var(--khl-olive-raw);
+	--khl-cyan: var(--khl-cyan-raw);
+	--khl-blue: var(--khl-blue-raw);
+	--khl-purple: var(--khl-purple-raw);
+	--khl-gray: var(--khl-gray-raw);
 }
 
 body.theme-dark {
-    --khl-green: #19b219;
-    /* bit darker & more saturated     */
+	--khl-green: #19b219;
+	/* bit darker & more saturated     */
 }
 
 /* ─────────────────────────────────────────────────────────────────── */
 /* 2 ▸ Foreground helpers                                             */
 /* ─────────────────────────────────────────────────────────────────── */
 :root {
-    --on-khl-red: #ffffff;
-    --on-khl-orange: #000000;
-    --on-khl-yellow: #000000;
-    --on-khl-green: #ffffff;
-    /* light & dark share the same   */
-    --on-khl-olive: #000000;
-    --on-khl-cyan: #000000;
-    --on-khl-blue: #ffffff;
-    --on-khl-purple: #ffffff;
-    --on-khl-gray: #000000;
+	--on-khl-red: #ffffff;
+	--on-khl-orange: #000000;
+	--on-khl-yellow: #000000;
+	--on-khl-green: #ffffff;
+	/* light & dark share the same   */
+	--on-khl-olive: #000000;
+	--on-khl-cyan: #000000;
+	--on-khl-blue: #ffffff;
+	--on-khl-purple: #ffffff;
+	--on-khl-gray: #000000;
 }
 
 body.theme-dark {
-    --on-khl-green: #e8ffe8;
-    /* softer mint on OLED black      */
+	--on-khl-green: #e8ffe8;
+	/* softer mint on OLED black      */
 }
 
 /* Optional: neutralise legacy neon lime pasted from elsewhere */
 mark[style*="#00ff00"] {
-    background-color: var(--khl-green) !important;
-    color: var(--on-khl-green) !important;
+	background-color: var(--khl-green) !important;
+	color: var(--on-khl-green) !important;
 }
 
 /* ─────────────────────────────────────────────────────────────────── */
 /*  Duplicate-Finder modal                                             */
 /* ─────────────────────────────────────────────────────────────────── */
 .duplicate-modal-container {
-    max-width: 600px;
-    margin: auto;
-    padding: 20px;
+	max-width: 600px;
+	margin: auto;
+	padding: 20px;
 }
 
 .duplicate-modal-container:focus {
-    outline: 2px solid var(--color-accent);
-    outline-offset: 2px;
+	outline: 2px solid var(--color-accent);
+	outline-offset: 2px;
 }
 
 .duplicate-modal-header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 20px;
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	margin-bottom: 20px;
 }
 
 .duplicate-modal-header h2 {
-    margin: 0;
-    flex-grow: 1;
+	margin: 0;
+	flex-grow: 1;
 }
 
 /*  badges */
 .duplicate-badge {
-    font-size: .75rem;
-    padding: 4px 8px;
-    border-radius: 4px;
-    font-weight: 500;
+	font-size: 0.75rem;
+	padding: 4px 8px;
+	border-radius: 4px;
+	font-weight: 500;
 }
 
 .duplicate-badge-exact {
-    background: var(--khl-green);
-    color: var(--on-khl-green);
+	background: var(--khl-green);
+	color: var(--on-khl-green);
 }
 
 .duplicate-badge-updated {
-    background: var(--khl-yellow);
-    color: var(--on-khl-yellow);
+	background: var(--khl-yellow);
+	color: var(--on-khl-yellow);
 }
 
 .duplicate-badge-divergent {
-    background: var(--khl-orange);
-    color: var(--on-khl-orange);
+	background: var(--khl-orange);
+	color: var(--on-khl-orange);
 }
 
 /*  buttons */
 .duplicate-buttons {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 12px;
-    margin-top: 24px;
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 12px;
+	margin-top: 24px;
 }
 
 .mod-button {
-    padding: 12px;
-    border-radius: 6px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    transition: transform .15s;
+	padding: 12px;
+	border-radius: 6px;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	transition: transform 0.15s;
 }
 
 .mod-button:hover:not(.mod-disabled) {
-    transform: translateY(-1px);
-    filter: brightness(1.1);
+	transform: translateY(-1px);
+	filter: brightness(1.1);
 }
 
 .mod-cta {
-    background: var(--color-accent);
-    color: var(--color-base-100);
+	background: var(--color-accent);
+	color: var(--color-base-100);
 }
 
 .mod-warning {
-    background: var(--khl-red);
-    color: var(--on-khl-red);
+	background: var(--khl-red);
+	color: var(--on-khl-red);
 }
 
 .mod-disabled {
-    opacity: .5;
-    cursor: not-allowed;
+	opacity: 0.5;
+	cursor: not-allowed;
 }
 
 /* Message and File Path */
 .duplicate-message {
-    margin-bottom: 20px;
+	margin-bottom: 20px;
 }
 
 .duplicate-file-path {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
-    background-color: var(--color-base-20);
-    border-radius: 4px;
-    font-family: var(--font-monospace);
-    font-size: 0.9em;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 12px;
+	background-color: var(--color-base-20);
+	border-radius: 4px;
+	font-family: var(--font-monospace);
+	font-size: 0.9em;
 }
 
 /* Statistics Section */
 .duplicate-stats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 16px;
-    background: var(--color-base-20);
-    padding: 16px;
-    border-radius: 6px;
-    margin: 20px 0;
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+	gap: 16px;
+	background: var(--color-base-20);
+	padding: 16px;
+	border-radius: 6px;
+	margin: 20px 0;
 }
 
 .stat-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
+	display: flex;
+	align-items: center;
+	gap: 8px;
 }
 
 .stat-icon {
-    color: var(--color-accent);
+	color: var(--color-accent);
 }
 
 .stat-value {
-    font-weight: bold;
-    margin-left: auto;
+	font-weight: bold;
+	margin-left: auto;
 }
 
 /* Settings Section */
 .duplicate-settings {
-    margin: 20px 0;
-    padding: 12px;
-    background: var(--color-base-20);
-    border-radius: 6px;
+	margin: 20px 0;
+	padding: 12px;
+	background: var(--color-base-20);
+	border-radius: 6px;
 }
 
 .button-container {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    width: 100%;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	width: 100%;
 }
 
 .button-container button:focus {
-    box-shadow: 0 0 0 2px var(--color-accent);
+	box-shadow: 0 0 0 2px var(--color-accent);
 }
 
 .duplicate-buttons .mod-button {
-    width: 100%;
-    padding: 12px;
-    border-radius: 6px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    transition: all 0.2s ease;
-    box-sizing: border-box;
+	width: 100%;
+	padding: 12px;
+	border-radius: 6px;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 8px;
+	transition: all 0.2s ease;
+	box-sizing: border-box;
 }
 
 .button-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
+	display: flex;
+	align-items: center;
+	justify-content: center;
 }
 
 .duplicate-buttons .mod-cta {
-    background-color: var(--color-accent);
-    color: var(--color-base-100);
+	background-color: var(--color-accent);
+	color: var(--color-base-100);
 }
 
 .duplicate-buttons .mod-warning {
-    background-color: var(--color-red);
-    color: var(--color-base-100);
+	background-color: var(--color-red);
+	color: var(--color-base-100);
 }
 
 .duplicate-buttons .mod-button:hover:not(.mod-disabled) {
-    transform: translateY(-1px);
-    filter: brightness(1.1);
+	transform: translateY(-1px);
+	filter: brightness(1.1);
 }
 
 .duplicate-buttons .mod-disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+	opacity: 0.5;
+	cursor: not-allowed;
 }
 
 /* Keyboard Shortcuts */
 .duplicate-shortcuts {
-    margin-top: 20px;
-    text-align: center;
-    font-size: 0.9em;
-    color: var(--color-base-70);
+	margin-top: 20px;
+	text-align: center;
+	font-size: 0.9em;
+	color: var(--color-base-70);
 }
 
 .duplicate-shortcuts kbd {
-    background: var(--color-base-30);
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-size: 0.9em;
+	background: var(--color-base-30);
+	padding: 2px 6px;
+	border-radius: 4px;
+	font-size: 0.9em;
 }
 
 /* ─────────────────────────────────────────────────────────────────── */
@@ -271,21 +271,23 @@ mark[style*="#00ff00"] {
 
 /* Style for the rendered output */
 .koreader-template-preview-modal .template-preview-rendered {
-    max-height: 40vh;
-    overflow: auto;
-    padding: 0.75rem 1rem;
-    background-color: var(--background-secondary);
-    border: 1px solid var(--background-modifier-border);
-    border-radius: var(--radius-m);
-    margin-top: 0.5rem;
+	max-height: 40vh;
+	overflow: auto;
+	padding: 0.75rem 1rem;
+	background-color: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	margin-top: 0.5rem;
 }
 
 /* Style for the code block container rendered by MarkdownRenderer */
-.koreader-template-preview-modal .template-preview-code-block .markdown-rendered pre {
-    max-height: 40vh;
-    overflow: auto;
-    margin-top: 0.5rem;
-    /* Padding and other styles are usually handled by the theme's pre/code styling */
+.koreader-template-preview-modal .template-preview-code-block
+	.markdown-rendered
+	pre {
+	max-height: 40vh;
+	overflow: auto;
+	margin-top: 0.5rem;
+	/* Padding and other styles are usually handled by the theme's pre/code styling */
 }
 
 /* ─────────────────────────────────────────────────────────────────── */
@@ -295,30 +297,30 @@ mark[style*="#00ff00"] {
 /* Make all text inputs and textareas in our settings panel have a consistent width */
 .koreader-importer-settings .setting-item-control:has(input[type="text"]),
 .koreader-importer-settings .setting-item-control:has(textarea) {
-    max-width: 450px;
-    width: 100%;
-    flex: 1 1 auto;
-    justify-content: flex-end;
+	max-width: 450px;
+	width: 100%;
+	flex: 1 1 auto;
+	justify-content: flex-end;
 }
 
 /* Make the input/textarea itself fill its now-constrained container */
 .koreader-importer-settings .setting-item-control input[type="text"],
 .koreader-importer-settings .setting-item-control textarea {
-    width: 100%;
+	width: 100%;
 }
 
 /* Special handling for the template selector to align dropdown and buttons */
 .koreader-template-selector .setting-item-control {
-    display: flex;
-    justify-content: flex-end;
-    /* Align to the right side */
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    max-width: 450px;
+	display: flex;
+	justify-content: flex-end;
+	/* Align to the right side */
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	max-width: 450px;
 }
 
 .koreader-template-selector .setting-item-control .dropdown {
-    flex-grow: 1;
-    /* Allow dropdown to take up available space */
+	flex-grow: 1;
+	/* Allow dropdown to take up available space */
 }

@@ -1,4 +1,4 @@
-import { normalizePath, Notice, TFile, type Vault } from "obsidian";
+import { Notice, normalizePath, TFile, type Vault } from "obsidian";
 import { DEFAULT_TEMPLATES_FOLDER } from "src/constants";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import type { CacheManager } from "src/utils/cache/CacheManager";
@@ -92,9 +92,6 @@ export class TemplateManager {
 	 * @returns Object containing feature flags like autoInsertDivider
 	 */
 	private analyseTemplateFeatures(tpl: string): CachedTemplate["features"] {
-		const noteLines = tpl.split(/\r?\n/).filter((l) => l.includes("{{note}}"));
-		const userHandlesPrefix = noteLines.some((l) => NOTE_LINE_REGEX.test(l));
-
 		const hasMdRule = MD_RULE_REGEX.test(tpl);
 		const hasHtmlHr = HTML_HR_REGEX.test(tpl);
 		const autoInsertDivider = !(hasMdRule || hasHtmlHr);
@@ -414,16 +411,6 @@ export class TemplateManager {
 
 		// Wait for all file writes to complete.
 		await Promise.all(writePromises);
-	}
-
-	/**
-	 * Clears all template-related caches.
-	 * Should be called when templates are modified or settings change.
-	 */
-	clearCache(): void {
-		this.rawTemplateCache.clear();
-		this.compiledTemplateCache.clear();
-		logger.info("TemplateManager: TemplateManager caches cleared.");
 	}
 
 	/**

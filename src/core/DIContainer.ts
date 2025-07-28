@@ -8,7 +8,7 @@ export interface Disposable {
 
 // simple dependency injection container that manages the lifecycle of instances.
 export class DIContainer {
-	private instances = new Map<Function, any>();
+	private instances = new Map<Ctor<any>, any>();
 
 	public registerSingleton<T>(token: Ctor<T>, instance: T): DIContainer {
 		if (this.instances.has(token)) {

@@ -134,11 +134,11 @@ export function generateObsidianFileName(
  * Simplifies KOReader SDR directory names to human-readable format.
  * Removes series prefixes, duplicate tokens, and duplicate blocks.
  * Case-insensitive but preserves first spelling encountered.
- * 
+ *
  * Examples:
  * - "(Series-1) Title - Author - Title" → "Title - Author"
  * - "A - B - C - A - B - C" → "A - B - C"
- * 
+ *
  * @param raw - The raw SDR directory name
  * @param delimiter - Separator to use (default " - ")
  * @returns Simplified filename or "Untitled" if result is empty

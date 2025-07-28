@@ -6,7 +6,7 @@ import type {
 	TableValue,
 } from "luaparse/lib/ast";
 import type { CacheManager } from "src/utils/cache/CacheManager";
-import { LruCache } from "src/utils/cache/LruCache";
+import type { LruCache } from "src/utils/cache/LruCache";
 import { createLogger, logger } from "src/utils/logging";
 import {
 	type Annotation,
@@ -414,12 +414,17 @@ export class MetadataParser {
 			cleaned = cleaned.slice(1, -1);
 		}
 		cleaned = cleaned.replace(/ΓÇö/g, "—");
-		cleaned = cleaned.replace(/\\\\/g, "\\");
-		cleaned = cleaned.replace(/\\"/g, '"');
-		cleaned = cleaned.replace(/\\'/g, "'");
-		cleaned = cleaned.replace(/\\n/g, "\n");
-		cleaned = cleaned.replace(/\\t/g, "\t");
-		cleaned = cleaned.replace(/\\r/g, "\r");
+		cleaned = cleaned.replace(/\\(.)/g, function (match, char) {
+			const escapeMap: Record<string, string> = {
+				'n': '\n',
+				't': '\t',
+				'r': '\r',
+				'"': '"',
+				"'": "'",
+				'\\': '\\'
+			};
+			return escapeMap[char] || match;
+		});
 
 		this.stringCache.set(rawValue, cleaned);
 		return cleaned;
@@ -461,11 +466,5 @@ export class MetadataParser {
 		}
 		// logger.warn(`Expected NumericLiteral, got ${valueNode.type}`);
 		return null;
-	}
-
-	clearCache(): void {
-		this.parsedMetadataCache.clear();
-		this.stringCache.clear();
-		logger.info("MetadataParser: Caches cleared.");
 	}
 }

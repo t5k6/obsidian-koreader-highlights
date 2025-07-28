@@ -68,53 +68,6 @@ interface FieldRule<T = Primitive> {
 	validate?: (v: any) => boolean;
 }
 
-const FIELD_RULES: FieldRule[] = [
-	{
-		key: "koreaderMountPoint",
-		type: "string",
-		default: DEFAULT_SETTINGS.koreaderMountPoint,
-	},
-	{
-		key: "highlightsFolder",
-		type: "string",
-		default: DEFAULT_SETTINGS.highlightsFolder,
-	},
-	{ key: "debugMode", type: "boolean", default: DEFAULT_SETTINGS.debugMode },
-	{
-		key: "debugLevel",
-		type: "number",
-		default: DEFAULT_SETTINGS.debugLevel,
-		validate: (v) => [0, 1, 2, 3].includes(v),
-	},
-	{
-		key: "enableFullDuplicateCheck",
-		type: "boolean",
-		default: DEFAULT_SETTINGS.enableFullDuplicateCheck,
-	},
-	{
-		key: "autoMergeOnAddition",
-		type: "boolean",
-		default: DEFAULT_SETTINGS.autoMergeOnAddition,
-	},
-	{
-		key: "maxHighlightGap",
-		type: "number",
-		default: DEFAULT_SETTINGS.maxHighlightGap,
-		validate: (v) => typeof v === "number" && v >= 0,
-	},
-	{
-		key: "maxTimeGapMinutes",
-		type: "number",
-		default: DEFAULT_SETTINGS.maxTimeGapMinutes,
-		validate: (v) => typeof v === "number" && v >= 0,
-	},
-	{
-		key: "mergeOverlappingHighlights",
-		type: "boolean",
-		default: DEFAULT_SETTINGS.mergeOverlappingHighlights,
-	},
-];
-
 /* ------------------------------------------------------------------ */
 /*                      3.  MAIN CLASS                                 */
 /* ------------------------------------------------------------------ */

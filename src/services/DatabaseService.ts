@@ -49,8 +49,6 @@ CREATE TABLE IF NOT EXISTS book(
 CREATE INDEX IF NOT EXISTS idx_book_path ON book(vault_path);
 `;
 
-const log = createLogger("DatabaseService");
-
 /* ------------------------------------------------------------------ */
 /*                            MAIN CLASS                              */
 /* ------------------------------------------------------------------ */
@@ -80,7 +78,6 @@ export class DatabaseService implements Disposable {
 	/* -------------------  object life-cycle ----------------------- */
 	private db: SQLDatabase | null = null; // statistics.sqlite3
 	private idxDb: SQLDatabase | null = null; // highlight_index.sqlite
-	private initializing: Promise<void> | null = null;
 	private idxInitializing: Promise<void> | null = null;
 
 	private idxPath: string; // cached path for persistence
@@ -284,7 +281,7 @@ export class DatabaseService implements Disposable {
 		vaultPath?: string,
 	): Promise<void> {
 		await this.ensureIndexReady();
-		this.idxDb!.run(
+		this.idxDb?.run(
 			`
 				INSERT INTO book(key,id,title,authors,vault_path)
 				VALUES(?,?,?,?,?)

@@ -91,7 +91,7 @@ async function withVaultLock<T>(
 ): Promise<T> {
 	const prev = fileCreateLock.get(vault) ?? Promise.resolve();
 	let unlock: () => void;
-	let next = new Promise<void>((res) => {
+	const next = new Promise<void>((res) => {
 		unlock = res;
 	});
 	fileCreateLock.set(

@@ -14,6 +14,11 @@ export class CommandManager {
 		private readonly cacheManager: CacheManager,
 	) {}
 
+	/**
+	 * Executes the highlight import process.
+	 * Validates mount point availability before starting import.
+	 * Handles cancellation and error reporting.
+	 */
 	async executeImport(): Promise<void> {
 		logger.info("CommandManager: Import triggered.");
 
@@ -40,6 +45,10 @@ export class CommandManager {
 		});
 	}
 
+	/**
+	 * Executes a scan for available highlights without importing.
+	 * Shows what files would be processed in an import.
+	 */
 	async executeScan(): Promise<void> {
 		logger.info("CommandManager: Scan triggered.");
 
@@ -55,6 +64,10 @@ export class CommandManager {
 		});
 	}
 
+	/**
+	 * Clears all plugin caches.
+	 * Useful when encountering issues or after changing settings.
+	 */
 	async executeClearCaches(): Promise<void> {
 		logger.info("CommandManager: Cache clear triggered from plugin.");
 

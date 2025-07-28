@@ -61,10 +61,21 @@ const reverseMap = new Map(
 /*               2.  Value normalisers / formatters                   */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Checks if a value is valid for frontmatter inclusion.
+ * @param value - Value to check
+ * @returns True if value is not null/undefined/empty string
+ */
 function isValid(value: unknown): boolean {
 	return value !== undefined && value !== null && String(value).trim() !== "";
 }
 
+/**
+ * Splits a string by regex and trims each part.
+ * @param s - String to split
+ * @param rx - Regular expression to split by
+ * @returns Array of trimmed non-empty strings
+ */
 function splitAndTrim(s: string, rx: RegExp): string[] {
 	return s
 		.split(rx)
@@ -72,6 +83,13 @@ function splitAndTrim(s: string, rx: RegExp): string[] {
 		.filter(Boolean);
 }
 
+/**
+ * Formats document properties for frontmatter display.
+ * Handles special formatting for authors, keywords, and descriptions.
+ * @param key - The document property key
+ * @param v - The raw value to format
+ * @returns Formatted string or array
+ */
 function formatDocProp(key: keyof DocProps, v: unknown): string | string[] {
 	const str = String(v);
 	switch (key) {
@@ -89,6 +107,12 @@ function formatDocProp(key: keyof DocProps, v: unknown): string | string[] {
 	}
 }
 
+/**
+ * Formats statistical values for display.
+ * @param key - The statistic key
+ * @param v - The raw statistical value
+ * @returns Formatted string or number
+ */
 function formatStat(key: ProgKey, v: unknown): string | number {
 	switch (key) {
 		case "lastRead":
@@ -114,7 +138,13 @@ function formatStat(key: ProgKey, v: unknown): string | number {
 /* ------------------------------------------------------------------ */
 
 export class FrontmatterGenerator {
-	/* --------- creation from scratch ---------- */
+	/**
+	 * Creates frontmatter data from KOReader metadata.
+	 * Processes document properties, highlight counts, and reading statistics.
+	 * @param meta - KOReader metadata
+	 * @param opts - Frontmatter generation settings
+	 * @returns Complete frontmatter data object
+	 */
 	createFrontmatterData(
 		meta: LuaMetadata,
 		opts: FrontmatterSettings,
@@ -173,7 +203,14 @@ export class FrontmatterGenerator {
 		return fm as FrontmatterData;
 	}
 
-	/* --------- merge existing ↔ new ---------- */
+	/**
+	 * Merges existing frontmatter with new KOReader data.
+	 * Preserves custom fields while updating statistics and counts.
+	 * @param existing - Existing parsed frontmatter
+	 * @param meta - New KOReader metadata
+	 * @param opts - Frontmatter generation settings
+	 * @returns Merged frontmatter data
+	 */
 	mergeFrontmatterData(
 		existing: ParsedFrontmatter,
 		meta: LuaMetadata,
@@ -225,7 +262,13 @@ export class FrontmatterGenerator {
 		return merged as FrontmatterData;
 	}
 
-	/* --------- YAML generation ---------- */
+	/**
+	 * Converts frontmatter data to YAML string.
+	 * Applies formatting, sorting, and friendly key mapping.
+	 * @param data - Frontmatter data to convert
+	 * @param options - Formatting options
+	 * @returns YAML string with frontmatter delimiters
+	 */
 	formatDataToYaml(
 		data: FrontmatterData | ParsedFrontmatter,
 		{ useFriendlyKeys = true, sortKeys = true } = {},
@@ -261,6 +304,13 @@ export class FrontmatterGenerator {
 		return Object.keys(out).length ? `---\n${stringifyYaml(out)}---` : "";
 	}
 
+	/**
+	 * Generates complete YAML frontmatter from KOReader metadata.
+	 * Convenience method that creates data and formats to YAML.
+	 * @param md - KOReader metadata
+	 * @param opts - Frontmatter generation settings
+	 * @returns YAML frontmatter string
+	 */
 	generateYamlFromLuaMetadata(
 		md: LuaMetadata,
 		opts: FrontmatterSettings,

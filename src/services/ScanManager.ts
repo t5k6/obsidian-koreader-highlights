@@ -17,6 +17,11 @@ export class ScanManager {
 		private sdrFinder: SDRFinder,
 	) {}
 
+	/**
+	 * Performs a scan for KOReader highlight files without importing.
+	 * Creates a report showing what files would be processed.
+	 * Useful for debugging and verifying settings.
+	 */
 	async scanForHighlights(): Promise<void> {
 		logger.info("ScanManager: Starting KOReader SDR scan process...");
 
@@ -61,6 +66,10 @@ export class ScanManager {
 		}
 	}
 
+	/**
+	 * Creates or updates the scan report file in the vault.
+	 * @param sdrFilePaths - Array of SDR directory paths found
+	 */
 	private async createOrUpdateScanNote(sdrFilePaths: string[]): Promise<void> {
 		const reportFolderName = this.plugin.settings.highlightsFolder;
 		const uniqueReportPath = await generateUniqueFilePath(
@@ -97,6 +106,11 @@ export class ScanManager {
 		}
 	}
 
+	/**
+	 * Generates the markdown content for the scan report.
+	 * @param sdrFilePaths - Array of SDR directory paths found
+	 * @returns Formatted markdown report content
+	 */
 	private generateReportContent(sdrFilePaths: string[]): string {
 		const timestamp = new Date().toLocaleString();
 		let content = "# KOReader SDR Scan Report\n\n";

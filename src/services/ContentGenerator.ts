@@ -19,6 +19,12 @@ export class ContentGenerator {
 		private plugin: KoreaderImporterPlugin,
 	) {}
 
+	/**
+	 * Generates formatted markdown content from an array of annotations.
+	 * Groups annotations by chapter, sorts them, and renders using templates.
+	 * @param annotations - Array of highlight annotations from KOReader
+	 * @returns Promise resolving to formatted markdown string
+	 */
 	async generateHighlightsContent(annotations: Annotation[]): Promise<string> {
 		if (!annotations || annotations.length === 0) {
 			return "";
@@ -119,9 +125,13 @@ export class ContentGenerator {
 		return finalContent.replace(/\n{3,}/g, "\n\n").trim();
 	}
 
-	/* 	Groups consecutive annotations that are close together within a chapter.
-	 	Highlights are considered successive if they are on the same page
-	 	and their character position is within a defined gap. 				*/
+	/**
+	 * Groups consecutive annotations that are close together within a chapter.
+	 * Highlights are considered successive if they are on the same page
+	 * and their character position is within a defined gap.
+	 * @param anno - Array of annotations to group
+	 * @returns Array of successive groups with their internal separators
+	 */
 	private groupSuccessiveHighlights(anno: Annotation[]): SuccessiveGroup[] {
 		const groups: SuccessiveGroup[] = [];
 		let current: Annotation[] = [];

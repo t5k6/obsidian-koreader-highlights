@@ -26,6 +26,12 @@ export class ImportManager {
 		private readonly snapshotManager: SnapshotManager,
 	) {}
 
+	/**
+	 * Main entry point for importing highlights from KOReader.
+	 * Finds all SDR directories with metadata, processes them concurrently,
+	 * and displays progress to the user.
+	 * @returns Promise that resolves when import is complete
+	 */
 	async importHighlights(): Promise<void> {
 		logger.info("ImportManager: Starting KOReader highlight import process…");
 
@@ -112,6 +118,11 @@ export class ImportManager {
 		logger.info("ImportManager: Import-related caches cleared.");
 	}
 
+	/**
+	 * Processes a single SDR directory to extract and save highlights.
+	 * @param sdrPath - Path to the SDR directory containing metadata.lua
+	 * @returns Summary object with counts of created, merged, skipped, and error items
+	 */
 	private async processSdr(sdrPath: string): Promise<Summary> {
 		const summary = blankSummary();
 
@@ -147,6 +158,12 @@ export class ImportManager {
 		return summary;
 	}
 
+	/**
+	 * Enriches metadata with reading statistics from the database.
+	 * Updates title and authors if better information is found in the database.
+	 * @param luaMetadata - The metadata object to enrich
+	 * @returns Promise that resolves when enrichment is complete
+	 */
 	private async enrichWithStatistics(luaMetadata: LuaMetadata): Promise<void> {
 		const { md5, docProps } = luaMetadata;
 		const { authors, title } = docProps;
@@ -171,6 +188,12 @@ export class ImportManager {
 		);
 	}
 
+	/**
+	 * Saves highlights to a markdown file, handling duplicates appropriately.
+	 * Creates snapshots for future 3-way merges and updates the database.
+	 * @param luaMetadata - The metadata containing highlights to save
+	 * @returns Summary object with counts of the operation results
+	 */
 	private async saveHighlightsToFile(luaMetadata: LuaMetadata): Promise<Summary> {
 		const summary = blankSummary();
 
@@ -206,6 +229,11 @@ export class ImportManager {
 		return summary;
 	}
 
+	/**
+	 * Generates the complete markdown file content including frontmatter and highlights.
+	 * @param luaMetadata - The metadata containing document props and annotations
+	 * @returns The formatted markdown content as a string
+	 */
 	private async generateFileContent(luaMetadata: LuaMetadata): Promise<string> {
 		const fm = this.frontmatterGenerator.generateYamlFromLuaMetadata(
 			luaMetadata,

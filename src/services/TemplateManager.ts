@@ -72,6 +72,10 @@ export class TemplateManager {
 		logger.info(`TemplateManager initialized. Dark theme: ${this.isDarkTheme}`);
 	}
 
+	/**
+	 * Updates the cached theme state when the Obsidian theme changes.
+	 * Monitors for dark/light theme switches to adjust rendering if needed.
+	 */
 	private updateTheme(): void {
 		const newThemeState = document.body.classList.contains(DARK_THEME_CLASS);
 		if (this.isDarkTheme !== newThemeState) {
@@ -82,6 +86,11 @@ export class TemplateManager {
 		}
 	}
 
+	/**
+	 * Analyzes a template string to determine its features and requirements.
+	 * @param tpl - The template string to analyze
+	 * @returns Object containing feature flags like autoInsertDivider
+	 */
 	private analyseTemplateFeatures(tpl: string): CachedTemplate["features"] {
 		const noteLines = tpl.split(/\r?\n/).filter((l) => l.includes("{{note}}"));
 		const userHandlesPrefix = noteLines.some((l) => NOTE_LINE_REGEX.test(l));
@@ -93,6 +102,12 @@ export class TemplateManager {
 		return { autoInsertDivider };
 	}
 
+	/**
+	 * Compiles a template string into an executable function.
+	 * Handles variable substitution and conditional blocks.
+	 * @param templateString - The raw template string
+	 * @returns Compiled template function that accepts TemplateData
+	 */
 	private compile(templateString: string): CompiledTemplate {
 		const noteLineHasQuote = /^[ \t]*>[^\n]*\{\{note\}\}/m.test(templateString);
 		const noteLines = templateString
@@ -135,11 +150,21 @@ export class TemplateManager {
 		}
 	}
 
+	/**
+	 * Determines if dividers should be automatically inserted between highlights.
+	 * Based on template analysis - returns false if template already contains dividers.
+	 * @returns Promise resolving to true if auto-insert is needed
+	 */
 	public async shouldAutoInsertDivider(): Promise<boolean> {
 		const { features } = await this.getCompiledTemplate();
 		return features.autoInsertDivider;
 	}
 
+	/**
+	 * Loads all built-in templates from the embedded JSON resource.
+	 * Parses template metadata and stores them for user selection.
+	 * @returns Promise that resolves when templates are loaded
+	 */
 	public async loadBuiltInTemplates(): Promise<void> {
 		if (this.builtInTemplates.size > 0) return;
 
@@ -175,6 +200,11 @@ export class TemplateManager {
 		);
 	}
 
+	/**
+	 * Updates the template manager with new plugin settings.
+	 * Clears caches if template-related settings have changed.
+	 * @param newSettings - The new plugin settings object
+	 */
 	updateSettings(newSettings: KoreaderHighlightImporterSettings): void {
 		const settings = this.plugin.settings;
 		const templateChanged =
@@ -194,6 +224,12 @@ export class TemplateManager {
 		}
 	}
 
+	/**
+	 * Validates a template to ensure it contains required variables.
+	 * Checks for presence of {{highlight}} and {{pageno}} at minimum.
+	 * @param content - The template content to validate
+	 * @returns Validation result with errors, warnings, and suggestions
+	 */
 	public validateTemplate(content: string): TemplateValidationResult {
 		const result: TemplateValidationResult = {
 			isValid: true,
@@ -219,6 +255,11 @@ export class TemplateManager {
 		return result;
 	}
 
+	/**
+	 * Loads the currently selected template, either built-in or custom.
+	 * Falls back to default template if selected template is invalid or missing.
+	 * @returns Promise resolving to the template string content
+	 */
 	async loadTemplate(): Promise<string> {
 		const { useCustomTemplate, selectedTemplate } =
 			this.plugin.settings.template;
@@ -268,6 +309,11 @@ export class TemplateManager {
 		return templateContent;
 	}
 
+	/**
+	 * Gets the compiled version of the current template.
+	 * Uses caching to avoid recompilation on repeated calls.
+	 * @returns Promise resolving to cached template with compiled function and features
+	 */
 	public async getCompiledTemplate(): Promise<CachedTemplate> {
 		const { useCustomTemplate, selectedTemplate } =
 			this.plugin.settings.template;
@@ -286,6 +332,11 @@ export class TemplateManager {
 		return cached;
 	}
 
+	/**
+	 * Loads a custom template file from the vault.
+	 * @param vaultPath - Path to the template file in the vault
+	 * @returns Promise resolving to template content or null if not found
+	 */
 	public async loadTemplateFromVault(
 		vaultPath: string,
 	): Promise<string | null> {
@@ -298,11 +349,22 @@ export class TemplateManager {
 		return null;
 	}
 
+	/**
+	 * Renders a template string with the provided data.
+	 * @param templateString - The template string to render
+	 * @param data - The data object containing values for template variables
+	 * @returns The rendered output string
+	 */
 	public render(templateString: string, data: TemplateData): string {
 		const compiled = this.compile(templateString);
 		return compiled(data).trim();
 	}
 
+	/**
+	 * Ensures built-in templates exist in the vault's template directory.
+	 * Creates the directory and template files if they don't exist.
+	 * @returns Promise that resolves when all templates are in place
+	 */
 	async ensureTemplates(): Promise<void> {
 		const templateDir = normalizePath(
 			this.plugin.settings.template.templateDir || DEFAULT_TEMPLATES_FOLDER,
@@ -354,12 +416,24 @@ export class TemplateManager {
 		await Promise.all(writePromises);
 	}
 
+	/**
+	 * Clears all template-related caches.
+	 * Should be called when templates are modified or settings change.
+	 */
 	clearCache(): void {
 		this.rawTemplateCache.clear();
 		this.compiledTemplateCache.clear();
 		logger.info("TemplateManager: TemplateManager caches cleared.");
 	}
 
+	/**
+	 * Renders a group of annotations using the compiled template.
+	 * Merges highlights and notes within the group based on context.
+	 * @param compiledFn - The compiled template function
+	 * @param group - Array of annotations to render together
+	 * @param ctx - Render context with separators and chapter info
+	 * @returns The rendered string for the annotation group
+	 */
 	public renderGroup(
 		compiledFn: CompiledTemplate,
 		group: Annotation[],
@@ -385,6 +459,13 @@ export class TemplateManager {
 		return compiledFn(data);
 	}
 
+	/**
+	 * Merges multiple highlight texts with appropriate separators.
+	 * Handles styling and gap indicators between non-contiguous highlights.
+	 * @param group - Array of annotations to merge
+	 * @param separators - Array of separators (" " or " [...] ")
+	 * @returns Merged and styled highlight text
+	 */
 	private mergeHighlightText(
 		group: Annotation[],
 		separators: (" " | " [...] ")[],
@@ -422,6 +503,11 @@ export class TemplateManager {
 		return result;
 	}
 
+	/**
+	 * Merges notes from multiple annotations with dividers.
+	 * @param group - Array of annotations containing notes
+	 * @returns Merged notes separated by horizontal rules
+	 */
 	private mergeNotes(group: Annotation[]): string {
 		const notes = group
 			.map((g) => g.note)

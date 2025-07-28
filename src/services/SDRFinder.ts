@@ -52,6 +52,10 @@ export class SDRFinder {
 
 	/* -------------------------- Public ----------------------------- */
 
+	/**
+	 * Updates cached settings and clears caches if mount point changed.
+	 * Should be called when plugin settings are modified.
+	 */
 	updateSettings(): void {
 		const prevKey = this.cacheKey;
 		this.updateCacheKey();
@@ -61,15 +65,29 @@ export class SDRFinder {
 		}
 	}
 
+	/**
+	 * Provides an async iterator over all SDR directories with metadata.
+	 * @yields SDR directory paths
+	 */
 	async *iterSdrDirectories(): AsyncGenerator<string> {
 		for (const dir of await this.findSdrDirectoriesWithMetadata()) yield dir;
 	}
 
+	/**
+	 * Finds all SDR directories containing metadata files.
+	 * Results are cached and memoized for performance.
+	 * @returns Array of SDR directory paths
+	 */
 	async findSdrDirectoriesWithMetadata(): Promise<string[]> {
 		if (!this.cacheKey) return [];
 		return this.findSdrDirectoriesWithMetadataMemoized(this.cacheKey);
 	}
 
+	/**
+	 * Reads the content of a metadata.lua file from an SDR directory.
+	 * @param sdrDir - Path to the SDR directory
+	 * @returns File content as string or null if not found/readable
+	 */
 	async readMetadataFileContent(sdrDir: string): Promise<string | null> {
 		const name = await this.getMetadataFileName(sdrDir);
 		if (!name) return null;
@@ -92,6 +110,10 @@ export class SDRFinder {
 
 	/* ------------------------- Private ----------------------------- */
 
+	/**
+	 * Updates the cache key based on current settings.
+	 * Used to invalidate caches when settings change.
+	 */
 	private updateCacheKey(): void {
 		const { koreaderMountPoint, excludedFolders, allowedFileTypes } =
 			this.plugin.settings;
@@ -102,6 +124,11 @@ export class SDRFinder {
 		].join("::");
 	}
 
+	/**
+	 * Performs the actual filesystem scan for SDR directories.
+	 * @param cacheKey - Cache key to validate scan currency
+	 * @returns Array of valid SDR directory paths
+	 */
 	private async scan(cacheKey: string): Promise<string[]> {
 		if (this.cacheKey !== cacheKey) return []; // Stale call check
 		if (!(await this.checkMountPoint())) return [];
@@ -120,6 +147,12 @@ export class SDRFinder {
 		return results;
 	}
 
+	/**
+	 * Recursively walks directory tree looking for SDR directories.
+	 * @param dir - Directory to search
+	 * @param excluded - Set of excluded folder names (lowercase)
+	 * @param out - Output array to collect results
+	 */
 	private async walk(
 		dir: string,
 		excluded: Set<string>,
@@ -152,6 +185,12 @@ export class SDRFinder {
 		}
 	}
 
+	/**
+	 * Finds the metadata filename in an SDR directory.
+	 * Respects allowed file type settings.
+	 * @param dir - SDR directory path
+	 * @returns Metadata filename or null if not found
+	 */
 	private async getMetadataFileName(dir: string): Promise<string | null> {
 		const cached = this.metadataNameCache.get(dir);
 		if (cached !== undefined) return cached;
@@ -188,6 +227,11 @@ export class SDRFinder {
 
 	/* ---------- mount-point handling / auto-detect ----------------- */
 
+	/**
+	 * Checks if mount point is accessible, attempts auto-detection if not.
+	 * Updates plugin settings with auto-detected path.
+	 * @returns True if a usable mount point is available
+	 */
 	async checkMountPoint(): Promise<boolean> {
 		const { koreaderMountPoint } = this.plugin.settings;
 		if (koreaderMountPoint && (await this.isUsableDir(koreaderMountPoint)))
@@ -212,6 +256,11 @@ export class SDRFinder {
 		return false;
 	}
 
+	/**
+	 * Checks if a path exists and is a directory.
+	 * @param p - Path to check
+	 * @returns True if path is a usable directory
+	 */
 	private async isUsableDir(p: string): Promise<boolean> {
 		try {
 			return (await fsStat(p)).isDirectory();
@@ -220,6 +269,11 @@ export class SDRFinder {
 		}
 	}
 
+	/**
+	 * Detects potential KOReader mount points by platform.
+	 * Looks for Kobo devices on macOS/Linux and KoboReader.sqlite on Windows.
+	 * @returns Array of candidate mount point paths
+	 */
 	private async detectCandidates(): Promise<string[]> {
 		const out: string[] = [];
 		if (platform() === "darwin") {

@@ -14,7 +14,14 @@ export async function pickDirectory(
     });
 
     if (res.canceled || res.filePaths.length === 0) return undefined;
-    return res.filePaths[0];
+
+    let path = res.filePaths[0];
+    path = path.trim();
+    if (path.length > 0) {
+      path = path.replace(/\/?$/, "/"); // Add trailing slash
+    }
+
+    return path;
   } catch (err) {
     console.error("KOReader-Importer: folder picker failed →", err);
     new Notice("Unable to open system file-picker. Enter the path manually.");

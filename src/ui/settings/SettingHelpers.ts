@@ -85,7 +85,10 @@ export function folderSetting(
       search.inputEl.addEventListener("blur", async () => {
         let path = search.getValue();
         path = path.trim();
-        path = path.replace(/\/?$/, "/"); // Add trailing slash
+        if (path.length > 0) {
+          path = path.replace(/\/?$/, "/"); // Add trailing slash
+        }
+        search.setValue(path);
         await set(path);
       });
     });
@@ -107,7 +110,10 @@ export function externalFolderSetting(
       text.inputEl.addEventListener("blur", async () => {
         let path = text.getValue();
         path = path.trim();
-        path = path.replace(/\/?$/, "/"); // Add trailing slash
+        if (path.length > 0) {
+          path = path.replace(/\/?$/, "/"); // Add trailing slash
+        }
+        text.setValue(path);
         await set(path);
       });
     });

@@ -310,6 +310,7 @@ mark[style*="#00ff00"] {
 
 /* Make all text inputs and textareas in our settings panel have a consistent width */
 .koreader-importer-settings .setting-item-control:has(input[type="text"]),
+.koreader-importer-settings .search-input-container,
 .koreader-importer-settings .setting-item-control:has(textarea) {
     max-width: 450px;
     width: 100%;

@@ -1,28 +1,32 @@
-import { pathSetting } from "src/ui/settings/SettingHelpers";
+import { DEFAULT_HIGHLIGHTS_FOLDER } from "src/constants";
 import { SettingsSection } from "../SettingsSection";
+import { externalFolderSetting, folderSetting } from "../SettingHelpers";
 
 export class CoreSettingsSection extends SettingsSection {
-	protected renderContent(container: HTMLElement): void {
-		pathSetting(container, this.app, this.plugin, {
-			label: "KOReader mount point",
-			desc: "Directory where your e-reader is mounted.",
-			get: () => this.plugin.settings.koreaderMountPoint,
-			setAndSave: async (v) => {
-				this.plugin.settings.koreaderMountPoint = v;
-				await this.plugin.saveSettings();
-			},
-			isExternal: true,
-		});
+  protected renderContent(container: HTMLElement): void {
+    externalFolderSetting(
+      container,
+      "KOReader mount point",
+      "Directory where your e-reader is mounted.",
+      "Example: /mnt/KOReader",
+      () => this.plugin.settings.koreaderMountPoint,
+      (value) => {
+        this.plugin.settings.koreaderMountPoint = value;
+        this.debouncedSave();
+      },
+    );
 
-		pathSetting(container, this.app, this.plugin, {
-			label: "Highlights folder",
-			desc: "Vault folder to save highlight notes.",
-			get: () => this.plugin.settings.highlightsFolder,
-			setAndSave: async (v) => {
-				this.plugin.settings.highlightsFolder = v;
-				await this.plugin.saveSettings();
-			},
-			requireFolder: true,
-		});
-	}
+    folderSetting(
+      container,
+      "Highlights folder",
+      "Vault folder to save highlight notes.",
+      "Default: " + DEFAULT_HIGHLIGHTS_FOLDER,
+      this.app,
+      () => this.plugin.settings.highlightsFolder,
+      (value) => {
+        this.plugin.settings.highlightsFolder = value;
+        this.debouncedSave();
+      },
+    );
+  }
 }

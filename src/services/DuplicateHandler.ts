@@ -208,54 +208,66 @@ export class DuplicateHandler {
 			existingFile,
 		);
 
-		const existingHighlights = extractHighlights(existingBody);
+		// When comment style is "none", we can't extract highlights for comparison
+		// So we treat all new annotations as potentially new
+		const isNoneStyle = this.plugin.settings.commentStyle === "none";
+		const existingHighlights = isNoneStyle 
+			? [] 
+			: extractHighlights(existingBody, this.plugin.settings.commentStyle);
 
 		let newHighlightCount = 0;
 		let modifiedHighlightCount = 0;
 
-		const existingHighlightsMap = new Map(
-			existingHighlights.map((h) => [this.getHighlightKey(h), h]),
-		);
+		if (isNoneStyle) {
+			newHighlightCount = newAnnotations.length;
+			logger.info(
+				`DuplicateHandler: Comment style is "none" - treating all ${newAnnotations.length} annotations as new for ${existingFile.path}`
+			);
+		} else {
+			const existingHighlightsMap = new Map(
+				existingHighlights.map((h) => [this.getHighlightKey(h), h]),
+			);
 
-		for (const newHighlight of newAnnotations) {
-			const key = this.getHighlightKey(newHighlight);
-			const existingMatch = existingHighlightsMap.get(key);
+			for (const newHighlight of newAnnotations) {
+				const key = this.getHighlightKey(newHighlight);
+				const existingMatch = existingHighlightsMap.get(key);
 
-			if (!existingMatch) {
-				newHighlightCount++;
-			} else {
-				if (
-					!this.isHighlightTextEqual(
-						existingMatch.text || "",
-						newHighlight.text || "",
-					)
-				) {
-					modifiedHighlightCount++;
-					logger.info(
-						`DuplicateHandler: Modified highlight found (Page ${newHighlight.pageno}):\n  Old: "${existingMatch.text?.slice(
-							0,
-							50,
-						)}..."\n  New: "${newHighlight.text?.slice(0, 50)}..."`,
-					);
-				}
-				if (!this.isNoteTextEqual(existingMatch.note, newHighlight.note)) {
+				if (!existingMatch) {
+					newHighlightCount++;
+				} else {
 					if (
 						!this.isHighlightTextEqual(
 							existingMatch.text || "",
 							newHighlight.text || "",
 						)
 					) {
-						logger.info(
-							`DuplicateHandler: Note also differs for modified highlight (Page ${newHighlight.pageno})`,
-						);
-					} else {
 						modifiedHighlightCount++;
 						logger.info(
-							`DuplicateHandler: Note differs for existing highlight (Page ${newHighlight.pageno}):\n  Old: "${existingMatch.note?.slice(
+							`DuplicateHandler: Modified highlight found (Page ${newHighlight.pageno}):\n  Old: "${existingMatch.text?.slice(
 								0,
 								50,
-							)}..."\n  New: "${newHighlight.note?.slice(0, 50)}..."`,
+							)}..."\n  New: "${newHighlight.text?.slice(0, 50)}..."`,
 						);
+					}
+					if (!this.isNoteTextEqual(existingMatch.note, newHighlight.note)) {
+						if (
+							!this.isHighlightTextEqual(
+								existingMatch.text || "",
+								newHighlight.text || "",
+							)
+						) {
+							logger.info(
+								`DuplicateHandler: Note also differs for modified highlight (Page ${newHighlight.pageno})`,
+							);
+						} else {
+							modifiedHighlightCount++;
+							logger.info(
+								`DuplicateHandler: Note differs for existing highlight (Page ${newHighlight.pageno}):\n  Old: "${existingMatch.note?.slice(
+									0,
+									50,
+								)}..."\n  New: "${newHighlight.note?.slice(0, 50)}..."`,
+							);
+						}
 					}
 				}
 			}
@@ -479,7 +491,7 @@ export class DuplicateHandler {
 		await this.snapshotManager.createBackup(file);
 		const { frontmatter: existingFm, body: existingBody } =
 			await getFrontmatterAndBody(this.app, file);
-		const existingAnnotations = extractHighlights(existingBody);
+		const existingAnnotations = extractHighlights(existingBody, this.plugin.settings.commentStyle);
 
 		const mergedAnnotations = this.mergeAnnotationArrays(
 			existingAnnotations,

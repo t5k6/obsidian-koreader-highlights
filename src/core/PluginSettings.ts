@@ -12,6 +12,7 @@ import {
 	ensureStringArray,
 } from "src/utils/validationUtils";
 import type {
+	CommentStyle,
 	KoreaderHighlightImporterSettings,
 	KoreaderTemplateSettings,
 } from "../types";
@@ -52,6 +53,7 @@ export const DEFAULT_SETTINGS: KoreaderHighlightImporterSettings = {
 		selectedTemplate: "default",
 		templateDir: DEFAULT_TEMPLATES_FOLDER,
 	},
+	commentStyle: "html",
 };
 
 /* ------------------------------------------------------------------ */
@@ -159,6 +161,15 @@ export class PluginSettings {
 				? source
 				: DEFAULT_SETTINGS.template.source;
 		}
+
+		// Comment style validation
+		const commentStyle = ensureString(
+			raw.commentStyle,
+			DEFAULT_SETTINGS.commentStyle,
+		);
+		settings.commentStyle = (["html", "md", "none"].includes(commentStyle)
+			? commentStyle
+			: DEFAULT_SETTINGS.commentStyle) as CommentStyle;
 
 		logger.info("PluginSettings: Settings validated:", settings);
 		return settings;

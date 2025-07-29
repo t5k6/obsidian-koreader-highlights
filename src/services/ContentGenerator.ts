@@ -1,10 +1,10 @@
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import {
 	compareAnnotations,
-	computeAnnotationId,
 	distanceBetweenHighlights,
 	isWithinGap,
 } from "src/utils/formatUtils";
+import { createKohlMarkers } from "src/utils/highlightExtractor";
 import type { Annotation } from "../types";
 import type { TemplateManager } from "./TemplateManager";
 
@@ -81,20 +81,6 @@ export class ContentGenerator {
 
 			let chapterContent = "";
 			for (const highlightGroup of groupedSuccessiveHighlights) {
-				const markers = highlightGroup.annotations
-					.map((ann) => {
-						const meta = {
-							v: 1,
-							id: ann.id ?? computeAnnotationId(ann),
-							p: ann.pageno,
-							pos0: ann.pos0,
-							pos1: ann.pos1,
-							t: ann.datetime,
-						};
-						return `<!-- KOHL ${JSON.stringify(meta)} -->`;
-					})
-					.join("\n");
-
 				const renderedVisualGroup = this.templateManager.renderGroup(
 					compiledTemplate,
 					highlightGroup.annotations,
@@ -103,7 +89,18 @@ export class ContentGenerator {
 						isFirstInChapter: isFirstHighlightInChapter,
 					},
 				);
-				chapterContent += `${markers}\n${renderedVisualGroup}`;
+
+				// Only add KOHL markers if comment style is not "none"
+				if (this.plugin.settings.commentStyle !== "none") {
+					const markers = createKohlMarkers(
+						highlightGroup.annotations, 
+						this.plugin.settings.commentStyle
+					);
+					chapterContent += `${markers}\n${renderedVisualGroup}`;
+				} else {
+					chapterContent += renderedVisualGroup;
+				}
+				
 				isFirstHighlightInChapter = false;
 
 				if (features.autoInsertDivider) {

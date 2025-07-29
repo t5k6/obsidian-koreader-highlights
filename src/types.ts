@@ -139,6 +139,9 @@ export interface KoreaderTemplateSettings {
 	templateDir: string;
 }
 
+// Comment style for tracking imported highlights
+export type CommentStyle = "html" | "md" | "none";
+
 // Main Plugin Settings Interface
 export interface KoreaderHighlightImporterSettings {
 	koreaderMountPoint: string;
@@ -154,6 +157,7 @@ export interface KoreaderHighlightImporterSettings {
 	maxTimeGapMinutes: number;
 	mergeOverlappingHighlights: boolean;
 	template: KoreaderTemplateSettings;
+	commentStyle: CommentStyle;
 }
 
 // --- UI / Modal Related Types ---

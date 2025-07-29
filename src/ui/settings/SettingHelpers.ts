@@ -102,10 +102,6 @@ export function pathSetting(
 				? t.getValue().trim()
 				: toVaultRelPath(t.getValue());
 
-			if (!cfg.isExternal) {
-				v = v.toLowerCase();
-			}
-
 			if (!v && !cfg.requireFolder) {
 				await cfg.setAndSave("");
 				return;

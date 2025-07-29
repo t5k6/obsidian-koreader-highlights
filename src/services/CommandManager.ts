@@ -76,4 +76,27 @@ export class CommandManager {
 			failureNotice: "Failed to clear caches",
 		});
 	}
+
+	/**
+	 * Converts all existing highlight files to the current comment style setting.
+	 * Rewrites all files to ensure consistency across the highlights folder.
+	 */
+	async executeConvertCommentStyle(): Promise<void> {
+		logger.info("CommandManager: Comment style conversion triggered.");
+
+		await runPluginAction(() => this.importManager.convertAllFilesToCommentStyle(), {
+			failureNotice: "An unexpected error occurred during comment style conversion",
+		}).catch((error) => {
+			if (error.name === "AbortError") {
+				// user cancellation
+				logger.info("CommandManager: Comment style conversion was cancelled by the user.");
+			} else {
+				logger.error(
+					"CommandManager: Comment style conversion failed with an unexpected error",
+					error,
+				);
+				new Notice("Comment style conversion failed. Check console for details.");
+			}
+		});
+	}
 }

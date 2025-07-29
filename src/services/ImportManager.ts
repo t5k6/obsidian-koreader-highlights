@@ -1,15 +1,18 @@
-import { type App, Notice, TFile, TFolder, stringifyYaml } from "obsidian";
+import { type App, Notice, stringifyYaml, TFile, type TFolder } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import { ProgressModal } from "src/ui/ProgressModal";
 import { asyncPool } from "src/utils/concurrency";
 import { getFileNameWithoutExt } from "src/utils/formatUtils";
-import { convertCommentStyle, extractHighlightsWithStyle } from "src/utils/highlightExtractor";
+import {
+	convertCommentStyle,
+	extractHighlightsWithStyle,
+} from "src/utils/highlightExtractor";
 import { logger } from "src/utils/logging";
 import { getFrontmatterAndBody } from "src/utils/obsidianUtils";
 import {
 	addSummary,
 	blankSummary,
-	CommentStyle,
+	type CommentStyle,
 	type LuaMetadata,
 	type Summary,
 } from "../types";
@@ -255,7 +258,9 @@ export class ImportManager {
 	 * @returns Promise that resolves when all files have been converted
 	 */
 	async convertAllFilesToCommentStyle(): Promise<void> {
-		logger.info("ImportManager: Starting comment style conversion for all highlight files…");
+		logger.info(
+			"ImportManager: Starting comment style conversion for all highlight files…",
+		);
 
 		const targetStyle = this.plugin.settings.commentStyle;
 
@@ -273,13 +278,19 @@ export class ImportManager {
 
 		const counts = { converted: 0, skipped: 0 };
 		let doneCounter = 0;
-		
+
 		const progressTicker = setInterval(() => {
-			modal.updateProgress(doneCounter, `${doneCounter}/${files.length} files processed`);
+			modal.updateProgress(
+				doneCounter,
+				`${doneCounter}/${files.length} files processed`,
+			);
 		}, 200);
 
 		try {
-			const poolSize = Math.min(4, Math.max(2, navigator.hardwareConcurrency || 4));
+			const poolSize = Math.min(
+				4,
+				Math.max(2, navigator.hardwareConcurrency || 4),
+			);
 
 			await asyncPool(
 				poolSize,
@@ -292,21 +303,27 @@ export class ImportManager {
 					await this.convertSingleFile(file, targetStyle, counts);
 					doneCounter = idx + 1;
 				},
-				modal.abortSignal
+				modal.abortSignal,
 			);
 
 			new Notice(
 				`Comment style conversion complete: ${counts.converted} files converted, ${counts.skipped} files skipped.`,
-				8000
+				8000,
 			);
-			logger.info(`ImportManager: Comment style conversion finished - ${counts.converted} converted, ${counts.skipped} skipped`);
-
+			logger.info(
+				`ImportManager: Comment style conversion finished - ${counts.converted} converted, ${counts.skipped} skipped`,
+			);
 		} catch (err: any) {
 			if (err?.name === "AbortError") {
 				new Notice("Comment style conversion cancelled by user.");
 			} else {
-				logger.error("ImportManager: Error during comment style conversion:", err);
-				new Notice("Error during comment style conversion. Check console for details.");
+				logger.error(
+					"ImportManager: Error during comment style conversion:",
+					err,
+				);
+				new Notice(
+					"Error during comment style conversion. Check console for details.",
+				);
 			}
 		} finally {
 			clearInterval(progressTicker);
@@ -322,7 +339,11 @@ export class ImportManager {
 		// Don't care if we want none anyway
 		if (targetStyle === "none") return;
 
-		const folder = <TFolder>this.app.vault.getAbstractFileByPath(this.plugin.settings.highlightsFolder);
+		const folder = <TFolder>(
+			this.app.vault.getAbstractFileByPath(
+				this.plugin.settings.highlightsFolder,
+			)
+		);
 		if (!folder || !folder.children) return;
 
 		const sampleFiles = folder.children
@@ -334,10 +355,17 @@ export class ImportManager {
 			try {
 				const content = await this.app.vault.read(file);
 				const { annotations } = extractHighlightsWithStyle(content, "html");
-				const { annotations: mdAnnotations } = extractHighlightsWithStyle(content, "md");
+				const { annotations: mdAnnotations } = extractHighlightsWithStyle(
+					content,
+					"md",
+				);
 
 				// If file has highlights content but no KOHL comments, it might be "none" style
-				if (annotations.length === 0 && mdAnnotations.length === 0 && content.trim().length > 100) {
+				if (
+					annotations.length === 0 &&
+					mdAnnotations.length === 0 &&
+					content.trim().length > 100
+				) {
 					hasFilesWithoutComments = true;
 					break;
 				}
@@ -349,9 +377,11 @@ export class ImportManager {
 		if (hasFilesWithoutComments) {
 			new Notice(
 				`Warning: Some files appear to have no comment markers. Converting from "None" style to ${targetStyle} style cannot restore tracking information. New imports may create duplicates.`,
-				8000
+				8000,
 			);
-			logger.warn("ImportManager: Detected files without KOHL comments during conversion to comment style");
+			logger.warn(
+				"ImportManager: Detected files without KOHL comments during conversion to comment style",
+			);
 		}
 	}
 
@@ -360,16 +390,22 @@ export class ImportManager {
 	 * @returns Promise resolving to array of files, or null if no files found
 	 */
 	private async getHighlightFilesToConvert(): Promise<TFile[] | null> {
-		const folder = <TFolder>this.app.vault.getAbstractFileByPath(this.plugin.settings.highlightsFolder);
-		
+		const folder = <TFolder>(
+			this.app.vault.getAbstractFileByPath(
+				this.plugin.settings.highlightsFolder,
+			)
+		);
+
 		if (!folder || folder.children === undefined) {
 			new Notice("Highlights folder not found. No files to convert.");
-			logger.warn("ImportManager: Highlights folder not found for comment style conversion.");
+			logger.warn(
+				"ImportManager: Highlights folder not found for comment style conversion.",
+			);
 			return null;
 		}
 
-		const files = folder.children.filter((f): f is TFile => 
-			f instanceof TFile && f.extension === "md"
+		const files = folder.children.filter(
+			(f): f is TFile => f instanceof TFile && f.extension === "md",
 		);
 
 		if (files.length === 0) {
@@ -388,17 +424,23 @@ export class ImportManager {
 	 * @param counts - Conversion counters to update
 	 */
 	private async convertSingleFile(
-		file: TFile, 
-		targetStyle: CommentStyle, 
-		counts: { converted: number; skipped: number }
+		file: TFile,
+		targetStyle: CommentStyle,
+		counts: { converted: number; skipped: number },
 	): Promise<void> {
 		try {
 			const { frontmatter, body } = await getFrontmatterAndBody(this.app, file);
-			
+
 			if (targetStyle === "none") {
 				await this.convertToNoneStyle(file, body, frontmatter, counts);
 			} else {
-				await this.convertToCommentStyle(file, body, frontmatter, targetStyle, counts);
+				await this.convertToCommentStyle(
+					file,
+					body,
+					frontmatter,
+					targetStyle,
+					counts,
+				);
 			}
 		} catch (error) {
 			logger.error(`ImportManager: Error converting file ${file.path}:`, error);
@@ -417,13 +459,13 @@ export class ImportManager {
 		file: TFile,
 		body: string,
 		frontmatter: any,
-		counts: { converted: number; skipped: number }
+		counts: { converted: number; skipped: number },
 	): Promise<void> {
 		// Remove any existing KOHL comments
 		const newBody = convertCommentStyle(body, "html", "none"); // This removes all comments
 		counts.converted++;
 		logger.info(`ImportManager: Removing KOHL comments from ${file.path}`);
-		
+
 		const newContent = this.reconstructFileContent(frontmatter, newBody);
 		await this.app.vault.modify(file, newContent);
 	}
@@ -441,19 +483,24 @@ export class ImportManager {
 		body: string,
 		frontmatter: any,
 		targetStyle: CommentStyle,
-		counts: { converted: number; skipped: number }
+		counts: { converted: number; skipped: number },
 	): Promise<void> {
 		// Try to extract highlights and detect current style
-		const { annotations, usedStyle } = extractHighlightsWithStyle(body, targetStyle);
-		
+		const { annotations, usedStyle } = extractHighlightsWithStyle(
+			body,
+			targetStyle,
+		);
+
 		// Check if this file has content but no KOHL comments (could be "none" style)
 		if (annotations.length === 0 && body.trim().length > 100) {
 			// This file likely has "none" style - no comments to convert from
-			logger.info(`ImportManager: File ${file.path} appears to have no KOHL comments - likely "none" style`);
+			logger.info(
+				`ImportManager: File ${file.path} appears to have no KOHL comments - likely "none" style`,
+			);
 			counts.skipped++; // Can't convert from none to comment style
 			return;
 		}
-		
+
 		if (annotations.length === 0) {
 			// No highlights found at all, skip
 			counts.skipped++;
@@ -461,12 +508,14 @@ export class ImportManager {
 		}
 
 		let newBody = body;
-		
+
 		// Convert comment style if needed
 		if (usedStyle && usedStyle !== targetStyle) {
 			newBody = convertCommentStyle(body, usedStyle, targetStyle);
 			counts.converted++;
-			logger.info(`ImportManager: Converting ${file.path} from ${usedStyle} to ${targetStyle} style`);
+			logger.info(
+				`ImportManager: Converting ${file.path} from ${usedStyle} to ${targetStyle} style`,
+			);
 		} else if (usedStyle === targetStyle) {
 			// Already correct style, but we still "rewrite" to ensure consistency
 			counts.converted++;
@@ -475,7 +524,7 @@ export class ImportManager {
 			counts.skipped++;
 			return;
 		}
-		
+
 		const newContent = this.reconstructFileContent(frontmatter, newBody);
 		await this.app.vault.modify(file, newContent);
 	}

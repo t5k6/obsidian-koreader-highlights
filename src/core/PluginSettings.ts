@@ -57,21 +57,7 @@ export const DEFAULT_SETTINGS: KoreaderHighlightImporterSettings = {
 };
 
 /* ------------------------------------------------------------------ */
-/*                   2.  SCHEMA 						              */
-/* ------------------------------------------------------------------ */
-
-type Primitive = string | number | boolean;
-
-interface FieldRule<T = Primitive> {
-	key: keyof KoreaderHighlightImporterSettings;
-	type: "string" | "number" | "boolean";
-	default: T;
-	normalize?: (v: any) => T;
-	validate?: (v: any) => boolean;
-}
-
-/* ------------------------------------------------------------------ */
-/*                      3.  MAIN CLASS                                 */
+/*                      2.  MAIN CLASS                                 */
 /* ------------------------------------------------------------------ */
 
 export class PluginSettings {
@@ -167,9 +153,11 @@ export class PluginSettings {
 			raw.commentStyle,
 			DEFAULT_SETTINGS.commentStyle,
 		);
-		settings.commentStyle = (["html", "md", "none"].includes(commentStyle)
-			? commentStyle
-			: DEFAULT_SETTINGS.commentStyle) as CommentStyle;
+		settings.commentStyle = (
+			["html", "md", "none"].includes(commentStyle)
+				? commentStyle
+				: DEFAULT_SETTINGS.commentStyle
+		) as CommentStyle;
 
 		logger.info("PluginSettings: Settings validated:", settings);
 		return settings;

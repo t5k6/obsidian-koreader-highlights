@@ -84,18 +84,26 @@ export class CommandManager {
 	async executeConvertCommentStyle(): Promise<void> {
 		logger.info("CommandManager: Comment style conversion triggered.");
 
-		await runPluginAction(() => this.importManager.convertAllFilesToCommentStyle(), {
-			failureNotice: "An unexpected error occurred during comment style conversion",
-		}).catch((error) => {
+		await runPluginAction(
+			() => this.importManager.convertAllFilesToCommentStyle(),
+			{
+				failureNotice:
+					"An unexpected error occurred during comment style conversion",
+			},
+		).catch((error) => {
 			if (error.name === "AbortError") {
 				// user cancellation
-				logger.info("CommandManager: Comment style conversion was cancelled by the user.");
+				logger.info(
+					"CommandManager: Comment style conversion was cancelled by the user.",
+				);
 			} else {
 				logger.error(
 					"CommandManager: Comment style conversion failed with an unexpected error",
 					error,
 				);
-				new Notice("Comment style conversion failed. Check console for details.");
+				new Notice(
+					"Comment style conversion failed. Check console for details.",
+				);
 			}
 		});
 	}

@@ -6,14 +6,13 @@ const HTML_KOHL_REGEX = /<!--\s*KOHL\s*({.*?})\s*-->/g;
 const MD_KOHL_REGEX = /%%\s*KOHL\s*({.*?})\s*%%/g;
 
 interface KohlMetadata {
-	v: number;    // Version number
-	id: string;   // Annotation ID
-	p: number;    // Page number
+	v: number; // Version number
+	id: string; // Annotation ID
+	p: number; // Page number
 	pos0: string | PositionObject | undefined; // Start position
 	pos1: string | PositionObject | undefined; // End position
-	t: string;    // Datetime timestamp
+	t: string; // Datetime timestamp
 }
-
 
 /**
  * Safely parses JSON string without throwing errors.
@@ -47,7 +46,6 @@ function splitTextAndNote(block: string): { text: string; note?: string } {
 	return { text, note };
 }
 
-
 /**
  * Extracts highlight annotations from markdown content with fallback parsing.
  * First tries the preferred comment style, then falls back to the other style.
@@ -55,7 +53,10 @@ function splitTextAndNote(block: string): { text: string; note?: string } {
  * @param preferredStyle - Comment style to try first (defaults to "html")
  * @returns Array of parsed annotation objects
  */
-export function extractHighlights(md: string, preferredStyle: CommentStyle = "html"): Annotation[] {
+export function extractHighlights(
+	md: string,
+	preferredStyle: CommentStyle = "html",
+): Annotation[] {
 	const { annotations } = extractHighlightsWithStyle(md, preferredStyle);
 	return annotations;
 }
@@ -69,7 +70,7 @@ export function extractHighlights(md: string, preferredStyle: CommentStyle = "ht
  */
 export function extractHighlightsWithStyle(
 	content: string,
-	preferredStyle: CommentStyle
+	preferredStyle: CommentStyle,
 ): { annotations: Annotation[]; usedStyle: CommentStyle | null } {
 	// If comment style is "none", don't attempt to extract any highlights
 	if (preferredStyle === "none") {
@@ -77,8 +78,10 @@ export function extractHighlightsWithStyle(
 	}
 
 	// Try preferred style first
-	const preferredRegex = preferredStyle === "html" ? HTML_KOHL_REGEX : MD_KOHL_REGEX;
-	const fallbackRegex = preferredStyle === "html" ? MD_KOHL_REGEX : HTML_KOHL_REGEX;
+	const preferredRegex =
+		preferredStyle === "html" ? HTML_KOHL_REGEX : MD_KOHL_REGEX;
+	const fallbackRegex =
+		preferredStyle === "html" ? MD_KOHL_REGEX : HTML_KOHL_REGEX;
 	const fallbackStyle: CommentStyle = preferredStyle === "html" ? "md" : "html";
 
 	let annotations = extractWithRegex(content, preferredRegex);
@@ -101,10 +104,11 @@ export function extractHighlightsWithStyle(
  * @param style - Comment style (html or md)
  * @returns Joined KOHL comment strings
  */
-export function createKohlMarkers(annotations: Annotation[], style: CommentStyle): string {
-	return annotations
-		.map(ann => createKohlMarker(ann, style))
-		.join("\n");
+export function createKohlMarkers(
+	annotations: Annotation[],
+	style: CommentStyle,
+): string {
+	return annotations.map((ann) => createKohlMarker(ann, style)).join("\n");
 }
 
 /**
@@ -113,7 +117,10 @@ export function createKohlMarkers(annotations: Annotation[], style: CommentStyle
  * @param style - Comment style (html or md)
  * @returns KOHL comment string
  */
-export function createKohlMarker(annotation: Annotation, style: CommentStyle): string {
+export function createKohlMarker(
+	annotation: Annotation,
+	style: CommentStyle,
+): string {
 	const meta: KohlMetadata = {
 		v: 1,
 		id: annotation.id ?? computeAnnotationId(annotation),
@@ -124,7 +131,7 @@ export function createKohlMarker(annotation: Annotation, style: CommentStyle): s
 	};
 
 	const jsonMeta = JSON.stringify(meta);
-	return style === "html" 
+	return style === "html"
 		? `<!-- KOHL ${jsonMeta} -->`
 		: `%% KOHL ${jsonMeta} %%`;
 }
@@ -194,11 +201,11 @@ function extractWithRegex(content: string, regex: RegExp): Annotation[] {
  * @returns Content with all KOHL markers removed
  */
 export function removeKohlComments(content: string): string {
-	let cleaned = content.replace(HTML_KOHL_REGEX, '');
-	cleaned = cleaned.replace(MD_KOHL_REGEX, '');
+	let cleaned = content.replace(HTML_KOHL_REGEX, "");
+	cleaned = cleaned.replace(MD_KOHL_REGEX, "");
 
 	// Clean up any leftover empty lines where comments were
-	cleaned = cleaned.replace(/\n\s*\n\s*\n/g, '\n\n');
+	cleaned = cleaned.replace(/\n\s*\n\s*\n/g, "\n\n");
 
 	return cleaned;
 }
@@ -211,9 +218,9 @@ export function removeKohlComments(content: string): string {
  * @returns Converted content
  */
 export function convertCommentStyle(
-	content: string, 
-	fromStyle: CommentStyle, 
-	toStyle: CommentStyle
+	content: string,
+	fromStyle: CommentStyle,
+	toStyle: CommentStyle,
 ): string {
 	if (fromStyle === toStyle) return content;
 
@@ -226,13 +233,13 @@ export function convertCommentStyle(
 	}
 
 	const fromRegex = fromStyle === "html" ? HTML_KOHL_REGEX : MD_KOHL_REGEX;
-	
+
 	return content.replace(fromRegex, (match, jsonMeta) => {
 		const meta = safeParseJson(jsonMeta);
 		if (!meta) return match; // Keep original if can't parse
-		
+
 		const newJsonMeta = JSON.stringify(meta);
-		return toStyle === "html" 
+		return toStyle === "html"
 			? `<!-- KOHL ${newJsonMeta} -->`
 			: `%% KOHL ${newJsonMeta} %%`;
 	});

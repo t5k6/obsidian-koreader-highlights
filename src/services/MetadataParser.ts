@@ -414,14 +414,14 @@ export class MetadataParser {
 			cleaned = cleaned.slice(1, -1);
 		}
 		cleaned = cleaned.replace(/ΓÇö/g, "—");
-		cleaned = cleaned.replace(/\\(.)/g, function (match, char) {
+		cleaned = cleaned.replace(/\\(.)/g, (match, char) => {
 			const escapeMap: Record<string, string> = {
-				'n': '\n',
-				't': '\t',
-				'r': '\r',
+				n: "\n",
+				t: "\t",
+				r: "\r",
 				'"': '"',
 				"'": "'",
-				'\\': '\\'
+				"\\": "\\",
 			};
 			return escapeMap[char] || match;
 		});

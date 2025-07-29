@@ -93,14 +93,14 @@ export class ContentGenerator {
 				// Only add KOHL markers if comment style is not "none"
 				if (this.plugin.settings.commentStyle !== "none") {
 					const markers = createKohlMarkers(
-						highlightGroup.annotations, 
-						this.plugin.settings.commentStyle
+						highlightGroup.annotations,
+						this.plugin.settings.commentStyle,
 					);
 					chapterContent += `${markers}\n${renderedVisualGroup}`;
 				} else {
 					chapterContent += renderedVisualGroup;
 				}
-				
+
 				isFirstHighlightInChapter = false;
 
 				if (features.autoInsertDivider) {

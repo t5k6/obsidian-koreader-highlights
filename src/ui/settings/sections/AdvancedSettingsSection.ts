@@ -54,7 +54,9 @@ export class AdvancedSettingsSection extends SettingsSection {
 
 		new Setting(containerEl)
 			.setName("Comment Style")
-			.setDesc("Choose between HTML or MD style comments for tracking imported highlights.")
+			.setDesc(
+				"Choose between HTML or MD style comments for tracking imported highlights.",
+			)
 			.addDropdown((dropdown) => {
 				dropdown
 					.addOptions({
@@ -64,9 +66,10 @@ export class AdvancedSettingsSection extends SettingsSection {
 					})
 					.setValue(this.plugin.settings.commentStyle)
 					.onChange(async (value) => {
-						this.plugin.settings.commentStyle = value as KoreaderHighlightImporterSettings["commentStyle"];
+						this.plugin.settings.commentStyle =
+							value as KoreaderHighlightImporterSettings["commentStyle"];
 						await this.plugin.saveSettings();
-						
+
 						// Toggle warning visibility
 						warningEl.style.display = value === "none" ? "block" : "none";
 					});
@@ -99,8 +102,8 @@ export class AdvancedSettingsSection extends SettingsSection {
 		const warningEl = containerEl.createDiv({
 			cls: "callout",
 			attr: {
-				"data-callout": "warning"
-			}
+				"data-callout": "warning",
+			},
 		});
 
 		const calloutTitle = warningEl.createDiv({ cls: "callout-title" });
@@ -110,11 +113,12 @@ export class AdvancedSettingsSection extends SettingsSection {
 
 		warningEl.createDiv({
 			cls: "callout-content",
-			text: "Without comment markers, the plugin cannot track which highlights have been imported. This means new highlights cannot be dynamically merged with existing ones. Use this option only if you plan to manually manage all highlight updates."
+			text: "Without comment markers, the plugin cannot track which highlights have been imported. This means new highlights cannot be dynamically merged with existing ones. Use this option only if you plan to manually manage all highlight updates.",
 		});
-		
+
 		// Set initial visibility
-		warningEl.style.display = this.plugin.settings.commentStyle === "none" ? "block" : "none";
+		warningEl.style.display =
+			this.plugin.settings.commentStyle === "none" ? "block" : "none";
 
 		return warningEl;
 	}

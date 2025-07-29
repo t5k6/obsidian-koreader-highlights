@@ -211,8 +211,8 @@ export class DuplicateHandler {
 		// When comment style is "none", we can't extract highlights for comparison
 		// So we treat all new annotations as potentially new
 		const isNoneStyle = this.plugin.settings.commentStyle === "none";
-		const existingHighlights = isNoneStyle 
-			? [] 
+		const existingHighlights = isNoneStyle
+			? []
 			: extractHighlights(existingBody, this.plugin.settings.commentStyle);
 
 		let newHighlightCount = 0;
@@ -221,7 +221,7 @@ export class DuplicateHandler {
 		if (isNoneStyle) {
 			newHighlightCount = newAnnotations.length;
 			logger.info(
-				`DuplicateHandler: Comment style is "none" - treating all ${newAnnotations.length} annotations as new for ${existingFile.path}`
+				`DuplicateHandler: Comment style is "none" - treating all ${newAnnotations.length} annotations as new for ${existingFile.path}`,
 			);
 		} else {
 			const existingHighlightsMap = new Map(
@@ -491,7 +491,10 @@ export class DuplicateHandler {
 		await this.snapshotManager.createBackup(file);
 		const { frontmatter: existingFm, body: existingBody } =
 			await getFrontmatterAndBody(this.app, file);
-		const existingAnnotations = extractHighlights(existingBody, this.plugin.settings.commentStyle);
+		const existingAnnotations = extractHighlights(
+			existingBody,
+			this.plugin.settings.commentStyle,
+		);
 
 		const mergedAnnotations = this.mergeAnnotationArrays(
 			existingAnnotations,

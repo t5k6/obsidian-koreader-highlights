@@ -13,7 +13,7 @@ import {
 	levenshteinDistance,
 	normalizeFileNamePiece,
 } from "src/utils/formatUtils";
-import { createLogger, logger } from "src/utils/logging";
+import { logger } from "src/utils/logging";
 import type {
 	BookStatistics,
 	DocProps,

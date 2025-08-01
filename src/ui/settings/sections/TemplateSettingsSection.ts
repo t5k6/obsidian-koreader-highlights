@@ -1,4 +1,4 @@
-import { normalizePath, Notice, Setting } from "obsidian";
+import { Notice, normalizePath, Setting } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import type { TemplateManager } from "src/services/TemplateManager";
 import type { TemplateDefinition } from "src/types";

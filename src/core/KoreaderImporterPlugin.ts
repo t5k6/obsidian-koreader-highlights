@@ -27,6 +27,12 @@ export class PluginCommands {
       name: "Scan KOReader for Highlights",
       callback: () => this.plugin.triggerScan(),
     });
+
+    this.plugin.addCommand({
+			id: "convert-comment-style",
+			name: "Convert All Files to Current Comment Style",
+			callback: () => this.plugin.triggerConvertCommentStyle(),
+		});
   }
 }
 
@@ -181,6 +187,13 @@ export default class KoreaderImporterPlugin extends Plugin {
       this.diContainer.resolve<CommandManager>(CommandManager);
     await commandManager.executeClearCaches();
   }
+
+  async triggerConvertCommentStyle(): Promise<void> {
+		if (!this.checkServiceStatus("comment style conversion")) return;
+		const commandManager =
+			this.diContainer.resolve<CommandManager>(CommandManager);
+		await commandManager.executeConvertCommentStyle();
+	}
 
   async saveSettings(forceUpdate: boolean = false): Promise<void> {
     if (!this.pluginSettings) {

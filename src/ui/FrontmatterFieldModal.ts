@@ -75,17 +75,15 @@ export class FrontmatterFieldModal extends Modal {
 			fieldsContainer.empty();
 
 			this.currentSettings.customFields.forEach((field, index) => {
-				const setting = new Setting(fieldsContainer)
-					.setName(field)
-					.addButton((button) =>
-						button
-							.setIcon("trash")
-							.setTooltip("Remove field")
-							.onClick(() => {
-								this.currentSettings.customFields.splice(index, 1);
-								renderCustomFields();
-							}),
-					);
+				new Setting(fieldsContainer).setName(field).addButton((button) =>
+					button
+						.setIcon("trash")
+						.setTooltip("Remove field")
+						.onClick(() => {
+							this.currentSettings.customFields.splice(index, 1);
+							renderCustomFields();
+						}),
+				);
 			});
 		};
 

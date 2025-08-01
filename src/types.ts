@@ -139,22 +139,26 @@ export interface KoreaderTemplateSettings {
   folder: string;
 }
 
+// Comment style for tracking imported highlights
+export type CommentStyle = "html" | "md" | "none";
+
 // Main Plugin Settings Interface
 export interface KoreaderHighlightImporterSettings {
-  koreaderMountPoint: string;
-  excludedFolders: string[];
-  allowedFileTypes: string[];
-  highlightsFolder: string;
+	koreaderMountPoint: string;
+	excludedFolders: string[];
+	allowedFileTypes: string[];
+	highlightsFolder: string;
   logToFile: boolean;
   logLevel: 0 | 1 | 2 | 3; // 0=None, 1=Info, 2=Warn, 3=Error
   logsFolder: string;
-  enableFullDuplicateCheck: boolean;
-  autoMergeOnAddition: boolean;
-  frontmatter: FrontmatterSettings;
-  maxHighlightGap: number;
-  maxTimeGapMinutes: number;
-  mergeOverlappingHighlights: boolean;
-  template: KoreaderTemplateSettings;
+	enableFullDuplicateCheck: boolean;
+	autoMergeOnAddition: boolean;
+	frontmatter: FrontmatterSettings;
+	maxHighlightGap: number;
+	maxTimeGapMinutes: number;
+	mergeOverlappingHighlights: boolean;
+	template: KoreaderTemplateSettings;
+	commentStyle: CommentStyle;
 }
 
 // --- UI / Modal Related Types ---

@@ -30,6 +30,15 @@ interface CfiParts {
 const CFI_REGEX_COMBINED =
 	/epubcfi\(([^!]*!)?([^,]+)(?:,\/(\d+):(\d+)(?:,\/\d+:\d+)?)?(?:,\/(\d+):(\d+))?\)$/;
 
+/**
+ * Generates a valid Obsidian filename from book metadata.
+ * Handles various edge cases including missing authors/titles.
+ * @param docProps - Document properties containing title and authors
+ * @param highlightsFolder - Target folder path for length calculation
+ * @param originalSdrName - Original SDR filename as fallback
+ * @param maxTotalPathLength - Maximum allowed total path length (default 255)
+ * @returns Formatted filename with .md extension
+ */
 export function generateObsidianFileName(
 	docProps: { title?: string; authors?: string },
 	highlightsFolder: string,
@@ -122,15 +131,17 @@ export function generateObsidianFileName(
 }
 
 /**
- * Collapse all the Koreader "SDR" to something that looks like
- * a human filename.                           ─────────────────────────────
+ * Simplifies KOReader SDR directory names to human-readable format.
+ * Removes series prefixes, duplicate tokens, and duplicate blocks.
+ * Case-insensitive but preserves first spelling encountered.
  *
- * 1.  Removes the leading "(Series-X)" block if it exists.
- * 2.  Deletes duplicate *tokens* (A – B – C – A   →   A – B – C)
- * 3.  Deletes duplicate *blocks* (A – B – C – A – B – C   →   A – B – C)
+ * Examples:
+ * - "(Series-1) Title - Author - Title" → "Title - Author"
+ * - "A - B - C - A - B - C" → "A - B - C"
  *
- * The whole routine is case-insensitive, keeps the first spelling it
- * encounters and preserves the original " ⸺  -  " separator.
+ * @param raw - The raw SDR directory name
+ * @param delimiter - Separator to use (default " - ")
+ * @returns Simplified filename or "Untitled" if result is empty
  */
 export function simplifySdrName(raw: string, delimiter = " - "): string {
 	if (!raw) {
@@ -190,6 +201,12 @@ export function simplifySdrName(raw: string, delimiter = " - "): string {
 	return finalName || "Untitled";
 }
 
+/**
+ * Normalizes a string to be safe for use in filenames.
+ * Removes invalid filesystem characters and cleans whitespace.
+ * @param piece - String to normalize (can be null/undefined)
+ * @returns Normalized string safe for filenames
+ */
 export function normalizeFileNamePiece(
 	piece: string | undefined | null,
 ): string {
@@ -201,6 +218,11 @@ export function normalizeFileNamePiece(
 		.trim();
 }
 
+/**
+ * Extracts filename without extension from a file path.
+ * @param filePath - Full file path or filename
+ * @returns Filename without extension, empty string if undefined
+ */
 export function getFileNameWithoutExt(filePath: string | undefined): string {
 	if (!filePath) return "";
 	return parse(filePath).name;
@@ -211,7 +233,12 @@ function isPositionObject(obj: any): obj is PositionObject {
 	return obj && typeof obj === "object" && "x" in obj && "y" in obj;
 }
 
-// Utility to parse pos0/pos1
+/**
+ * Parses position data from KOReader annotations.
+ * Handles both string format ("node.offset") and coordinate objects.
+ * @param pos - Position data as string or coordinate object
+ * @returns Parsed position with node and offset, or null if invalid
+ */
 const positionCache = new Map<string, { node: string; offset: number }>();
 export function parsePosition(
 	pos: string | PositionObject | undefined,
@@ -238,6 +265,12 @@ export function parsePosition(
 	return null;
 }
 
+/**
+ * Parses EPUB CFI (Canonical Fragment Identifier) strings.
+ * Extracts path and offset information for precise location.
+ * @param cfi - The CFI string to parse
+ * @returns Parsed CFI parts or null if invalid
+ */
 export function parseCfi(cfi: string): CfiParts | null {
 	const match = cfi.match(CFI_REGEX_COMBINED);
 
@@ -283,6 +316,14 @@ export function parseCfi(cfi: string): CfiParts | null {
 	};
 }
 
+/**
+ * Determines if two highlights are close enough to be grouped.
+ * Checks page number and position proximity.
+ * @param h1 - First highlight
+ * @param h2 - Second highlight
+ * @param maxGap - Maximum character gap to consider successive (default 250)
+ * @returns True if highlights should be grouped together
+ */
 export function areHighlightsSuccessive(
 	h1: Annotation | undefined,
 	h2: Annotation | undefined,
@@ -308,6 +349,13 @@ export function areHighlightsSuccessive(
 	return pos2_start.offset - pos1_end.offset <= maxGap;
 }
 
+/**
+ * Comparison function for sorting annotations.
+ * Sorts by: page number, position on page, then datetime.
+ * @param a - First annotation
+ * @param b - Second annotation
+ * @returns Sort order (-1, 0, or 1)
+ */
 export function compareAnnotations(a: Annotation, b: Annotation): number {
 	if (!a || !b) return 0;
 
@@ -347,6 +395,11 @@ export function compareAnnotations(a: Annotation, b: Annotation): number {
 	return 0;
 }
 
+/**
+ * Formats a date string to US English format.
+ * @param dateStr - ISO date string
+ * @returns Formatted date like "Jan 1, 2025"
+ */
 export function formatDate(dateStr: string): string {
 	const date = new Date(dateStr);
 	return date.toLocaleDateString("en-US", {
@@ -420,6 +473,11 @@ export function formatDateAsDailyNote(dateStr: string): string {
 	return formattedDate ? `[[${formattedDate}]]` : "";
 }
 
+/**
+ * Converts seconds to human-readable time format.
+ * @param totalSeconds - Number of seconds to convert
+ * @returns Formatted string like "2h 30m 45s" or "45s"
+ */
 export function secondsToHoursMinutesSeconds(totalSeconds: number): string {
 	if (totalSeconds < 0) totalSeconds = 0;
 
@@ -446,12 +504,22 @@ export function secondsToHoursMinutesSeconds(totalSeconds: number): string {
 	return result === "" ? "0s" : result; // Handle case of exactly 0 seconds
 }
 
+/**
+ * Converts seconds to hours and minutes format.
+ * @param seconds - Number of seconds to convert
+ * @returns Formatted string like "2h 30m"
+ */
 export function secondsToHoursMinutes(seconds: number): string {
 	const hours = Math.floor(seconds / 3600);
 	const minutes = Math.floor((seconds % 3600) / 60);
 	return `${hours}h ${minutes}m`;
 }
 
+/**
+ * Formats a Unix timestamp to readable date.
+ * @param timestamp - Unix timestamp (seconds since epoch)
+ * @returns Formatted date like "Jan 1, 2025"
+ */
 export function formatUnixTimestamp(timestamp: number): string {
 	return new Date(timestamp * 1000).toLocaleDateString("en-US", {
 		year: "numeric",
@@ -460,10 +528,22 @@ export function formatUnixTimestamp(timestamp: number): string {
 	});
 }
 
+/**
+ * Formats a percentage value.
+ * @param percent - Percentage value (0-100)
+ * @returns Formatted string like "75%"
+ */
 export function formatPercent(percent: number): string {
 	return `${Math.round(percent)}%`;
 }
 
+/**
+ * Calculates character distance between two highlights.
+ * Used to determine if highlights should be grouped.
+ * @param a - First annotation
+ * @param b - Second annotation
+ * @returns Character distance or Infinity if on different nodes
+ */
 export function distanceBetweenHighlights(
 	a: Annotation,
 	b: Annotation,
@@ -476,6 +556,13 @@ export function distanceBetweenHighlights(
 	return posBStart.offset - posAEnd.offset;
 }
 
+/**
+ * Checks if two annotations are close enough to group.
+ * @param a - First annotation
+ * @param b - Second annotation
+ * @param maxGap - Maximum allowed character gap
+ * @returns True if annotations should be grouped
+ */
 export function isWithinGap(
 	a: Annotation,
 	b: Annotation,
@@ -484,6 +571,14 @@ export function isWithinGap(
 	return a.pageno === b.pageno && distanceBetweenHighlights(a, b) <= maxGap;
 }
 
+/**
+ * Calculates Levenshtein edit distance between two strings.
+ * Optimized with early exit when distance exceeds max.
+ * @param a - First string
+ * @param b - Second string
+ * @param max - Maximum distance to calculate (default 50)
+ * @returns Edit distance or max+1 if exceeded
+ */
 export function levenshteinDistance(a: string, b: string, max = 50): number {
 	if (Math.abs(a.length - b.length) > max) return max + 1; // impossible
 
@@ -508,6 +603,12 @@ export function levenshteinDistance(a: string, b: string, max = 50): number {
 	return prev[bLower.length];
 }
 
+/**
+ * Generates a unique ID for an annotation based on its content.
+ * Uses SHA1 hash of position and text data.
+ * @param annotation - The annotation to generate ID for
+ * @returns 16-character hex string ID
+ */
 export function computeAnnotationId(annotation: Annotation): string {
 	const { pageno, pos0, pos1, text } = annotation;
 	const input = `${pageno}|${pos0}|${pos1}|${(text ?? "").trim()}`;

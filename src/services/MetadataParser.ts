@@ -6,7 +6,7 @@ import type {
 	TableValue,
 } from "luaparse/lib/ast";
 import type { CacheManager } from "src/utils/cache/CacheManager";
-import { LruCache } from "src/utils/cache/LruCache";
+import type { LruCache } from "src/utils/cache/LruCache";
 import { createLogger, logger } from "src/utils/logging";
 import {
 	type Annotation,
@@ -39,6 +39,12 @@ export class MetadataParser {
 		this.stringCache = cacheManager.createLru("metadata.strings", 2000);
 	}
 
+	/**
+	 * Parses a KOReader metadata.lua file from an SDR directory.
+	 * Uses caching to avoid re-parsing the same files.
+	 * @param sdrDirectoryPath - Path to the SDR directory containing metadata.lua
+	 * @returns Parsed metadata object or null if parsing fails
+	 */
 	async parseFile(sdrDirectoryPath: string): Promise<LuaMetadata | null> {
 		const cached = this.parsedMetadataCache.get(sdrDirectoryPath);
 		if (cached) {
@@ -77,6 +83,13 @@ export class MetadataParser {
 		}
 	}
 
+	/**
+	 * Recursively collects annotations from a Lua table structure.
+	 * Handles both modern format and legacy page-keyed format.
+	 * @param node - Table constructor expression containing annotations
+	 * @param pageOverride - Page number to use for nested annotations
+	 * @returns Array of parsed annotations
+	 */
 	private collectAnnotations(
 		node: luaparser.TableConstructorExpression,
 		pageOverride?: number,
@@ -121,6 +134,12 @@ export class MetadataParser {
 		return out;
 	}
 
+	/**
+	 * Parses the raw Lua content into structured metadata.
+	 * Handles AST parsing and extracts document properties and annotations.
+	 * @param luaContent - Raw Lua file content
+	 * @returns Parsed metadata without file path and statistics
+	 */
 	private parseLuaContent(
 		luaContent: string,
 	): Omit<LuaMetadata, "originalFilePath" | "statistics"> {
@@ -223,6 +242,11 @@ export class MetadataParser {
 
 	// --- Extraction Helper Functions ---
 
+	/**
+	 * Extracts document properties from a Lua table node.
+	 * @param valueNode - AST node representing the doc_props table
+	 * @returns Document properties with defaults applied
+	 */
 	private extractDocProps(valueNode: Expression): DocProps {
 		const docProps = { ...DEFAULT_DOC_PROPS };
 		if (valueNode.type !== "TableConstructorExpression") {
@@ -259,6 +283,12 @@ export class MetadataParser {
 		return docProps;
 	}
 
+	/**
+	 * Creates an annotation object from Lua table fields.
+	 * Maps various field names to standardized annotation properties.
+	 * @param fields - Array of table fields from the Lua AST
+	 * @returns Parsed annotation or null if invalid
+	 */
 	private createAnnotationFromFields(
 		fields: Array<TableKey | TableKeyString | TableValue>,
 	): Annotation | null {
@@ -344,6 +374,11 @@ export class MetadataParser {
 	}
 	// --- Primitive Value Extractors ---
 
+	/**
+	 * Extracts a string representation from various AST key node types.
+	 * @param keyNode - AST node representing a table key
+	 * @returns String value or null if extraction fails
+	 */
 	private extractKeyAsString(keyNode: Expression): string | null {
 		if (keyNode.type === "StringLiteral") {
 			return keyNode.raw.slice(1, -1); // Remove quotes
@@ -360,6 +395,13 @@ export class MetadataParser {
 		return null;
 	}
 
+	/**
+	 * Sanitizes and unescapes string values from Lua.
+	 * Handles quote removal, escape sequences, and character corrections.
+	 * Uses caching for performance.
+	 * @param rawValue - Raw string from Lua parser
+	 * @returns Cleaned and unescaped string
+	 */
 	private sanitizeString(rawValue: string): string {
 		if (typeof rawValue !== "string") return "";
 		const cached = this.stringCache.get(rawValue);
@@ -372,17 +414,27 @@ export class MetadataParser {
 			cleaned = cleaned.slice(1, -1);
 		}
 		cleaned = cleaned.replace(/ΓÇö/g, "—");
-		cleaned = cleaned.replace(/\\\\/g, "\\");
-		cleaned = cleaned.replace(/\\"/g, '"');
-		cleaned = cleaned.replace(/\\'/g, "'");
-		cleaned = cleaned.replace(/\\n/g, "\n");
-		cleaned = cleaned.replace(/\\t/g, "\t");
-		cleaned = cleaned.replace(/\\r/g, "\r");
+		cleaned = cleaned.replace(/\\(.)/g, (match, char) => {
+			const escapeMap: Record<string, string> = {
+				n: "\n",
+				t: "\t",
+				r: "\r",
+				'"': '"',
+				"'": "'",
+				"\\": "\\",
+			};
+			return escapeMap[char] || match;
+		});
 
 		this.stringCache.set(rawValue, cleaned);
 		return cleaned;
 	}
 
+	/**
+	 * Extracts a string value from various AST node types.
+	 * @param valueNode - AST node to extract string from
+	 * @returns String value or null if extraction fails
+	 */
 	private extractStringValue(valueNode: Expression): string | null {
 		if (valueNode.type === "StringLiteral") {
 			const sanitized = this.sanitizeString(valueNode.raw);
@@ -399,6 +451,11 @@ export class MetadataParser {
 		return null;
 	}
 
+	/**
+	 * Extracts a numeric value from various AST node types.
+	 * @param valueNode - AST node to extract number from
+	 * @returns Numeric value or null if extraction fails
+	 */
 	private extractNumericValue(valueNode: Expression): number | null {
 		if (valueNode.type === "NumericLiteral") {
 			return valueNode.value;
@@ -409,11 +466,5 @@ export class MetadataParser {
 		}
 		// logger.warn(`Expected NumericLiteral, got ${valueNode.type}`);
 		return null;
-	}
-
-	clearCache(): void {
-		this.parsedMetadataCache.clear();
-		this.stringCache.clear();
-		logger.info("MetadataParser: Caches cleared.");
 	}
 }

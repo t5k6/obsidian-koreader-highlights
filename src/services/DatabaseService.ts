@@ -13,7 +13,7 @@ import {
 	levenshteinDistance,
 	normalizeFileNamePiece,
 } from "src/utils/formatUtils";
-import { createLogger, logger } from "src/utils/logging";
+import { logger } from "src/utils/logging";
 import type {
 	BookStatistics,
 	DocProps,
@@ -49,8 +49,6 @@ CREATE TABLE IF NOT EXISTS book(
 CREATE INDEX IF NOT EXISTS idx_book_path ON book(vault_path);
 `;
 
-const log = createLogger("DatabaseService");
-
 /* ------------------------------------------------------------------ */
 /*                            MAIN CLASS                              */
 /* ------------------------------------------------------------------ */
@@ -80,7 +78,6 @@ export class DatabaseService implements Disposable {
 	/* -------------------  object life-cycle ----------------------- */
 	private db: SQLDatabase | null = null; // statistics.sqlite3
 	private idxDb: SQLDatabase | null = null; // highlight_index.sqlite
-	private initializing: Promise<void> | null = null;
 	private idxInitializing: Promise<void> | null = null;
 
 	private idxPath: string; // cached path for persistence
@@ -110,14 +107,24 @@ export class DatabaseService implements Disposable {
 	/*                       ─── PUBLIC  API ───                          */
 	/* ------------------------------------------------------------------ */
 
-	/* 1️⃣ DocProps ➜ deterministic key */
+	/**
+	 * Generates a deterministic key from document properties.
+	 * Used for consistent book identification across imports.
+	 * @param props - Document properties containing title and authors
+	 * @returns Normalized key in format "author::title"
+	 */
 	public bookKeyFromDocProps(props: DocProps): string {
 		const authorSlug = normalizeFileNamePiece(props.authors).toLowerCase();
 		const titleSlug = normalizeFileNamePiece(props.title).toLowerCase();
 		return `${authorSlug}::${titleSlug}`;
 	}
 
-	/* 2️⃣ Fast duplicate detection (book-level) */
+	/**
+	 * Finds existing vault files for a given book key.
+	 * Uses LRU cache for performance optimization.
+	 * @param bookKey - The book identifier key
+	 * @returns Array of vault file paths
+	 */
 	public async findExistingBookFiles(bookKey: string): Promise<string[]> {
 		const cached = this.pathCache.get(bookKey);
 		if (cached) return cached;
@@ -148,6 +155,14 @@ export class DatabaseService implements Disposable {
 	/*                 ───    STATISTICS (device)   ───                   */
 	/* ------------------------------------------------------------------ */
 
+	/**
+	 * Retrieves reading statistics from KOReader's statistics database.
+	 * Attempts multiple lookup strategies: MD5+title, MD5 only, then author+title.
+	 * @param title - Book title
+	 * @param authors - Book authors
+	 * @param md5 - Optional MD5 hash of the book file
+	 * @returns Complete statistics including reading sessions, or null if not found
+	 */
 	public async findBookStatistics(
 		title: string,
 		authors: string,
@@ -249,7 +264,15 @@ export class DatabaseService implements Disposable {
 		}
 	}
 
-	/** For merge feature – insert / update */
+	/**
+	 * Inserts or updates book information in the index database.
+	 * Used for tracking which books have been imported to which vault files.
+	 * @param id - KOReader book ID (null for new entries)
+	 * @param key - Book key from bookKeyFromDocProps
+	 * @param title - Book title
+	 * @param authors - Book authors
+	 * @param vaultPath - Path to the vault file
+	 */
 	public async upsertBook(
 		id: number | null,
 		key: string,
@@ -258,7 +281,7 @@ export class DatabaseService implements Disposable {
 		vaultPath?: string,
 	): Promise<void> {
 		await this.ensureIndexReady();
-		this.idxDb!.run(
+		this.idxDb?.run(
 			`
 				INSERT INTO book(key,id,title,authors,vault_path)
 				VALUES(?,?,?,?,?)
@@ -274,7 +297,11 @@ export class DatabaseService implements Disposable {
 		this.persistIndexDebounced();
 	}
 
-	/* -------------------- settings hot-reload ---------------------- */
+	/**
+	 * Updates settings and reinitializes database connections if needed.
+	 * Closes existing connections when mount point changes.
+	 * @param s - New plugin settings
+	 */
 	public setSettings(s: Readonly<KoreaderHighlightImporterSettings>) {
 		if (s.koreaderMountPoint !== this.currentMountPoint) {
 			this.db?.close(); // will be reopened lazily
@@ -287,6 +314,13 @@ export class DatabaseService implements Disposable {
 	/*                  ─── PRIVATE HELPERS (sql) ───                     */
 	/* ------------------------------------------------------------------ */
 
+	/**
+	 * Executes a SQL query and returns the first row.
+	 * @param db - SQLite database instance
+	 * @param sql - SQL query string
+	 * @param params - Query parameters
+	 * @returns First row as object or null
+	 */
 	private queryFirstRow<T = Record<string, unknown>>(
 		db: SQLDatabase,
 		sql: string,
@@ -301,6 +335,13 @@ export class DatabaseService implements Disposable {
 		}
 	}
 
+	/**
+	 * Executes a SQL query and returns all matching rows.
+	 * @param db - SQLite database instance
+	 * @param sql - SQL query string
+	 * @param params - Query parameters
+	 * @returns Array of row objects
+	 */
 	private queryAllRows<T = Record<string, unknown>>(
 		db: SQLDatabase,
 		sql: string,
@@ -317,6 +358,12 @@ export class DatabaseService implements Disposable {
 		}
 	}
 
+	/**
+	 * Calculates derived statistics from raw book and session data.
+	 * @param book - Book statistics from database
+	 * @param sessions - Reading session data
+	 * @returns Calculated values like percent complete, reading status
+	 */
 	private calculateDerivedStatistics(
 		book: BookStatistics,
 		sessions: PageStatData[],
@@ -353,6 +400,10 @@ export class DatabaseService implements Disposable {
 	/*             ───   CONNECTION BOOTSTRAP / TEARDOWN  ───             */
 	/* ------------------------------------------------------------------ */
 
+	/**
+	 * Ensures the index database is opened and ready.
+	 * Handles initialization and prevents duplicate attempts.
+	 */
 	private async ensureIndexReady(): Promise<void> {
 		if (this.idxDb) return;
 		if (this.idxInitializing) return this.idxInitializing;
@@ -364,6 +415,10 @@ export class DatabaseService implements Disposable {
 		return this.idxInitializing;
 	}
 
+	/**
+	 * Opens or creates the index database.
+	 * Creates schema if database doesn't exist.
+	 */
 	private async openIndexDatabase(): Promise<void> {
 		const SQL = await DatabaseService.getSqlJs();
 		let bytes: Uint8Array | null = null;
@@ -383,13 +438,18 @@ export class DatabaseService implements Disposable {
 
 	/* ------------------  persistence helpers ----------------------- */
 
+	/**
+	 * Persists the index database to disk after cancelling any pending debounced saves.
+	 */
 	public async flushIndex(): Promise<void> {
-		// Cancel any pending debounced save
 		this.persistIndexDebounced.cancel();
-		// Then persist immediately
 		await this.persistIndex();
 	}
 
+	/**
+	 * Writes the index database to disk.
+	 * Called by debounced function or flushIndex.
+	 */
 	private async persistIndex() {
 		if (!this.idxDb) return;
 		logger.info("DatabaseService: Persisting index database to disk...");
@@ -406,6 +466,10 @@ export class DatabaseService implements Disposable {
 	/*                             CLEAN-UP                               */
 	/* ------------------------------------------------------------------ */
 
+	/**
+	 * Cleans up database connections and saves pending changes.
+	 * Called when plugin is disabled or unloaded.
+	 */
 	public async dispose(): Promise<void> {
 		this.persistIndexDebounced.cancel();
 
@@ -429,6 +493,12 @@ export class DatabaseService implements Disposable {
 	/*                   ─── PRIVATE  utility methods ───                 */
 	/* ------------------------------------------------------------------ */
 
+	/**
+	 * Finds the KOReader device root by looking for .adds directory.
+	 * Walks up the directory tree from the mount point.
+	 * @param startPath - Starting directory path
+	 * @returns Device root path or null if not found
+	 */
 	private async findDeviceRoot(startPath: string): Promise<string | null> {
 		let p = path.resolve(startPath);
 		for (let i = 0; i < 10; i++) {

@@ -45,7 +45,11 @@ const toRgb = (hex: string): RGB | null => {
 	return null;
 };
 
-/** WCAG relative luminance (sRGB) */
+/**
+ * Calculates WCAG relative luminance for sRGB color.
+ * @param rgb - RGB color values [0-255]
+ * @returns Relative luminance value
+ */
 const luminance = ([r, g, b]: RGB) => {
 	const s = [r, g, b].map((v) => {
 		const c = v / 255;
@@ -54,6 +58,12 @@ const luminance = ([r, g, b]: RGB) => {
 	return 0.2126 * s[0] + 0.7152 * s[1] + 0.0722 * s[2];
 };
 
+/**
+ * Calculates WCAG contrast ratio between two colors.
+ * @param a - First RGB color
+ * @param b - Second RGB color
+ * @returns Contrast ratio (1-21)
+ */
 const contrast = (a: RGB, b: RGB) => {
 	const [L1, L2] = [luminance(a), luminance(b)].sort((x, y) => y - x);
 	return (L1 + 0.05) / (L2 + 0.05);
@@ -70,10 +80,21 @@ const ESC_MAP: Record<string, string> = {
 	'"': "&quot;",
 	"'": "&#39;",
 };
+/**
+ * Escapes HTML special characters in a string.
+ * @param s - String to escape
+ * @returns HTML-safe string
+ */
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ESC_MAP[c]);
 
 /**
- * Render a KOReader highlight → HTML (`<mark>` / `<u>` / etc.)
+ * Renders KOReader highlight text as HTML with appropriate styling.
+ * Handles different highlight styles (underline, strikeout, invert, color).
+ * Ensures WCAG-compliant contrast for colored highlights.
+ * @param text - The highlight text to style
+ * @param koColor - KOReader color name or hex code
+ * @param drawer - Highlight style ("underscore", "strikeout", "invert", "lighten")
+ * @returns HTML string with styled highlight
  */
 export function styleHighlight(
 	text: string,
@@ -130,7 +151,12 @@ export function styleHighlight(
 	return wrapper ? wrapper(processedText) : processedText;
 }
 
-/* quick black/white chooser if colour is not in our palette */
+/**
+ * Determines best contrasting color (black or white) for a given background.
+ * Ensures WCAG compliance for text readability.
+ * @param hex - Hex color code
+ * @returns "#000" or "#fff" for best contrast, null if invalid
+ */
 function bestBW(hex: string): string | null {
 	const rgb = toRgb(hex);
 	if (!rgb) return null;

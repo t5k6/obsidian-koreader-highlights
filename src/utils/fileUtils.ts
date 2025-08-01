@@ -36,7 +36,12 @@ interface HandleFsErrOptions {
 /*                           ᴜᴛɪʟɪᴛɪᴇs                               */
 /* ------------------------------------------------------------------ */
 
-/** split name + extension (extension keeps leading dot) */
+/**
+ * Splits a filename into base name and extension.
+ * Extension includes the leading dot.
+ * @param f - Filename to split
+ * @returns Object with base name and extension
+ */
 const splitFileName = (f: string): { base: string; ext: string } => {
 	const idx = f.lastIndexOf(".");
 	return idx === -1
@@ -48,6 +53,13 @@ const splitFileName = (f: string): { base: string; ext: string } => {
 /*                             API                                    */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Generates a unique file path by appending numbers if needed.
+ * @param vault - Obsidian vault instance
+ * @param dir - Directory path
+ * @param fileName - Desired filename
+ * @returns Unique file path that doesn't exist yet
+ */
 export async function generateUniqueFilePath(
 	vault: Vault,
 	dir: string,
@@ -67,13 +79,19 @@ export async function generateUniqueFilePath(
 
 const fileCreateLock = new Map<Vault, Promise<void>>();
 
+/**
+ * Executes a function with vault-level locking to prevent race conditions.
+ * @param vault - Obsidian vault instance
+ * @param fn - Function to execute within the lock
+ * @returns Result of the function execution
+ */
 async function withVaultLock<T>(
 	vault: Vault,
 	fn: () => Promise<T>,
 ): Promise<T> {
 	const prev = fileCreateLock.get(vault) ?? Promise.resolve();
 	let unlock: () => void;
-	let next = new Promise<void>((res) => {
+	const next = new Promise<void>((res) => {
 		unlock = res;
 	});
 	fileCreateLock.set(
@@ -89,6 +107,15 @@ async function withVaultLock<T>(
 	}
 }
 
+/**
+ * Creates a file with automatic conflict resolution.
+ * Appends numbers to filename if it already exists.
+ * @param vault - Obsidian vault instance
+ * @param baseDir - Directory to create file in
+ * @param filenameStem - Base filename without extension
+ * @param content - File content
+ * @returns Created TFile instance
+ */
 export async function createFileSafely(
 	vault: Vault,
 	baseDir: string,
@@ -114,6 +141,12 @@ export async function createFileSafely(
 	});
 }
 
+/**
+ * Ensures a folder exists, creating it if necessary.
+ * @param vault - Obsidian vault instance
+ * @param folderPath - Path to the folder
+ * @returns True if folder was created, false if already existed
+ */
 export async function ensureFolderExists(
 	vault: Vault,
 	folderPath: string,
@@ -134,6 +167,11 @@ export async function ensureFolderExists(
 	}
 }
 
+/**
+ * Ensures the parent directory of a file path exists.
+ * @param vault - Obsidian vault instance
+ * @param filePath - Path to the file
+ */
 export async function ensureParentDirectory(
 	vault: Vault,
 	filePath: string,
@@ -142,6 +180,14 @@ export async function ensureParentDirectory(
 	if (idx !== -1) await ensureFolderExists(vault, filePath.slice(0, idx));
 }
 
+/**
+ * Handles filesystem errors with appropriate user notifications.
+ * @param operation - Type of filesystem operation that failed
+ * @param path - Path involved in the operation
+ * @param error - The error that occurred
+ * @param options - Options for error handling
+ * @returns The processed error
+ */
 export function handleFileSystemError(
 	operation: FileSystemOperation,
 	path: string,
@@ -191,6 +237,8 @@ export function handleFileSystemError(
 /**
  * Creates parent directories if they don't exist, then writes the file.
  * For use with the Node.js filesystem, not the Obsidian Vault adapter.
+ * @param filePath - Full file path
+ * @param data - Data to write (string or binary)
  */
 export async function writeFileEnsured(
 	filePath: string,
@@ -202,11 +250,18 @@ export async function writeFileEnsured(
 
 /**
  * Checks if a filesystem error is a 'File Not Found' error.
+ * @param err - Error to check
+ * @returns True if error is ENOENT (file not found)
  */
 export function isFileMissing(err: unknown): boolean {
 	return (err as { code?: string })?.code === "ENOENT";
 }
 
-/** Always returns a RELATIVE, slash-normalised path (no leading `/`). */
+/**
+ * Converts a path to vault-relative format.
+ * Always returns a relative, slash-normalized path with no leading slash.
+ * @param raw - Raw path string
+ * @returns Normalized relative path
+ */
 export const toVaultRelPath = (raw: string): string =>
 	normalizePath(raw).replace(/^\/+/, "");

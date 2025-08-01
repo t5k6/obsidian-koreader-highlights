@@ -6,6 +6,13 @@ const FRONTMATTER_REGEX = /^---\s*?\r?\n([\s\S]+?)\r?\n---\s*?\r?\n?/;
 
 type FileOrContent = TFile | { content: string };
 
+/**
+ * Extracts frontmatter and body content from a file or raw string.
+ * Uses Obsidian's metadata cache for files when available for accuracy.
+ * @param app - Obsidian app instance
+ * @param fileOrContent - Either a TFile or an object with content string
+ * @returns Object containing parsed frontmatter and body text
+ */
 export async function getFrontmatterAndBody(
 	app: App,
 	fileOrContent: FileOrContent,

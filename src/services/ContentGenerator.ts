@@ -1,10 +1,10 @@
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import {
 	compareAnnotations,
-	computeAnnotationId,
 	distanceBetweenHighlights,
 	isWithinGap,
 } from "src/utils/formatUtils";
+import { createKohlMarkers } from "src/utils/highlightExtractor";
 import type { Annotation } from "../types";
 import type { TemplateManager } from "./TemplateManager";
 
@@ -19,6 +19,12 @@ export class ContentGenerator {
 		private plugin: KoreaderImporterPlugin,
 	) {}
 
+	/**
+	 * Generates formatted markdown content from an array of annotations.
+	 * Groups annotations by chapter, sorts them, and renders using templates.
+	 * @param annotations - Array of highlight annotations from KOReader
+	 * @returns Promise resolving to formatted markdown string
+	 */
 	async generateHighlightsContent(annotations: Annotation[]): Promise<string> {
 		if (!annotations || annotations.length === 0) {
 			return "";
@@ -75,20 +81,6 @@ export class ContentGenerator {
 
 			let chapterContent = "";
 			for (const highlightGroup of groupedSuccessiveHighlights) {
-				const markers = highlightGroup.annotations
-					.map((ann) => {
-						const meta = {
-							v: 1,
-							id: ann.id ?? computeAnnotationId(ann),
-							p: ann.pageno,
-							pos0: ann.pos0,
-							pos1: ann.pos1,
-							t: ann.datetime,
-						};
-						return `<!-- KOHL ${JSON.stringify(meta)} -->`;
-					})
-					.join("\n");
-
 				const renderedVisualGroup = this.templateManager.renderGroup(
 					compiledTemplate,
 					highlightGroup.annotations,
@@ -97,7 +89,18 @@ export class ContentGenerator {
 						isFirstInChapter: isFirstHighlightInChapter,
 					},
 				);
-				chapterContent += `${markers}\n${renderedVisualGroup}`;
+
+				// Only add KOHL markers if comment style is not "none"
+				if (this.plugin.settings.commentStyle !== "none") {
+					const markers = createKohlMarkers(
+						highlightGroup.annotations,
+						this.plugin.settings.commentStyle,
+					);
+					chapterContent += `${markers}\n${renderedVisualGroup}`;
+				} else {
+					chapterContent += renderedVisualGroup;
+				}
+
 				isFirstHighlightInChapter = false;
 
 				if (features.autoInsertDivider) {
@@ -119,9 +122,13 @@ export class ContentGenerator {
 		return finalContent.replace(/\n{3,}/g, "\n\n").trim();
 	}
 
-	/* 	Groups consecutive annotations that are close together within a chapter.
-	 	Highlights are considered successive if they are on the same page
-	 	and their character position is within a defined gap. 				*/
+	/**
+	 * Groups consecutive annotations that are close together within a chapter.
+	 * Highlights are considered successive if they are on the same page
+	 * and their character position is within a defined gap.
+	 * @param anno - Array of annotations to group
+	 * @returns Array of successive groups with their internal separators
+	 */
 	private groupSuccessiveHighlights(anno: Annotation[]): SuccessiveGroup[] {
 		const groups: SuccessiveGroup[] = [];
 		let current: Annotation[] = [];

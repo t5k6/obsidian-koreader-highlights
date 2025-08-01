@@ -55,7 +55,11 @@ export class DuplicateHandler {
 		);
 	}
 
-	/** Resets the "Apply to All" state. Call before starting a new batch import. */
+	/**
+	 * Resets the "Apply to All" state.
+	 * Should be called before starting a new batch import to ensure
+	 * each import session starts with fresh duplicate handling choices.
+	 */
 	public resetApplyToAll(): void {
 		this.applyToAll = false;
 		this.applyToAllChoice = null;
@@ -63,7 +67,10 @@ export class DuplicateHandler {
 		logger.info("DuplicateHandler: 'Apply to All' state reset.");
 	}
 
-	/** Clears the internal cache of potential duplicates. */
+	/**
+	 * Clears the internal cache of potential duplicates.
+	 * Frees memory and ensures fresh duplicate detection on next run.
+	 */
 	public clearCache(): void {
 		this.potentialDuplicatesCache.clear();
 		logger.info("DuplicateHandler: potential duplicates cache cleared.");
@@ -71,8 +78,11 @@ export class DuplicateHandler {
 
 	/**
 	 * Primary entry point for handling a potential new book import.
-	 * It finds duplicates, decides on a course of action (including auto-merge),
+	 * Finds duplicates, decides on a course of action (including auto-merge),
 	 * and returns the final status and file.
+	 * @param luaMetadata - The metadata from KOReader containing annotations
+	 * @param contentProvider - Lazy function to generate file content when needed
+	 * @returns Object with status (created/merged/automerged/skipped) and file reference
 	 */
 	public async resolveDuplicate(
 		luaMetadata: LuaMetadata,
@@ -146,6 +156,12 @@ export class DuplicateHandler {
 		}
 	}
 
+	/**
+	 * Finds existing files in the vault that may be duplicates of the book.
+	 * Uses database index for efficient lookup by book key.
+	 * @param docProps - Document properties containing title and authors
+	 * @returns Array of TFile objects that match the book key
+	 */
 	public async findPotentialDuplicates(docProps: DocProps): Promise<TFile[]> {
 		const bookKey = this.databaseService.bookKeyFromDocProps(docProps);
 		if (this.potentialDuplicatesCache.has(bookKey)) {
@@ -171,6 +187,14 @@ export class DuplicateHandler {
 		return files;
 	}
 
+	/**
+	 * Analyzes an existing file to determine how it differs from new annotations.
+	 * Counts new and modified highlights to classify the duplicate type.
+	 * @param existingFile - The existing file to analyze
+	 * @param newAnnotations - New annotations from KOReader
+	 * @param luaMetadata - Complete metadata for the new import
+	 * @returns DuplicateMatch object with analysis results
+	 */
 	public async analyzeDuplicate(
 		existingFile: TFile,
 		newAnnotations: Annotation[],
@@ -184,54 +208,66 @@ export class DuplicateHandler {
 			existingFile,
 		);
 
-		const existingHighlights = extractHighlights(existingBody);
+		// When comment style is "none", we can't extract highlights for comparison
+		// So we treat all new annotations as potentially new
+		const isNoneStyle = this.plugin.settings.commentStyle === "none";
+		const existingHighlights = isNoneStyle
+			? []
+			: extractHighlights(existingBody, this.plugin.settings.commentStyle);
 
 		let newHighlightCount = 0;
 		let modifiedHighlightCount = 0;
 
-		const existingHighlightsMap = new Map(
-			existingHighlights.map((h) => [this.getHighlightKey(h), h]),
-		);
+		if (isNoneStyle) {
+			newHighlightCount = newAnnotations.length;
+			logger.info(
+				`DuplicateHandler: Comment style is "none" - treating all ${newAnnotations.length} annotations as new for ${existingFile.path}`,
+			);
+		} else {
+			const existingHighlightsMap = new Map(
+				existingHighlights.map((h) => [this.getHighlightKey(h), h]),
+			);
 
-		for (const newHighlight of newAnnotations) {
-			const key = this.getHighlightKey(newHighlight);
-			const existingMatch = existingHighlightsMap.get(key);
+			for (const newHighlight of newAnnotations) {
+				const key = this.getHighlightKey(newHighlight);
+				const existingMatch = existingHighlightsMap.get(key);
 
-			if (!existingMatch) {
-				newHighlightCount++;
-			} else {
-				if (
-					!this.isHighlightTextEqual(
-						existingMatch.text || "",
-						newHighlight.text || "",
-					)
-				) {
-					modifiedHighlightCount++;
-					logger.info(
-						`DuplicateHandler: Modified highlight found (Page ${newHighlight.pageno}):\n  Old: "${existingMatch.text?.slice(
-							0,
-							50,
-						)}..."\n  New: "${newHighlight.text?.slice(0, 50)}..."`,
-					);
-				}
-				if (!this.isNoteTextEqual(existingMatch.note, newHighlight.note)) {
+				if (!existingMatch) {
+					newHighlightCount++;
+				} else {
 					if (
 						!this.isHighlightTextEqual(
 							existingMatch.text || "",
 							newHighlight.text || "",
 						)
 					) {
-						logger.info(
-							`DuplicateHandler: Note also differs for modified highlight (Page ${newHighlight.pageno})`,
-						);
-					} else {
 						modifiedHighlightCount++;
 						logger.info(
-							`DuplicateHandler: Note differs for existing highlight (Page ${newHighlight.pageno}):\n  Old: "${existingMatch.note?.slice(
+							`DuplicateHandler: Modified highlight found (Page ${newHighlight.pageno}):\n  Old: "${existingMatch.text?.slice(
 								0,
 								50,
-							)}..."\n  New: "${newHighlight.note?.slice(0, 50)}..."`,
+							)}..."\n  New: "${newHighlight.text?.slice(0, 50)}..."`,
 						);
+					}
+					if (!this.isNoteTextEqual(existingMatch.note, newHighlight.note)) {
+						if (
+							!this.isHighlightTextEqual(
+								existingMatch.text || "",
+								newHighlight.text || "",
+							)
+						) {
+							logger.info(
+								`DuplicateHandler: Note also differs for modified highlight (Page ${newHighlight.pageno})`,
+							);
+						} else {
+							modifiedHighlightCount++;
+							logger.info(
+								`DuplicateHandler: Note differs for existing highlight (Page ${newHighlight.pageno}):\n  Old: "${existingMatch.note?.slice(
+									0,
+									50,
+								)}..."\n  New: "${newHighlight.note?.slice(0, 50)}..."`,
+							);
+						}
 					}
 				}
 			}
@@ -259,6 +295,12 @@ export class DuplicateHandler {
 		};
 	}
 
+	/**
+	 * Creates a new file for the highlights when no merge is needed.
+	 * @param luaMetadata - The metadata containing document properties
+	 * @param contentProvider - Function to generate the file content
+	 * @returns Status object indicating file was created
+	 */
 	private async createNewFile(
 		luaMetadata: LuaMetadata,
 		contentProvider: () => Promise<string>,
@@ -280,6 +322,12 @@ export class DuplicateHandler {
 		return { status: "created", file: targetFile };
 	}
 
+	/**
+	 * Ensures a snapshot exists for the file, creating one if necessary.
+	 * Snapshots are required for safe 3-way merges.
+	 * @param file - The file to create a snapshot for
+	 * @returns True if snapshot exists or was created, false on error
+	 */
 	private async ensureSnapshot(file: TFile): Promise<boolean> {
 		if (await this.snapshotManager.getSnapshotContent(file)) {
 			return true;
@@ -299,6 +347,14 @@ export class DuplicateHandler {
 		}
 	}
 
+	/**
+	 * Handles duplicate resolution by prompting user or applying auto-merge.
+	 * Manages modal locking to prevent concurrent duplicate prompts.
+	 * @param analysis - The duplicate analysis results
+	 * @param contentProvider - Function to generate new content
+	 * @param isAutoMerge - Whether to skip user prompt and auto-merge
+	 * @returns The user's choice and resulting file
+	 */
 	private async handleDuplicate(
 		analysis: DuplicateMatch,
 		contentProvider: () => Promise<string>,
@@ -352,6 +408,13 @@ export class DuplicateHandler {
 		}
 	}
 
+	/**
+	 * Executes the chosen duplicate resolution action.
+	 * @param analysis - The duplicate match analysis
+	 * @param choice - The resolution choice (skip/replace/merge/keep-both)
+	 * @param newContent - The new content to write/merge (null for skip)
+	 * @returns Status and file reference after executing the choice
+	 */
 	private async executeChoice(
 		analysis: DuplicateMatch,
 		choice: DuplicateChoice,
@@ -414,6 +477,13 @@ export class DuplicateHandler {
 		}
 	}
 
+	/**
+	 * Performs a 2-way merge when no snapshot is available.
+	 * Merges annotations and frontmatter without conflict detection.
+	 * @param file - The existing file to merge into
+	 * @param luaMetadata - New metadata to merge
+	 * @returns Status indicating merge completion
+	 */
 	private async execute2WayMerge(
 		file: TFile,
 		luaMetadata: LuaMetadata,
@@ -421,7 +491,10 @@ export class DuplicateHandler {
 		await this.snapshotManager.createBackup(file);
 		const { frontmatter: existingFm, body: existingBody } =
 			await getFrontmatterAndBody(this.app, file);
-		const existingAnnotations = extractHighlights(existingBody);
+		const existingAnnotations = extractHighlights(
+			existingBody,
+			this.plugin.settings.commentStyle,
+		);
 
 		const mergedAnnotations = this.mergeAnnotationArrays(
 			existingAnnotations,
@@ -447,6 +520,13 @@ export class DuplicateHandler {
 		return { status: "merged", file };
 	}
 
+	/**
+	 * Performs a 3-way diff to detect conflicts between versions.
+	 * @param ours - Current vault version
+	 * @param base - Last imported version (snapshot)
+	 * @param theirs - New KOReader version
+	 * @returns Array of merge regions with conflicts marked
+	 */
 	private performSynchronousDiff3(
 		ours: string,
 		base: string,
@@ -455,6 +535,15 @@ export class DuplicateHandler {
 		return diff3Merge(ours.split("\n"), base.split("\n"), theirs.split("\n"));
 	}
 
+	/**
+	 * Performs a safe 3-way merge using snapshots to preserve user edits.
+	 * Adds conflict markers when automatic resolution isn't possible.
+	 * @param file - The existing file to merge into
+	 * @param baseContent - The snapshot content (common ancestor)
+	 * @param newFileContent - The new content from KOReader
+	 * @param luaMetadata - Metadata for frontmatter merging
+	 * @returns Status indicating merge completion
+	 */
 	private async execute3WayMerge(
 		file: TFile,
 		baseContent: string,
@@ -540,6 +629,13 @@ export class DuplicateHandler {
 		return { status: "merged", file };
 	}
 
+	/**
+	 * Merges two arrays of annotations, avoiding duplicates.
+	 * Uses highlight keys for deduplication.
+	 * @param existing - Existing annotations in the vault
+	 * @param incoming - New annotations from KOReader
+	 * @returns Merged array sorted by position
+	 */
 	private mergeAnnotationArrays(
 		existing: Annotation[],
 		incoming: Annotation[],
@@ -558,22 +654,45 @@ export class DuplicateHandler {
 		return Array.from(map.values()).sort(compareAnnotations);
 	}
 
+	/**
+	 * Normalizes text for comparison by removing extra whitespace.
+	 * @param text - Text to normalize
+	 * @returns Normalized lowercase string
+	 */
 	private normalizeForComparison(text?: string): string {
 		return text?.trim().replace(/\s+/g, " ").toLowerCase() ?? "";
 	}
 
+	/**
+	 * Compares two highlight texts for equality after normalization.
+	 * @param text1 - First highlight text
+	 * @param text2 - Second highlight text
+	 * @returns True if texts are effectively equal
+	 */
 	private isHighlightTextEqual(text1: string, text2: string): boolean {
 		return (
 			this.normalizeForComparison(text1) === this.normalizeForComparison(text2)
 		);
 	}
 
+	/**
+	 * Compares two note texts for equality after normalization.
+	 * @param note1 - First note text
+	 * @param note2 - Second note text
+	 * @returns True if notes are effectively equal
+	 */
 	private isNoteTextEqual(note1?: string, note2?: string): boolean {
 		return (
 			this.normalizeForComparison(note1) === this.normalizeForComparison(note2)
 		);
 	}
 
+	/**
+	 * Determines the type of duplicate match based on differences.
+	 * @param newCount - Number of new highlights
+	 * @param modifiedCount - Number of modified highlights
+	 * @returns Match type: "exact", "updated", or "divergent"
+	 */
 	private determineMatchType(
 		newCount: number,
 		modifiedCount: number,
@@ -584,6 +703,11 @@ export class DuplicateHandler {
 		return "exact";
 	}
 
+	/**
+	 * Gets a unique key for an annotation used for deduplication.
+	 * @param annotation - The annotation to get a key for
+	 * @returns Unique identifier string
+	 */
 	private getHighlightKey(annotation: Annotation): string {
 		return annotation.id ?? computeAnnotationId(annotation);
 	}

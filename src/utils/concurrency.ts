@@ -15,7 +15,12 @@ export class ConcurrencyLimiter {
 
 	constructor(private readonly capacity = 8) {}
 
-	// Schedules a task to be executed, respecting the concurrency limit.
+	/**
+	 * Schedules a task to be executed, respecting the concurrency limit.
+	 * Tasks are queued if the limit is reached.
+	 * @param task - Async function to execute
+	 * @returns Promise resolving to the task's result
+	 */
 	async schedule<T>(task: () => Promise<T>): Promise<T> {
 		if (this.active >= this.capacity) {
 			await new Promise<void>((res) => this.queue.push(res));

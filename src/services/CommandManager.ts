@@ -14,6 +14,11 @@ export class CommandManager {
 		private readonly cacheManager: CacheManager,
 	) {}
 
+	/**
+	 * Executes the highlight import process.
+	 * Validates mount point availability before starting import.
+	 * Handles cancellation and error reporting.
+	 */
 	async executeImport(): Promise<void> {
 		logger.info("CommandManager: Import triggered.");
 
@@ -40,6 +45,10 @@ export class CommandManager {
 		});
 	}
 
+	/**
+	 * Executes a scan for available highlights without importing.
+	 * Shows what files would be processed in an import.
+	 */
 	async executeScan(): Promise<void> {
 		logger.info("CommandManager: Scan triggered.");
 
@@ -55,12 +64,47 @@ export class CommandManager {
 		});
 	}
 
+	/**
+	 * Clears all plugin caches.
+	 * Useful when encountering issues or after changing settings.
+	 */
 	async executeClearCaches(): Promise<void> {
 		logger.info("CommandManager: Cache clear triggered from plugin.");
 
 		await runPluginAction(() => Promise.resolve(this.cacheManager.clear()), {
 			successNotice: "KOReader Importer caches cleared.",
 			failureNotice: "Failed to clear caches",
+		});
+	}
+
+	/**
+	 * Converts all existing highlight files to the current comment style setting.
+	 * Rewrites all files to ensure consistency across the highlights folder.
+	 */
+	async executeConvertCommentStyle(): Promise<void> {
+		logger.info("CommandManager: Comment style conversion triggered.");
+
+		await runPluginAction(
+			() => this.importManager.convertAllFilesToCommentStyle(),
+			{
+				failureNotice:
+					"An unexpected error occurred during comment style conversion",
+			},
+		).catch((error) => {
+			if (error.name === "AbortError") {
+				// user cancellation
+				logger.info(
+					"CommandManager: Comment style conversion was cancelled by the user.",
+				);
+			} else {
+				logger.error(
+					"CommandManager: Comment style conversion failed with an unexpected error",
+					error,
+				);
+				new Notice(
+					"Comment style conversion failed. Check console for details.",
+				);
+			}
 		});
 	}
 }

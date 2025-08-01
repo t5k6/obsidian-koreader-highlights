@@ -13,6 +13,7 @@ import {
   ensureStringArray,
 } from "src/utils/validationUtils";
 import type {
+  CommentStyle,
   KoreaderHighlightImporterSettings,
   KoreaderTemplateSettings,
 } from "../types";
@@ -54,68 +55,8 @@ export const DEFAULT_SETTINGS: KoreaderHighlightImporterSettings = {
     selectedTemplate: "default",
     templateDir: DEFAULT_TEMPLATES_FOLDER,
   },
+  commentStyle: "html",
 };
-
-/* ------------------------------------------------------------------ */
-/*                   2.  SCHEMA 						              */
-/* ------------------------------------------------------------------ */
-
-type Primitive = string | number | boolean;
-
-interface FieldRule<T = Primitive> {
-  key: keyof KoreaderHighlightImporterSettings;
-  type: "string" | "number" | "boolean";
-  default: T;
-  normalize?: (v: any) => T;
-  validate?: (v: any) => boolean;
-}
-
-const FIELD_RULES: FieldRule[] = [
-  {
-    key: "koreaderMountPoint",
-    type: "string",
-    default: DEFAULT_SETTINGS.koreaderMountPoint,
-  },
-  {
-    key: "highlightsFolder",
-    type: "string",
-    default: DEFAULT_SETTINGS.highlightsFolder,
-  },
-  { key: "logToFile", type: "boolean", default: DEFAULT_SETTINGS.logToFile },
-  {
-    key: "logLevel",
-    type: "number",
-    default: DEFAULT_SETTINGS.logLevel,
-    validate: (v) => [0, 1, 2, 3].includes(v),
-  },
-  {
-    key: "enableFullDuplicateCheck",
-    type: "boolean",
-    default: DEFAULT_SETTINGS.enableFullDuplicateCheck,
-  },
-  {
-    key: "autoMergeOnAddition",
-    type: "boolean",
-    default: DEFAULT_SETTINGS.autoMergeOnAddition,
-  },
-  {
-    key: "maxHighlightGap",
-    type: "number",
-    default: DEFAULT_SETTINGS.maxHighlightGap,
-    validate: (v) => typeof v === "number" && v >= 0,
-  },
-  {
-    key: "maxTimeGapMinutes",
-    type: "number",
-    default: DEFAULT_SETTINGS.maxTimeGapMinutes,
-    validate: (v) => typeof v === "number" && v >= 0,
-  },
-  {
-    key: "mergeOverlappingHighlights",
-    type: "boolean",
-    default: DEFAULT_SETTINGS.mergeOverlappingHighlights,
-  },
-];
 
 /* ------------------------------------------------------------------ */
 /*                      3.  MAIN CLASS                                 */
@@ -208,6 +149,16 @@ export class PluginSettings {
         ? source
         : DEFAULT_SETTINGS.template.source;
     }
+
+    const commentStyle = ensureString(
+			raw.commentStyle,
+			DEFAULT_SETTINGS.commentStyle,
+		);
+		settings.commentStyle = (
+			["html", "md", "none"].includes(commentStyle)
+				? commentStyle
+				: DEFAULT_SETTINGS.commentStyle
+		) as CommentStyle;
 
     logger.info("PluginSettings: Settings validated:", settings);
     return settings;

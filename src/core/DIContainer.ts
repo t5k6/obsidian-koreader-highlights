@@ -1,42 +1,169 @@
+import type {
+	Disposable,
+	KoreaderHighlightImporterSettings,
+	SettingsObserver,
+} from "src/types";
 import { logger } from "src/utils/logging";
 
-type Ctor<T> = new (...args: any[]) => T;
+export type Ctor<T> = new (...args: any[]) => T;
+export type Token<T> = Ctor<T> | symbol;
 
-export interface Disposable {
-	dispose(): void | Promise<void>;
+interface Registration {
+	ctor: Ctor<unknown>;
+	deps: Token<unknown>[];
+	isSingleton: boolean;
 }
 
-// simple dependency injection container that manages the lifecycle of instances.
-export class DIContainer {
-	private instances = new Map<Ctor<any>, any>();
+function isSettingsObserver(obj: unknown): obj is SettingsObserver {
+	return (
+		!!obj && typeof (obj as SettingsObserver).onSettingsChanged === "function"
+	);
+}
 
-	public registerSingleton<T>(token: Ctor<T>, instance: T): DIContainer {
-		if (this.instances.has(token)) {
+function isDisposable(obj: unknown): obj is Disposable {
+	return !!obj && typeof (obj as any).dispose === "function";
+}
+
+export class DIContainer {
+	private instances = new Map<Token<unknown>, unknown>();
+	private values = new Map<Token<unknown>, unknown>();
+	private registrations = new Map<Token<unknown>, Registration>();
+	private resolvingStack: Token<unknown>[] = [];
+	private lastKnownSettings: {
+		new: KoreaderHighlightImporterSettings;
+		old: KoreaderHighlightImporterSettings;
+	} | null = null;
+
+	private getTokenName(token: Token<unknown>): string {
+		return typeof token === "symbol" ? token.toString() : token.name;
+	}
+
+	public register<T>(
+		ctor: Ctor<T>,
+		dependencies: Token<unknown>[],
+		isSingleton = true,
+	): this {
+		const token = ctor as Token<T>;
+		if (this.registrations.has(token)) {
 			logger.warn(
-				`DIContainer: Token ${token.name} is already registered. Overwriting.`,
+				`DIContainer: DI registration for ${this.getTokenName(
+					token,
+				)} is being overwritten.`,
 			);
 		}
-		this.instances.set(token, instance);
+		this.registrations.set(token, {
+			ctor,
+			deps: dependencies,
+			isSingleton,
+		});
 		return this;
 	}
 
-	public resolve<T>(token: Ctor<T>): T {
-		const instance = this.instances.get(token);
-		if (!instance) {
-			throw new Error(`Service not registered: ${token.name}`);
+	public registerValue<T>(token: Token<T>, value: T): this {
+		if (this.values.has(token)) {
+			logger.warn(
+				`DIContainer: DI value for ${this.getTokenName(
+					token,
+				)} is being overwritten.`,
+			);
 		}
-		return instance as T;
+		this.values.set(token, value);
+		return this;
+	}
+
+	public resolve<T>(token: Token<T>): T {
+		if (this.instances.has(token)) {
+			return this.instances.get(token) as T;
+		}
+		if (this.values.has(token)) {
+			return this.values.get(token) as T;
+		}
+
+		if (this.resolvingStack.includes(token)) {
+			const cyclePath = [...this.resolvingStack, token]
+				.map((t) => this.getTokenName(t))
+				.join(" -> ");
+			throw new Error(
+				`DIContainer: Circular dependency detected: ${cyclePath}`,
+			);
+		}
+		this.resolvingStack.push(token);
+
+		const registration = this.registrations.get(token);
+		if (!registration) {
+			this.resolvingStack.pop();
+			throw new Error(
+				`DIContainer: Service not registered or provided as a value: ${this.getTokenName(
+					token,
+				)}`,
+			);
+		}
+
+		try {
+			const resolvedDependencies = registration.deps.map((depToken) =>
+				this.resolve(depToken),
+			);
+			const newInstance = new registration.ctor(...resolvedDependencies);
+
+			if (this.lastKnownSettings && isSettingsObserver(newInstance)) {
+				newInstance.onSettingsChanged(
+					this.lastKnownSettings.new,
+					this.lastKnownSettings.old,
+				);
+			}
+
+			if (registration.isSingleton) {
+				this.instances.set(token, newInstance);
+			}
+
+			return newInstance as T;
+		} finally {
+			this.resolvingStack.pop();
+		}
+	}
+
+	public notifySettingsChanged(
+		newSettings: KoreaderHighlightImporterSettings,
+		oldSettings: KoreaderHighlightImporterSettings,
+	): void {
+		this.lastKnownSettings = { new: newSettings, old: oldSettings };
+		let notifiedCount = 0;
+		for (const instance of this.instances.values()) {
+			if (isSettingsObserver(instance)) {
+				try {
+					instance.onSettingsChanged(newSettings, oldSettings);
+					notifiedCount++;
+				} catch (error) {
+					logger.error(
+						`DIContainer: Error notifying observer ${instance.constructor.name} of settings change.`,
+						error,
+					);
+				}
+			}
+		}
+		logger.info(
+			`DIContainer: Notified ${notifiedCount} observers of settings changes.`,
+		);
 	}
 
 	public async dispose(): Promise<void> {
 		const disposalPromises: (void | Promise<void>)[] = [];
 		for (const instance of this.instances.values()) {
-			if (instance && typeof (instance as Disposable).dispose === "function") {
-				disposalPromises.push((instance as Disposable).dispose());
+			if (isDisposable(instance)) {
+				disposalPromises.push(instance.dispose());
 			}
 		}
-		await Promise.all(disposalPromises);
+
+		await Promise.all(disposalPromises).catch((error) => {
+			logger.error("DIContainer: Error during instance disposal.", error);
+		});
+
 		this.instances.clear();
-		logger.info("DIContainer: All instances disposed and container cleared.");
+		this.registrations.clear();
+		this.values.clear();
+
+		logger.info(
+			"DIContainer: All disposable instances have been cleared and container is disposed.",
+		);
 	}
 }

@@ -4,6 +4,10 @@ import { platform } from "node:os";
 import { join as joinPath } from "node:path";
 import { Notice } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import type {
+	KoreaderHighlightImporterSettings,
+	SettingsObserver,
+} from "src/types";
 import { type CacheManager, memoizeAsync } from "src/utils/cache/CacheManager";
 import { ConcurrencyLimiter } from "src/utils/concurrency";
 import { handleFileSystemError } from "src/utils/fileUtils";
@@ -28,7 +32,7 @@ const io = <T>(fn: () => Promise<T>) => ioLimiter.schedule(fn);
 /*                            MAIN CLASS                              */
 /* ------------------------------------------------------------------ */
 
-export class SDRFinder {
+export class SDRFinder implements SettingsObserver {
 	private sdrDirCache: Map<string, Promise<string[]>>;
 	private metadataNameCache: Map<string, string | null>;
 	private findSdrDirectoriesWithMetadataMemoized: (
@@ -47,23 +51,10 @@ export class SDRFinder {
 			this.sdrDirCache,
 			(key: string) => this.scan(key),
 		);
-		this.updateCacheKey();
+		this.updateCacheKey(this.plugin.settings);
 	}
 
 	/* -------------------------- Public ----------------------------- */
-
-	/**
-	 * Updates cached settings and clears caches if mount point changed.
-	 * Should be called when plugin settings are modified.
-	 */
-	updateSettings(): void {
-		const prevKey = this.cacheKey;
-		this.updateCacheKey();
-		if (this.cacheKey !== prevKey) {
-			this.cacheManager.clear("sdr.*");
-			logger.info("SDRFinder: settings changed, SDR caches cleared.");
-		}
-	}
 
 	/**
 	 * Provides an async iterator over all SDR directories with metadata.
@@ -102,15 +93,25 @@ export class SDRFinder {
 		}
 	}
 
+	public onSettingsChanged(
+		newSettings: KoreaderHighlightImporterSettings,
+	): void {
+		const prevKey = this.cacheKey;
+		this.updateCacheKey(newSettings); // Pass new settings to update the key
+		if (this.cacheKey !== prevKey) {
+			this.cacheManager.clear("sdr.*");
+			logger.info("SDRFinder: Settings changed, SDR caches cleared.");
+		}
+	}
+
 	/* ------------------------- Private ----------------------------- */
 
 	/**
 	 * Updates the cache key based on current settings.
 	 * Used to invalidate caches when settings change.
 	 */
-	private updateCacheKey(): void {
-		const { koreaderMountPoint, excludedFolders, allowedFileTypes } =
-			this.plugin.settings;
+	private updateCacheKey(settings: KoreaderHighlightImporterSettings): void {
+		const { koreaderMountPoint, excludedFolders, allowedFileTypes } = settings;
 		this.cacheKey = [
 			koreaderMountPoint ?? "nokey",
 			...excludedFolders.map((s) => s.toLowerCase()),
@@ -244,7 +245,7 @@ export class SDRFinder {
 				this.plugin.settings.koreaderMountPoint = candidate;
 				new Notice(`KOReader: auto-detected device at "${candidate}"`, 5_000);
 				logger.info("Using auto-detected mount point:", candidate);
-				this.updateCacheKey();
+				this.updateCacheKey(this.plugin.settings);
 				return true;
 			}
 		}

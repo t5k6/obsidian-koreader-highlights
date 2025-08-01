@@ -1,5 +1,4 @@
-import type { Disposable } from "src/core/DIContainer";
-import type { AsyncLoader, Cache } from "../../types";
+import type { AsyncLoader, Cache, Disposable } from "src/types";
 import { logger } from "../logging";
 import { LruCache } from "./LruCache";
 

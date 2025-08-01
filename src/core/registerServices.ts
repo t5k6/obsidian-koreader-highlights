@@ -11,84 +11,79 @@ import { ScanManager } from "src/services/ScanManager";
 import { SDRFinder } from "src/services/SDRFinder";
 import { SnapshotManager } from "src/services/SnapshotManager";
 import { TemplateManager } from "src/services/TemplateManager";
-import type { DuplicateMatch, IDuplicateHandlingModal } from "src/types";
 import { DuplicateHandlingModal } from "src/ui/DuplicateModal";
 import { CacheManager } from "src/utils/cache/CacheManager";
 import type { DIContainer } from "./DIContainer";
 import type KoreaderImporterPlugin from "./KoreaderImporterPlugin";
+import {
+	APP_TOKEN,
+	DUPLICATE_MODAL_FACTORY_TOKEN,
+	PLUGIN_TOKEN,
+	VAULT_TOKEN,
+} from "./tokens";
 
 export function registerServices(
 	container: DIContainer,
 	plugin: KoreaderImporterPlugin,
 	app: App,
 ) {
-	/* ---------- core singletons ---------- */
-	const cacheManager = new CacheManager();
-	const sdrFinder = new SDRFinder(plugin, cacheManager);
-	const dbService = new DatabaseService(plugin);
-	const templateManager = new TemplateManager(plugin, app.vault, cacheManager);
-	const frontmatterGen = new FrontmatterGenerator();
-	const snapshotManager = new SnapshotManager(app, plugin, app.vault);
-	const mountPointService = new MountPointService(sdrFinder);
-
-	container
-		.registerSingleton(CacheManager, cacheManager)
-		.registerSingleton(SDRFinder, sdrFinder)
-		.registerSingleton(DatabaseService, dbService)
-		.registerSingleton(TemplateManager, templateManager)
-		.registerSingleton(FrontmatterGenerator, frontmatterGen)
-		.registerSingleton(SnapshotManager, snapshotManager)
-		.registerSingleton(MountPointService, mountPointService);
-
-	/* ---------- dependent singletons ---------- */
-	const metadataParser = new MetadataParser(sdrFinder, cacheManager);
-	const contentGen = new ContentGenerator(templateManager, plugin);
-
-	const modalFactory = (
-		app: App,
-		match: DuplicateMatch,
-		message: string,
-	): IDuplicateHandlingModal => new DuplicateHandlingModal(app, match, message);
-
-	const dupHandler = new DuplicateHandler(
-		app.vault,
-		app,
-		modalFactory,
-		frontmatterGen,
-		plugin,
-		contentGen,
-		dbService,
-		snapshotManager,
-		cacheManager,
+	// --- Register Core Values ---
+	container.registerValue(APP_TOKEN, app);
+	container.registerValue(VAULT_TOKEN, app.vault);
+	container.registerValue(PLUGIN_TOKEN, plugin);
+	container.registerValue(
+		DUPLICATE_MODAL_FACTORY_TOKEN,
+		(app: App, match: any, message: string) =>
+			new DuplicateHandlingModal(app, match, message),
 	);
 
-	const importManager = new ImportManager(
-		app,
-		plugin,
-		sdrFinder,
-		metadataParser,
-		dbService,
-		frontmatterGen,
-		contentGen,
-		dupHandler,
-		snapshotManager,
-	);
+	// --- Level 0: Foundational & No Dependencies ---
+	container.register(CacheManager, []);
+	container.register(FrontmatterGenerator, []);
 
-	const scanManager = new ScanManager(app, plugin, sdrFinder);
+	// --- Level 1: Depends on Level 0 or Tokens ---
+	container.register(DatabaseService, [PLUGIN_TOKEN]);
+	container.register(SDRFinder, [PLUGIN_TOKEN, CacheManager]);
+	container.register(SnapshotManager, [APP_TOKEN, PLUGIN_TOKEN, VAULT_TOKEN]);
+	container.register(TemplateManager, [
+		PLUGIN_TOKEN,
+		VAULT_TOKEN,
+		CacheManager,
+	]);
+	container.register(MountPointService, [SDRFinder]);
 
-	container
-		.registerSingleton(MetadataParser, metadataParser)
-		.registerSingleton(ContentGenerator, contentGen)
-		.registerSingleton(DuplicateHandler, dupHandler)
-		.registerSingleton(ImportManager, importManager)
-		.registerSingleton(ScanManager, scanManager);
+	// --- Level 2: Depends on Level 1 ---
+	container.register(ContentGenerator, [TemplateManager, PLUGIN_TOKEN]);
+	container.register(MetadataParser, [SDRFinder, CacheManager]);
+	container.register(ScanManager, [APP_TOKEN, PLUGIN_TOKEN, SDRFinder]);
+	container.register(DuplicateHandler, [
+		VAULT_TOKEN,
+		APP_TOKEN,
+		DUPLICATE_MODAL_FACTORY_TOKEN,
+		FrontmatterGenerator,
+		PLUGIN_TOKEN,
+		ContentGenerator,
+		DatabaseService,
+		SnapshotManager,
+		CacheManager,
+	]);
 
-	/* ---------- command/action coordinator ---------- */
-	const commandManager = new CommandManager(
-		importManager,
-		scanManager,
-		mountPointService,
-		cacheManager,
-	);
-	container.registerSingleton(CommandManager, commandManager);
+	// --- Level 3: Depends on Level 2 ---
+	container.register(ImportManager, [
+		APP_TOKEN,
+		PLUGIN_TOKEN,
+		SDRFinder,
+		MetadataParser,
+		DatabaseService,
+		FrontmatterGenerator,
+		ContentGenerator,
+		DuplicateHandler,
+		SnapshotManager,
+	]);
+	container.register(CommandManager, [
+		ImportManager,
+		ScanManager,
+		MountPointService,
+		CacheManager,
+	]);
 }

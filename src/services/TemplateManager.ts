@@ -15,6 +15,7 @@ import type {
 	Annotation,
 	KoreaderHighlightImporterSettings,
 	RenderContext,
+	SettingsObserver,
 	TemplateData,
 	TemplateDefinition,
 } from "../types";
@@ -47,7 +48,7 @@ export interface TemplateValidationResult {
 
 const log = createLogger("TemplateManager");
 
-export class TemplateManager {
+export class TemplateManager implements SettingsObserver {
 	private isDarkTheme: boolean = true;
 	private rawTemplateCache = new LruCache<string, string>(10);
 	private compiledTemplateCache = new LruCache<string, CachedTemplate>(10);
@@ -70,6 +71,25 @@ export class TemplateManager {
 			this.plugin.app.workspace.on("css-change", this.updateTheme),
 		);
 		logger.info(`TemplateManager initialized. Dark theme: ${this.isDarkTheme}`);
+	}
+
+	public onSettingsChanged(
+		newSettings: KoreaderHighlightImporterSettings,
+		oldSettings: KoreaderHighlightImporterSettings,
+	): void {
+		const templateChanged =
+			oldSettings.template.useCustomTemplate !==
+				newSettings.template.useCustomTemplate ||
+			oldSettings.template.selectedTemplate !==
+				newSettings.template.selectedTemplate ||
+			oldSettings.template.templateDir !== newSettings.template.templateDir;
+
+		if (templateChanged) {
+			this.cacheManager.clear("template.*");
+			logger.info(
+				"TemplateManager: Template settings changed, relevant caches cleared.",
+			);
+		}
 	}
 
 	/**
@@ -195,30 +215,6 @@ export class TemplateManager {
 		logger.info(
 			`TemplateManager: Loaded ${this.builtInTemplates.size} built-in templates.`,
 		);
-	}
-
-	/**
-	 * Updates the template manager with new plugin settings.
-	 * Clears caches if template-related settings have changed.
-	 * @param newSettings - The new plugin settings object
-	 */
-	updateSettings(newSettings: KoreaderHighlightImporterSettings): void {
-		const settings = this.plugin.settings;
-		const templateChanged =
-			settings.template.useCustomTemplate !==
-				newSettings.template.useCustomTemplate ||
-			settings.template.selectedTemplate !==
-				newSettings.template.selectedTemplate ||
-			settings.template.templateDir !== newSettings.template.templateDir;
-
-		this.plugin.settings = newSettings;
-
-		if (templateChanged) {
-			this.cacheManager.clear("template.*");
-			logger.info(
-				"TemplateManager: Template settings changed, relevant caches cleared.",
-			);
-		}
 	}
 
 	/**

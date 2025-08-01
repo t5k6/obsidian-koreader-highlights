@@ -4,7 +4,6 @@ import path from "node:path";
 import { normalizePath } from "obsidian";
 import initSqlJs, { type SqlJsStatic } from "sql.js";
 import { SQLITE_WASM } from "src/binaries/sql-wasm-base64";
-import type { Disposable } from "src/core/DIContainer";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import { LruCache } from "src/utils/cache/LruCache";
 import { debounce } from "src/utils/debounce";
@@ -16,11 +15,13 @@ import {
 import { logger } from "src/utils/logging";
 import type {
 	BookStatistics,
+	Disposable,
 	DocProps,
 	KoreaderHighlightImporterSettings,
 	LuaMetadata,
 	PageStatData,
 	ReadingStatus,
+	SettingsObserver,
 } from "../types";
 
 /* ------------------------------------------------------------------ */
@@ -53,7 +54,7 @@ CREATE INDEX IF NOT EXISTS idx_book_path ON book(vault_path);
 /*                            MAIN CLASS                              */
 /* ------------------------------------------------------------------ */
 
-export class DatabaseService implements Disposable {
+export class DatabaseService implements Disposable, SettingsObserver {
 	/* ---------------- sql.js instance (static) -------------------- */
 	private static sqlJsInstance: SqlJsStatic | null = null;
 	private static sqlJsInit: Promise<SqlJsStatic> | null = null;
@@ -101,6 +102,19 @@ export class DatabaseService implements Disposable {
 		);
 
 		this.persistIndexDebounced = debounce(() => this.persistIndex(), 2_500);
+	}
+
+	public onSettingsChanged(
+		newSettings: KoreaderHighlightImporterSettings,
+	): void {
+		if (newSettings.koreaderMountPoint !== this.currentMountPoint) {
+			this.db?.close(); // will be reopened lazily
+			this.db = null;
+			this.currentMountPoint = newSettings.koreaderMountPoint;
+			logger.info(
+				"DatabaseService: Mount point changed, connection will be re-established on next use.",
+			);
+		}
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -295,19 +309,6 @@ export class DatabaseService implements Disposable {
 		);
 		this.pathCache.delete(key);
 		this.persistIndexDebounced();
-	}
-
-	/**
-	 * Updates settings and reinitializes database connections if needed.
-	 * Closes existing connections when mount point changes.
-	 * @param s - New plugin settings
-	 */
-	public setSettings(s: Readonly<KoreaderHighlightImporterSettings>) {
-		if (s.koreaderMountPoint !== this.currentMountPoint) {
-			this.db?.close(); // will be reopened lazily
-			this.db = null;
-			this.currentMountPoint = s.koreaderMountPoint;
-		}
 	}
 
 	/* ------------------------------------------------------------------ */

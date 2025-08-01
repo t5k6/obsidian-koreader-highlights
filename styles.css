@@ -294,8 +294,22 @@ mark[style*="#00ff00"] {
 /*  Settings Panel UI                                                  */
 /* ─────────────────────────────────────────────────────────────────── */
 
+/* Style section headings as H2 */
+.koreader-importer-settings summary {
+    color: var(--h2-color);
+    font-family: var(--h2-font);
+    font-style: var(--h2-style);
+    font-variant: var(--h2-variant);
+    line-height: var(--h2-line-height);
+    font-size: var(--font-ui-medium);
+    font-weight: var(--font-semibold);
+    margin-block-end: var(--p-spacing);
+    margin-block-start: var(--p-spacing);
+}
+
 /* Make all text inputs and textareas in our settings panel have a consistent width */
 .koreader-importer-settings .setting-item-control:has(input[type="text"]),
+.koreader-importer-settings .search-input-container,
 .koreader-importer-settings .setting-item-control:has(textarea) {
 	max-width: 450px;
 	width: 100%;

@@ -20,6 +20,7 @@
 	"author": "Tahsin Kocaman",
 	"license": "MIT",
 	"dependencies": {
+		"@popperjs/core": "^2.11.8",
 		"luaparse": "^0.3.1",
 		"node-diff3": "^3.1.2",
 		"obsidian": "^1.8.7",

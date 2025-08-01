@@ -65,7 +65,7 @@ Here's how to use the KOReader Highlights Importer:
 
 ## 🎨 Templating System
 
-Customize your notes by creating your own templates in the folder specified in the settings (default: `KOReader/templates`).
+Customize your notes by creating your own templates in the folder specified in the settings (default: `KOReader/Templates`).
 
 - **Conditional Logic**: Only show a section if a variable exists. For example, to only show the note section if a note exists: `{{#note}}> [!NOTE] {{note}}\n{{/note}}`.
 - **Automatic Note Formatting**: The plugin automatically prefixes each line of a `{{note}}` with `> ` for blockquote formatting if you don't do it yourself.
@@ -94,6 +94,7 @@ Customize your notes by creating your own templates in the folder specified in t
 ## Development
 - **Install Dependencies** with [pnpm](https://pnpm.io/): `pnpm install`
 - **Building**: Use `pnpm run build` to compile the plugin.
+  - Or `pnpm run dev` if you want to use Obsidian's Developer Tools to debug.
 - **Testing**: The plugin uses Obsidian's API for file operations and plugin lifecycle management.
 
 ## Contributing

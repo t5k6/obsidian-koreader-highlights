@@ -2,6 +2,7 @@ import { type App, Notice, type TFile } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import type {
 	DuplicateChoice,
+	DuplicateHandlingSession,
 	DuplicateMatch,
 	IDuplicateHandlingModal,
 } from "src/types";
@@ -19,8 +20,6 @@ type ResolveStatus =
 
 export class DuplicateHandler {
 	private readonly SCOPE = "DuplicateHandler";
-	private applyToAll = false;
-	private applyToAllChoice: DuplicateChoice | null = null;
 	private modalLock: Promise<void> = Promise.resolve();
 
 	constructor(
@@ -37,11 +36,6 @@ export class DuplicateHandler {
 		private loggingService: LoggingService,
 	) {}
 
-	public reset() {
-		this.applyToAll = false;
-		this.applyToAllChoice = null;
-	}
-
 	/**
 	 * Handles duplicate resolution by prompting user or applying auto-merge.
 	 * Manages modal locking to prevent concurrent duplicate prompts.
@@ -52,6 +46,7 @@ export class DuplicateHandler {
 	public async handleDuplicate(
 		analysis: DuplicateMatch,
 		contentProvider: () => Promise<string>,
+		session: DuplicateHandlingSession,
 	): Promise<{ status: ResolveStatus; file: TFile | null }> {
 		const autoMergeEnabled = this.plugin.settings.autoMergeOnAddition;
 		const isUpdateOnly =
@@ -73,7 +68,7 @@ export class DuplicateHandler {
 			return { status: "automerged", file: analysis.file };
 		}
 
-		const choice = await this.promptUser(analysis);
+		const choice = await this.promptUser(analysis, session);
 
 		switch (choice) {
 			case "replace": {
@@ -117,7 +112,10 @@ export class DuplicateHandler {
 		}
 	}
 
-	private async promptUser(analysis: DuplicateMatch): Promise<DuplicateChoice> {
+	private async promptUser(
+		analysis: DuplicateMatch,
+		session: DuplicateHandlingSession,
+	): Promise<DuplicateChoice> {
 		let unlock: () => void;
 		const lock = new Promise<void>((resolve) => {
 			unlock = resolve;
@@ -128,8 +126,8 @@ export class DuplicateHandler {
 		try {
 			await prev;
 
-			if (this.applyToAll && this.applyToAllChoice) {
-				return this.applyToAllChoice;
+			if (session.applyToAll && session.choice) {
+				return session.choice;
 			}
 
 			const modal = this.modalFactory(
@@ -140,9 +138,9 @@ export class DuplicateHandler {
 			const res = await modal.openAndGetChoice();
 			const choice = res.choice ?? "skip";
 
-			if (!this.applyToAll && res.applyToAll) {
-				this.applyToAll = true;
-				this.applyToAllChoice = choice;
+			if (!session.applyToAll && res.applyToAll) {
+				session.applyToAll = true;
+				session.choice = choice;
 			}
 
 			return choice;

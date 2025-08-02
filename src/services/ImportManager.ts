@@ -1,4 +1,4 @@
-import { type App, Notice, stringifyYaml, TFile, type TFolder } from "obsidian";
+import { type App, Notice, TFile, type TFolder } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import { ProgressModal } from "src/ui/ProgressModal";
 import { asyncPool } from "src/utils/concurrency";
@@ -7,11 +7,11 @@ import {
 	convertCommentStyle,
 	extractHighlightsWithStyle,
 } from "src/utils/highlightExtractor";
-import { getFrontmatterAndBody } from "src/utils/obsidianUtils";
 import {
 	addSummary,
 	blankSummary,
 	type CommentStyle,
+	type DuplicateHandlingSession,
 	type LuaMetadata,
 	type Summary,
 } from "../types";
@@ -20,6 +20,7 @@ import type { SDRFinder } from "./device/SDRFinder";
 import type { FileSystemService } from "./FileSystemService";
 import type { LoggingService } from "./LoggingService";
 import type { FrontmatterGenerator } from "./parsing/FrontmatterGenerator";
+import type { FrontmatterService } from "./parsing/FrontmatterService";
 import type { MetadataParser } from "./parsing/MetadataParser";
 import type { ContentGenerator } from "./vault/ContentGenerator";
 import type { DuplicateFinder } from "./vault/DuplicateFinder";
@@ -46,6 +47,7 @@ export class ImportManager {
 		private readonly snapshotManager: SnapshotManager,
 		private readonly loggingService: LoggingService,
 		private readonly fs: FileSystemService,
+		private readonly frontmatterService: FrontmatterService,
 	) {}
 
 	/**
@@ -77,7 +79,10 @@ export class ImportManager {
 		modal.open();
 		modal.setTotal(sdrPaths.length);
 
-		this.duplicateHandler.reset();
+		const session: DuplicateHandlingSession = {
+			applyToAll: false,
+			choice: null,
+		};
 		this.duplicateFinder.clearCache();
 
 		let summary = blankSummary();
@@ -98,7 +103,7 @@ export class ImportManager {
 					if (modal.abortSignal.aborted)
 						throw new DOMException("Aborted by user", "AbortError");
 
-					const res = await this.processSdr(sdrPath);
+					const res = await this.processSdr(sdrPath, session);
 					doneCounter = idx + 1;
 					return res;
 				},
@@ -154,7 +159,10 @@ export class ImportManager {
 	 * @param sdrPath - Path to the SDR directory containing metadata.lua
 	 * @returns Summary object with counts of created, merged, skipped, and error items
 	 */
-	private async processSdr(sdrPath: string): Promise<Summary> {
+	private async processSdr(
+		sdrPath: string,
+		session: DuplicateHandlingSession,
+	): Promise<Summary> {
 		const summary = blankSummary();
 
 		try {
@@ -178,12 +186,8 @@ export class ImportManager {
 				);
 			}
 
-			const fileSummary = await this.saveHighlightsToFile(luaMetadata);
-			summary.created += fileSummary.created;
-			summary.merged += fileSummary.merged;
-			summary.automerged += fileSummary.automerged;
-			summary.skipped += fileSummary.skipped;
-			return addSummary(summary, fileSummary);
+			const fileSummary = await this.saveHighlightsToFile(luaMetadata, session);
+			return fileSummary;
 		} catch (err) {
 			this.loggingService.error(this.SCOPE, `Error processing ${sdrPath}`, err);
 			summary.errors++;
@@ -230,6 +234,7 @@ export class ImportManager {
 	 */
 	private async saveHighlightsToFile(
 		luaMetadata: LuaMetadata,
+		session: DuplicateHandlingSession,
 	): Promise<Summary> {
 		const summary = blankSummary();
 
@@ -247,6 +252,7 @@ export class ImportManager {
 			result = await this.duplicateHandler.handleDuplicate(
 				bestMatch,
 				contentProvider,
+				session,
 			);
 			if (result.status === "keep-both") {
 				const newFile = await this.createNewFile(luaMetadata, contentProvider);
@@ -307,7 +313,7 @@ export class ImportManager {
 	 * @returns The formatted markdown content as a string
 	 */
 	private async generateFileContent(luaMetadata: LuaMetadata): Promise<string> {
-		const fm = this.frontmatterGenerator.generateYamlFromLuaMetadata(
+		const fmData = this.frontmatterGenerator.createFrontmatterData(
 			luaMetadata,
 			this.plugin.settings.frontmatter,
 		);
@@ -315,7 +321,7 @@ export class ImportManager {
 			luaMetadata.annotations,
 		);
 
-		return `${fm}\n\n${highlights.trim()}`;
+		return this.frontmatterService.reconstructFileContent(fmData, highlights);
 	}
 
 	/**
@@ -496,11 +502,8 @@ export class ImportManager {
 		counts: { converted: number; skipped: number },
 	): Promise<void> {
 		try {
-			const { frontmatter, body } = await getFrontmatterAndBody(
-				this.app,
-				file,
-				this.loggingService,
-			);
+			const { frontmatter, body } =
+				await this.frontmatterService.parseFile(file);
 
 			if (targetStyle === "none") {
 				await this.convertToNoneStyle(file, body, frontmatter, counts);
@@ -536,15 +539,17 @@ export class ImportManager {
 		frontmatter: any,
 		counts: { converted: number; skipped: number },
 	): Promise<void> {
-		// Remove any existing KOHL comments
-		const newBody = convertCommentStyle(body, "html", "none"); // This removes all comments
+		const newBody = convertCommentStyle(body, "html", "none");
 		counts.converted++;
 		this.loggingService.info(
 			this.SCOPE,
 			`Removing KOHL comments from ${file.path}`,
 		);
 
-		const newContent = this.reconstructFileContent(frontmatter, newBody);
+		const newContent = this.frontmatterService.reconstructFileContent(
+			frontmatter,
+			newBody,
+		);
 		await this.fs.writeVaultFile(file.path, newContent);
 	}
 
@@ -599,22 +604,10 @@ export class ImportManager {
 			return;
 		}
 
-		const newContent = this.reconstructFileContent(frontmatter, newBody);
+		const newContent = this.frontmatterService.reconstructFileContent(
+			frontmatter,
+			newBody,
+		);
 		await this.fs.writeVaultFile(file.path, newContent);
-	}
-
-	/**
-	 * Reconstructs file content with frontmatter and body.
-	 * @param frontmatter - File frontmatter object
-	 * @param body - File body content
-	 * @returns Complete file content string
-	 */
-	private reconstructFileContent(frontmatter: any, body: string): string {
-		if (frontmatter && Object.keys(frontmatter).length > 0) {
-			const yamlString = stringifyYaml(frontmatter);
-			return `---\n${yamlString}---\n\n${body.trim()}`;
-		} else {
-			return body.trim();
-		}
 	}
 }

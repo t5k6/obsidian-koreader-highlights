@@ -102,9 +102,9 @@ export class TemplateSettingsSection extends SettingsSection {
 				"Vault folder where your custom templates are stored.",
 				"Default: " + DEFAULT_TEMPLATES_FOLDER,
 				this.app,
-				() => this.plugin.settings.template.folder,
+				() => this.plugin.settings.template.templateDir,
 				(value) => {
-					this.plugin.settings.template.folder = value;
+					this.plugin.settings.template.templateDir = value;
 					this.debouncedSave();
 				},
 			);

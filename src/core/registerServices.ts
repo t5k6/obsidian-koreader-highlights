@@ -142,6 +142,7 @@ export function registerServices(
 		SnapshotManager,
 		LoggingService,
 		FileSystemService,
+		FrontmatterService,
 	]);
 	container.register(CommandManager, [
 		PLUGIN_TOKEN,

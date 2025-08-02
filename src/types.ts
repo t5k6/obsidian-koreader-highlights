@@ -182,6 +182,11 @@ export interface DuplicateMatch {
 	canMergeSafely: boolean;
 }
 
+export interface DuplicateHandlingSession {
+	applyToAll: boolean;
+	choice: DuplicateChoice | null;
+}
+
 export interface IDuplicateHandlingModal {
 	openAndGetChoice(): Promise<{
 		choice: DuplicateChoice | null; // choice can be null if modal is closed
@@ -262,7 +267,7 @@ export interface Disposable {
 export interface SettingsObserver {
 	onSettingsChanged(
 		newSettings: KoreaderHighlightImporterSettings,
-		oldSettings: KoreaderHighlightImporterSettings,
+		oldSettings?: KoreaderHighlightImporterSettings,
 	): void;
 }
 

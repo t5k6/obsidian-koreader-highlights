@@ -38,7 +38,7 @@ export class MergeService {
 	): Promise<{ status: "merged"; file: TFile }> {
 		await this.snapshotManager.createBackup(file);
 		const { frontmatter: existingFm, body: existingBody } =
-			this.fmService.parse(await this.vault.read(file));
+			await this.fmService.parseFile(file);
 		const existingAnnotations = extractHighlights(
 			existingBody,
 			this.plugin.settings.commentStyle,
@@ -57,12 +57,11 @@ export class MergeService {
 			luaMetadata,
 			this.plugin.settings.frontmatter,
 		);
-		const newFrontmatter = this.frontmatterGenerator.formatDataToYaml(
-			mergedFm,
-			{ useFriendlyKeys: true, sortKeys: true },
-		);
 
-		const finalContent = [newFrontmatter, newBody].filter(Boolean).join("\n\n");
+		const finalContent = this.fmService.reconstructFileContent(
+			mergedFm,
+			newBody,
+		);
 		await this.app.vault.modify(file, finalContent);
 
 		return { status: "merged", file };
@@ -85,9 +84,9 @@ export class MergeService {
 	): Promise<{ status: "merged"; file: TFile }> {
 		await this.snapshotManager.createBackup(file);
 
-		const base = this.fmService.parse(baseContent);
-		const ours = this.fmService.parse(await this.vault.read(file));
-		const theirs = this.fmService.parse(newFileContent);
+		const base = this.fmService.parseContent(baseContent);
+		const ours = await this.fmService.parseFile(file);
+		const theirs = this.fmService.parseContent(newFileContent);
 
 		const mergeRegions = this.performSynchronousDiff3(
 			ours.body,
@@ -136,12 +135,10 @@ export class MergeService {
 			mergedFm.conflicts = "unresolved";
 		}
 
-		const finalFm = this.frontmatterGenerator.formatDataToYaml(mergedFm, {
-			useFriendlyKeys: true,
-			sortKeys: true,
-		});
-
-		const finalContent = `${finalFm}\n\n${mergedBody}`;
+		const finalContent = this.fmService.reconstructFileContent(
+			mergedFm,
+			mergedBody,
+		);
 
 		if (hasConflict) {
 			this.loggingService.warn(

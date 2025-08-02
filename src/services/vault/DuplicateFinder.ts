@@ -94,7 +94,7 @@ export class DuplicateFinder {
 		newAnnotations: Annotation[],
 		luaMetadata: LuaMetadata,
 	): Promise<DuplicateMatch> {
-		const { body: existingBody } = this.fmService.parse(
+		const { body: existingBody } = this.fmService.parseContent(
 			await this.vault.read(existingFile),
 		);
 		const existingHighlights = extractHighlights(existingBody);

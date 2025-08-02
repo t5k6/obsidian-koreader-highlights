@@ -2,7 +2,7 @@ import { type App, type EventRef, MarkdownRenderer, Modal } from "obsidian";
 import type {
 	CompiledTemplate,
 	TemplateManager,
-} from "src/services/TemplateManager";
+} from "src/services/parsing/TemplateManager";
 import type { Annotation, TemplateDefinition } from "../types";
 
 const EXAMPLE_ANNOTATION_GROUP: Annotation[] = [

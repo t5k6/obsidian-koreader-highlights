@@ -4,19 +4,19 @@
  *********************************************************************/
 
 import { stringifyYaml } from "obsidian";
-import {
-	formatDate,
-	formatDateWithFormat,
-	formatPercent,
-	secondsToHoursMinutesSeconds,
-} from "src/utils/formatUtils";
 import type {
 	DocProps,
 	FrontmatterData,
 	FrontmatterSettings,
 	LuaMetadata,
 	ParsedFrontmatter,
-} from "../types";
+} from "src/types";
+import {
+	formatDate,
+	formatDateWithFormat,
+	formatPercent,
+	secondsToHoursMinutesSeconds,
+} from "src/utils/formatUtils";
 
 /* ------------------------------------------------------------------ */
 /*               1.  Key mapping / helpers (typed)                    */

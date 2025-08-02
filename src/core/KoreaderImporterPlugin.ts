@@ -1,9 +1,9 @@
 import { Notice, Plugin } from "obsidian";
 import { DEFAULT_LOGS_FOLDER } from "src/constants";
-import { CommandManager } from "src/services/CommandManager";
+import { CommandManager } from "src/services/command/CommandManager";
 import { DatabaseService } from "src/services/DatabaseService";
-import { SDRFinder } from "src/services/SDRFinder";
-import { TemplateManager } from "src/services/TemplateManager";
+import { SDRFinder } from "src/services/device/SDRFinder";
+import { TemplateManager } from "src/services/parsing/TemplateManager";
 import { SettingsTab } from "src/ui/SettingsTab";
 import { logger } from "src/utils/logging";
 import type {

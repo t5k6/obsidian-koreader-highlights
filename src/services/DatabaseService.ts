@@ -7,7 +7,6 @@ import { SQLITE_WASM } from "src/binaries/sql-wasm-base64";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import { LruCache } from "src/utils/cache/LruCache";
 import { debounce } from "src/utils/debounce";
-import { isFileMissing, writeFileEnsured } from "src/utils/fileUtils";
 import {
 	levenshteinDistance,
 	normalizeFileNamePiece,
@@ -23,6 +22,7 @@ import type {
 	ReadingStatus,
 	SettingsObserver,
 } from "../types";
+import type { FileSystemService } from "./FileSystemService";
 
 /* ------------------------------------------------------------------ */
 /*                      SHARED HELPER CLASSES                         */
@@ -90,7 +90,10 @@ export class DatabaseService implements Disposable, SettingsObserver {
 
 	private persistIndexDebounced: DebouncedFunction<() => Promise<void>>;
 
-	constructor(private plugin: KoreaderImporterPlugin) {
+	constructor(
+		private plugin: KoreaderImporterPlugin,
+		private fs: FileSystemService,
+	) {
 		this.currentMountPoint = plugin.settings.koreaderMountPoint;
 		this.idxPath = normalizePath(
 			path.join(
@@ -193,7 +196,7 @@ export class DatabaseService implements Disposable, SettingsObserver {
 		let db: SQLDatabase | null = null;
 		try {
 			const deviceRoot = (await this.findDeviceRoot(mountPoint)) ?? mountPoint;
-			const filePath = path.join(
+			const dbPath = path.join(
 				deviceRoot,
 				".adds",
 				"koreader",
@@ -201,8 +204,15 @@ export class DatabaseService implements Disposable, SettingsObserver {
 				"statistics.sqlite3",
 			);
 
+			if (!(await this.fs.nodeFileExists(dbPath))) {
+				logger.info(
+					`DeviceStatisticsService: Statistics DB not found at ${dbPath} (normal on some sync setups).`,
+				);
+				return null;
+			}
+
 			const SQL = await DatabaseService.getSqlJs();
-			const fileBuf = await fsp.readFile(filePath);
+			const fileBuf = await this.fs.readNodeFile(dbPath, true);
 			db = new SQL.Database(fileBuf);
 
 			// ── Tiered lookup --------------------------------------------------
@@ -262,12 +272,6 @@ export class DatabaseService implements Disposable, SettingsObserver {
 				derived: this.calculateDerivedStatistics(bookRow, sessions),
 			};
 		} catch (error: any) {
-			if (isFileMissing(error)) {
-				logger.info(
-					"DatabaseService: Statistics DB not found (normal on indirect device sync).",
-				);
-				return null;
-			}
 			logger.error(
 				`DatabaseService: Failed to get book statistics for "${title}"`,
 				error,
@@ -425,11 +429,11 @@ export class DatabaseService implements Disposable, SettingsObserver {
 		let bytes: Uint8Array | null = null;
 
 		try {
-			bytes = await fsp.readFile(this.idxPath);
+			bytes = await this.fs.readNodeFile(this.idxPath, true);
 			logger.info(`DatabaseService: Opening index DB: ${this.idxPath}`);
 			this.idxDb = new SQL.Database(bytes);
 		} catch (e: any) {
-			if (e.code !== "ENOENT") throw e;
+			if (!this.fs.isNotFoundError(e)) throw e;
 			logger.info("DatabaseService: No index DB yet, creating fresh one");
 			this.idxDb = new SQL.Database();
 			this.idxDb.run(INDEX_DB_SCHEMA);
@@ -456,7 +460,7 @@ export class DatabaseService implements Disposable, SettingsObserver {
 		logger.info("DatabaseService: Persisting index database to disk...");
 		try {
 			const data = this.idxDb.export();
-			await writeFileEnsured(this.idxPath, data);
+			await this.fs.writeNodeFile(this.idxPath, data);
 			logger.info("DatabaseService: Index database persisted successfully.");
 		} catch (error) {
 			logger.error("DatabaseService: Failed to persist index database.", error);
@@ -481,7 +485,7 @@ export class DatabaseService implements Disposable, SettingsObserver {
 		if (this.idxDb) {
 			try {
 				const data = this.idxDb.export();
-				await writeFileEnsured(this.idxPath, data);
+				await this.fs.writeNodeFile(this.idxPath, data);
 			} catch (e) {
 				logger.error("DatabaseService: Unable to write index DB on dispose", e);
 			}
@@ -504,8 +508,9 @@ export class DatabaseService implements Disposable, SettingsObserver {
 		let p = path.resolve(startPath);
 		for (let i = 0; i < 10; i++) {
 			try {
-				await fsp.access(path.join(p, ".adds"));
-				return p;
+				if (await this.fs.nodeFileExists(path.join(p, ".adds"))) {
+					return p;
+				}
 			} catch {
 				/* keep walking up */
 			}

@@ -1,16 +1,6 @@
 import { Notice, normalizePath, TFile, type Vault } from "obsidian";
 import { DEFAULT_TEMPLATES_FOLDER } from "src/constants";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
-import type { CacheManager } from "src/utils/cache/CacheManager";
-import { LruCache } from "src/utils/cache/LruCache";
-import { ensureFolderExists } from "src/utils/fileUtils";
-import {
-	formatDate,
-	formatDateAsDailyNote,
-	formatDateLocale,
-} from "src/utils/formatUtils";
-import { styleHighlight } from "src/utils/highlightStyle";
-import { createLogger, logger } from "src/utils/logging";
 import type {
 	Annotation,
 	KoreaderHighlightImporterSettings,
@@ -18,7 +8,17 @@ import type {
 	SettingsObserver,
 	TemplateData,
 	TemplateDefinition,
-} from "../types";
+} from "src/types";
+import type { CacheManager } from "src/utils/cache/CacheManager";
+import { LruCache } from "src/utils/cache/LruCache";
+import {
+	formatDate,
+	formatDateAsDailyNote,
+	formatDateLocale,
+} from "src/utils/formatUtils";
+import { styleHighlight } from "src/utils/highlightStyle";
+import { createLogger, logger } from "src/utils/logging";
+import type { FileSystemService } from "../FileSystemService";
 
 export const FALLBACK_TEMPLATE_ID = "default";
 const DARK_THEME_CLASS = "theme-dark";
@@ -58,6 +58,7 @@ export class TemplateManager implements SettingsObserver {
 		public plugin: KoreaderImporterPlugin,
 		private vault: Vault,
 		private cacheManager: CacheManager,
+		private fs: FileSystemService,
 	) {
 		this.rawTemplateCache = cacheManager.createLru("template.raw", 10);
 		this.compiledTemplateCache = cacheManager.createLru(
@@ -365,7 +366,7 @@ export class TemplateManager implements SettingsObserver {
 
 		try {
 			// Await the folder creation.
-			await ensureFolderExists(this.vault, templateDir);
+			await this.fs.ensureVaultFolder(templateDir);
 		} catch (err) {
 			// If we can't even create the directory, we can't proceed.
 			logger.error(
@@ -387,7 +388,7 @@ export class TemplateManager implements SettingsObserver {
 				const filePath = normalizePath(`${templateDir}/${template.id}.md`);
 
 				// Check if the file already exists to avoid unnecessary writes.
-				if (!(await this.vault.adapter.exists(filePath))) {
+				if (!(await this.fs.vaultFileExists(filePath))) {
 					logger.info(
 						`TemplateManager: Creating built-in template file: ${filePath}`,
 					);

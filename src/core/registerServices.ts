@@ -1,16 +1,17 @@
 import type { App } from "obsidian";
-import { CommandManager } from "src/services/CommandManager";
-import { ContentGenerator } from "src/services/ContentGenerator";
+import { CommandManager } from "src/services/command/CommandManager";
 import { DatabaseService } from "src/services/DatabaseService";
-import { DuplicateHandler } from "src/services/DuplicateHandler";
-import { FrontmatterGenerator } from "src/services/FrontmatterGenerator";
+import { MountPointService } from "src/services/device/MountPointService";
+import { ScanManager } from "src/services/device/ScanManager";
+import { SDRFinder } from "src/services/device/SDRFinder";
+import { FileSystemService } from "src/services/FileSystemService";
 import { ImportManager } from "src/services/ImportManager";
-import { MetadataParser } from "src/services/MetadataParser";
-import { MountPointService } from "src/services/MountPointService";
-import { ScanManager } from "src/services/ScanManager";
-import { SDRFinder } from "src/services/SDRFinder";
-import { SnapshotManager } from "src/services/SnapshotManager";
-import { TemplateManager } from "src/services/TemplateManager";
+import { FrontmatterGenerator } from "src/services/parsing/FrontmatterGenerator";
+import { MetadataParser } from "src/services/parsing/MetadataParser";
+import { TemplateManager } from "src/services/parsing/TemplateManager";
+import { ContentGenerator } from "src/services/vault/ContentGenerator";
+import { DuplicateHandler } from "src/services/vault/DuplicateHandler";
+import { SnapshotManager } from "src/services/vault/SnapshotManager";
 import { DuplicateHandlingModal } from "src/ui/DuplicateModal";
 import { CacheManager } from "src/utils/cache/CacheManager";
 import type { DIContainer } from "./DIContainer";
@@ -42,13 +43,28 @@ export function registerServices(
 	container.register(FrontmatterGenerator, []);
 
 	// --- Level 1: Depends on Level 0 or Tokens ---
-	container.register(DatabaseService, [PLUGIN_TOKEN]);
-	container.register(SDRFinder, [PLUGIN_TOKEN, CacheManager]);
-	container.register(SnapshotManager, [APP_TOKEN, PLUGIN_TOKEN, VAULT_TOKEN]);
+	container.register(FileSystemService, [
+		VAULT_TOKEN,
+		PLUGIN_TOKEN,
+		CacheManager,
+	]);
+	container.register(DatabaseService, [PLUGIN_TOKEN, FileSystemService]);
+	container.register(SDRFinder, [
+		PLUGIN_TOKEN,
+		CacheManager,
+		FileSystemService,
+	]);
+	container.register(SnapshotManager, [
+		APP_TOKEN,
+		PLUGIN_TOKEN,
+		VAULT_TOKEN,
+		FileSystemService,
+	]);
 	container.register(TemplateManager, [
 		PLUGIN_TOKEN,
 		VAULT_TOKEN,
 		CacheManager,
+		FileSystemService,
 	]);
 	container.register(MountPointService, [SDRFinder]);
 
@@ -66,6 +82,7 @@ export function registerServices(
 		DatabaseService,
 		SnapshotManager,
 		CacheManager,
+		FileSystemService,
 	]);
 
 	// --- Level 3: Depends on Level 2 ---

@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import path from "node:path";
 import { type App, normalizePath, type TFile, type Vault } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import { logger } from "src/utils/logging";
+import type { FileSystemService } from "../FileSystemService";
 
 export class SnapshotManager {
 	private snapshotDir: string;
@@ -11,6 +13,7 @@ export class SnapshotManager {
 		private app: App,
 		private plugin: KoreaderImporterPlugin,
 		private vault: Vault,
+		private fs: FileSystemService,
 	) {
 		const pluginDataDir = `${this.plugin.app.vault.configDir}/plugins/${this.plugin.manifest.id}`;
 		this.snapshotDir = normalizePath(`${pluginDataDir}/snapshots`);
@@ -43,17 +46,10 @@ export class SnapshotManager {
 	 * @param targetFile - File to create snapshot for
 	 */
 	public async createSnapshot(targetFile: TFile): Promise<void> {
-		await this.ensureDir(this.snapshotDir);
-		const snapshotFileName = SnapshotManager.generateSnapshotFileName(
-			targetFile.path,
-		);
-		const snapshotPath = normalizePath(
-			`${this.snapshotDir}/${snapshotFileName}`,
-		);
-
+		const snapshotPath = this.getSnapshotPath(targetFile);
 		try {
-			const content = await this.vault.read(targetFile);
-			await this.vault.adapter.write(snapshotPath, content);
+			const content = await this.app.vault.read(targetFile);
+			await this.fs.writeNodeFile(snapshotPath, content);
 			logger.info(
 				`SnapshotManager: Created snapshot for ${targetFile.path} at ${snapshotPath}`,
 			);
@@ -71,14 +67,13 @@ export class SnapshotManager {
 	 * @param targetFile - File to backup
 	 */
 	public async createBackup(targetFile: TFile): Promise<void> {
-		await this.ensureDir(this.backupDir);
 		const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 		const backupFileName = `${targetFile.basename}-${timestamp}.md`;
-		const backupPath = normalizePath(`${this.backupDir}/${backupFileName}`);
+		const backupPath = path.join(this.backupDir, backupFileName);
 
 		try {
-			const content = await this.vault.read(targetFile);
-			await this.vault.adapter.write(backupPath, content);
+			const content = await this.app.vault.read(targetFile);
+			await this.fs.writeNodeFile(backupPath, content);
 			logger.info(
 				`SnapshotManager: Created backup for ${targetFile.path} at ${backupPath}`,
 			);
@@ -97,16 +92,10 @@ export class SnapshotManager {
 	 * @returns Snapshot content or null if not found
 	 */
 	public async getSnapshotContent(targetFile: TFile): Promise<string | null> {
-		const snapshotFileName = SnapshotManager.generateSnapshotFileName(
-			targetFile.path,
-		);
-		const snapshotPath = normalizePath(
-			`${this.snapshotDir}/${snapshotFileName}`,
-		);
-
+		const snapshotPath = this.getSnapshotPath(targetFile);
 		try {
-			if (await this.vault.adapter.exists(snapshotPath)) {
-				return await this.vault.adapter.read(snapshotPath);
+			if (await this.fs.nodeFileExists(snapshotPath)) {
+				return await this.fs.readNodeFile(snapshotPath);
 			}
 			return null;
 		} catch (error) {
@@ -127,5 +116,11 @@ export class SnapshotManager {
 	static generateSnapshotFileName(filePath: string): string {
 		const hash = createHash("sha1").update(filePath).digest("hex");
 		return `${hash}.md`;
+	}
+
+	private getSnapshotPath(targetFile: TFile): string {
+		const hash = createHash("sha1").update(targetFile.path).digest("hex");
+		const snapshotFileName = `${hash}.md`;
+		return path.join(this.snapshotDir, snapshotFileName);
 	}
 }

@@ -4,7 +4,7 @@ import {
 	DEFAULT_LOGS_FOLDER,
 	DEFAULT_TEMPLATES_FOLDER,
 } from "src/constants";
-import { toVaultRelPath } from "src/utils/fileUtils";
+import { FileSystemService } from "src/services/FileSystemService";
 import { logger } from "src/utils/logging";
 import {
 	ensureBoolean,
@@ -103,7 +103,7 @@ export class PluginSettings {
 			raw.highlightsFolder,
 			DEFAULT_HIGHLIGHTS_FOLDER,
 		);
-		settings.highlightsFolder = toVaultRelPath(
+		settings.highlightsFolder = FileSystemService.toVaultPath(
 			folder || DEFAULT_HIGHLIGHTS_FOLDER,
 		);
 

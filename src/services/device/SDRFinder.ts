@@ -1,7 +1,5 @@
-import type { Dir } from "node:fs";
-import { access, stat as fsStat, opendir, readFile } from "node:fs/promises";
 import { platform } from "node:os";
-import { join as joinPath } from "node:path";
+import path, { join as joinPath } from "node:path";
 import { Notice } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import type {
@@ -10,8 +8,8 @@ import type {
 } from "src/types";
 import { type CacheManager, memoizeAsync } from "src/utils/cache/CacheManager";
 import { ConcurrencyLimiter } from "src/utils/concurrency";
-import { handleFileSystemError } from "src/utils/fileUtils";
 import { logger } from "src/utils/logging";
+import type { FileSystemService } from "../FileSystemService";
 
 /* ------------------------------------------------------------------ */
 /*                              CONSTS                                */
@@ -43,6 +41,7 @@ export class SDRFinder implements SettingsObserver {
 	constructor(
 		private plugin: KoreaderImporterPlugin,
 		private cacheManager: CacheManager,
+		private fs: FileSystemService,
 	) {
 		this.sdrDirCache = cacheManager.createMap("sdr.dirPromise");
 		this.metadataNameCache = cacheManager.createMap("sdr.metaName");
@@ -83,12 +82,12 @@ export class SDRFinder implements SettingsObserver {
 		const name = await this.getMetadataFileName(sdrDir);
 		if (!name) return null;
 
-		const full = joinPath(sdrDir, name);
+		const fullPath = joinPath(sdrDir, name);
 		try {
-			logger.info("SDRFinder: Reading metadata:", full);
-			return await readFile(full, "utf-8");
+			logger.info("SDRFinder: Reading metadata:", fullPath);
+			return await this.fs.readNodeFile(fullPath);
 		} catch (err) {
-			handleFileSystemError("reading metadata file", full, err);
+			logger.error(`SDRFinder: Failed to read metadata file: ${fullPath}`, err);
 			return null;
 		}
 	}
@@ -157,30 +156,19 @@ export class SDRFinder implements SettingsObserver {
 		excluded: Set<string>,
 		out: string[],
 	): Promise<void> {
-		try {
-			const dh: Dir = await io(() => opendir(dir));
-			try {
-				for await (const e of dh) {
-					const path = joinPath(dir, e.name);
-					if (!e.isDirectory()) continue;
-					if (excluded.has(e.name.toLowerCase())) continue;
+		for await (const entry of this.fs.iterateNodeDirectory(dir)) {
+			if (!entry.isDirectory()) continue;
+			if (excluded.has(entry.name.toLowerCase())) continue;
 
-					if (e.name.endsWith(SDR_SUFFIX)) {
-						if (await this.getMetadataFileName(path)) {
-							out.push(path);
-							continue; // do not recurse into *.sdr
-						}
-					}
+			const fullPath = joinPath(dir, entry.name);
 
-					if (!e.name.startsWith(".") && e.name !== "$RECYCLE.BIN") {
-						await this.walk(path, excluded, out);
-					}
+			if (entry.name.endsWith(SDR_SUFFIX)) {
+				if (await this.getMetadataFileName(fullPath)) {
+					out.push(fullPath);
 				}
-			} finally {
-				await dh.close().catch(() => {});
+			} else if (!entry.name.startsWith(".") && entry.name !== "$RECYCLE.BIN") {
+				await this.walk(fullPath, excluded, out);
 			}
-		} catch (err) {
-			handleFileSystemError("reading directory", dir, err);
 		}
 	}
 
@@ -200,24 +188,17 @@ export class SDRFinder implements SettingsObserver {
 		);
 		const allowAll = allow.size === 0;
 
-		let dh: Dir | undefined;
-		try {
-			dh = await io(() => opendir(dir));
-			for await (const entry of dh) {
-				if (!entry.isFile()) continue;
-				const m = entry.name.match(METADATA_REGEX);
-				if (!m) continue;
+		for await (const entry of this.fs.iterateNodeDirectory(dir)) {
+			if (!entry.isFile()) continue;
 
-				const ext = m[1]?.toLowerCase();
+			const match = entry.name.match(METADATA_REGEX);
+			if (match) {
+				const ext = match[1]?.toLowerCase();
 				if (allowAll || allow.has(ext)) {
 					this.metadataNameCache.set(dir, entry.name);
 					return entry.name;
 				}
 			}
-		} catch (err) {
-			handleFileSystemError("reading SDR directory", dir, err);
-		} finally {
-			await dh?.close().catch(() => {});
 		}
 
 		this.metadataNameCache.set(dir, null);
@@ -261,11 +242,8 @@ export class SDRFinder implements SettingsObserver {
 	 * @returns True if path is a usable directory
 	 */
 	private async isUsableDir(p: string): Promise<boolean> {
-		try {
-			return (await fsStat(p)).isDirectory();
-		} catch {
-			return false;
-		}
+		const stats = await this.fs.getNodeStats(p);
+		return stats?.isDirectory() ?? false;
 	}
 
 	/**
@@ -276,54 +254,30 @@ export class SDRFinder implements SettingsObserver {
 	private async detectCandidates(): Promise<string[]> {
 		const out: string[] = [];
 		if (platform() === "darwin") {
-			const vols = await opendir("/Volumes").catch(() => null); // no limiter
-			if (vols) {
-				try {
-					for await (const e of vols) {
-						if (e.isDirectory() && e.name.toLowerCase().includes("kobo")) {
-							out.push(joinPath("/Volumes", e.name));
-						}
-					}
-				} finally {
-					await vols.close().catch(() => {});
+			for await (const e of this.fs.iterateNodeDirectory("/Volumes")) {
+				if (e.isDirectory() && e.name.toLowerCase().includes("kobo")) {
+					out.push(joinPath("/Volumes", e.name));
 				}
 			}
 		} else if (platform() === "linux") {
 			for (const root of ["/media", "/run/media"]) {
-				const users = await opendir(root).catch(() => null);
-				if (!users) continue;
-				try {
-					for await (const user of users) {
-						if (!user.isDirectory()) continue;
-						const userPath = joinPath(root, user.name);
-						const devs = await opendir(userPath).catch(() => null);
-						if (!devs) continue;
-						try {
-							for await (const dev of devs) {
-								if (
-									dev.isDirectory() &&
-									dev.name.toLowerCase().includes("kobo")
-								) {
-									out.push(joinPath(userPath, dev.name));
-								}
-							}
-						} finally {
-							await devs.close().catch(() => {});
+				for await (const user of this.fs.iterateNodeDirectory(root)) {
+					if (!user.isDirectory()) continue;
+					const userPath = joinPath(root, user.name);
+					for await (const dev of this.fs.iterateNodeDirectory(userPath)) {
+						if (dev.isDirectory() && dev.name.toLowerCase().includes("kobo")) {
+							out.push(joinPath(userPath, dev.name));
 						}
 					}
-				} finally {
-					await users.close().catch(() => {});
 				}
 			}
 		} else if (platform() === "win32") {
-			// Windows: look for KoboReader.sqlite in the drive root (E:/… etc.)
 			for (const letter of "DEFGHIJKLMNOPQRSTUVWXYZ") {
-				const root = `${letter}:/`; // <-- forward-slash
-				try {
-					await access(`${root}KoboReader.sqlite`); // simpler & separator-agnostic
-					out.push(root); // will later be stat()-checked
-				} catch {
-					/* file not found – keep searching */
+				const root = `${letter}:`;
+				if (
+					await this.fs.nodeFileExists(path.join(root, "KoboReader.sqlite"))
+				) {
+					out.push(root);
 				}
 			}
 		}

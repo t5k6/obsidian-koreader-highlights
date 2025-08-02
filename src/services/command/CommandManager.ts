@@ -1,10 +1,10 @@
 import { Notice } from "obsidian";
+import type { MountPointService } from "src/services/device/MountPointService";
+import type { ScanManager } from "src/services/device/ScanManager";
 import { runPluginAction } from "src/utils/actionUtils";
 import type { CacheManager } from "src/utils/cache/CacheManager";
 import { logger } from "src/utils/logging";
-import type { ImportManager } from "./ImportManager";
-import type { MountPointService } from "./MountPointService";
-import type { ScanManager } from "./ScanManager";
+import type { ImportManager } from "../ImportManager";
 
 export class CommandManager {
 	constructor(

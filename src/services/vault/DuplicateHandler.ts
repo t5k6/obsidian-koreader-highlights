@@ -2,9 +2,18 @@ import type { MergeRegion } from "node-diff3";
 import { diff3Merge } from "node-diff3";
 import { type App, TFile, type Vault } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import type { FrontmatterGenerator } from "src/services/parsing/FrontmatterGenerator";
+import type { ContentGenerator } from "src/services/vault/ContentGenerator";
+import type {
+	Annotation,
+	DocProps,
+	DuplicateChoice,
+	DuplicateMatch,
+	IDuplicateHandlingModal,
+	LuaMetadata,
+} from "src/types";
 import { ConfirmModal } from "src/ui/ConfirmModal";
 import type { CacheManager } from "src/utils/cache/CacheManager";
-import { createFileSafely } from "src/utils/fileUtils";
 import {
 	compareAnnotations,
 	computeAnnotationId,
@@ -13,17 +22,8 @@ import {
 import { extractHighlights } from "src/utils/highlightExtractor";
 import { logger } from "src/utils/logging";
 import { getFrontmatterAndBody } from "src/utils/obsidianUtils";
-import type {
-	Annotation,
-	DocProps,
-	DuplicateChoice,
-	DuplicateMatch,
-	IDuplicateHandlingModal,
-	LuaMetadata,
-} from "../types";
-import type { ContentGenerator } from "./ContentGenerator";
-import type { DatabaseService } from "./DatabaseService";
-import type { FrontmatterGenerator } from "./FrontmatterGenerator";
+import type { DatabaseService } from "../DatabaseService";
+import type { FileSystemService } from "../FileSystemService";
 import type { SnapshotManager } from "./SnapshotManager";
 
 type ResolveStatus = "created" | "merged" | "automerged" | "skipped";
@@ -49,6 +49,7 @@ export class DuplicateHandler {
 		private databaseService: DatabaseService,
 		private snapshotManager: SnapshotManager,
 		private cacheManager: CacheManager,
+		private fs: FileSystemService,
 	) {
 		this.potentialDuplicatesCache = cacheManager.createMap(
 			"duplicate.potential",
@@ -312,10 +313,9 @@ export class DuplicateHandler {
 			luaMetadata.originalFilePath,
 		);
 
-		const targetFile = await createFileSafely(
-			this.app.vault,
+		const targetFile = await this.fs.createVaultFileSafely(
 			this.plugin.settings.highlightsFolder,
-			fileName.replace(/\.md$/, ""),
+			fileName,
 			content,
 		);
 

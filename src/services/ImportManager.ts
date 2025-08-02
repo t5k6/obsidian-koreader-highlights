@@ -16,13 +16,13 @@ import {
 	type LuaMetadata,
 	type Summary,
 } from "../types";
-import type { ContentGenerator } from "./ContentGenerator";
 import type { DatabaseService } from "./DatabaseService";
-import type { DuplicateHandler } from "./DuplicateHandler";
-import type { FrontmatterGenerator } from "./FrontmatterGenerator";
-import type { MetadataParser } from "./MetadataParser";
-import type { SDRFinder } from "./SDRFinder";
-import type { SnapshotManager } from "./SnapshotManager";
+import type { SDRFinder } from "./device/SDRFinder";
+import type { FrontmatterGenerator } from "./parsing/FrontmatterGenerator";
+import type { MetadataParser } from "./parsing/MetadataParser";
+import type { ContentGenerator } from "./vault/ContentGenerator";
+import type { DuplicateHandler } from "./vault/DuplicateHandler";
+import type { SnapshotManager } from "./vault/SnapshotManager";
 
 export class ImportManager {
 	constructor(

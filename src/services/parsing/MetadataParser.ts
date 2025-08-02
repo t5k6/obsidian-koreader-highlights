@@ -5,16 +5,16 @@ import type {
 	TableKeyString,
 	TableValue,
 } from "luaparse/lib/ast";
-import type { CacheManager } from "src/utils/cache/CacheManager";
-import type { LruCache } from "src/utils/cache/LruCache";
-import { createLogger, logger } from "src/utils/logging";
+import type { SDRFinder } from "src/services/device/SDRFinder";
 import {
 	type Annotation,
 	type DocProps,
 	DRAWER_TYPES,
 	type LuaMetadata,
-} from "../types";
-import type { SDRFinder } from "./SDRFinder";
+} from "src/types";
+import type { CacheManager } from "src/utils/cache/CacheManager";
+import type { LruCache } from "src/utils/cache/LruCache";
+import { createLogger, logger } from "src/utils/logging";
 
 const log = createLogger("MetadataParser");
 

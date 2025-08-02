@@ -1,10 +1,6 @@
 import { type App, Notice, TFile } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import { ProgressModal } from "src/ui/ProgressModal";
-import {
-	ensureParentDirectory,
-	generateUniqueFilePath,
-} from "src/utils/fileUtils";
 import { logger } from "src/utils/logging";
 import type { SDRFinder } from "./SDRFinder";
 
@@ -72,7 +68,7 @@ export class ScanManager {
 	 */
 	private async createOrUpdateScanNote(sdrFilePaths: string[]): Promise<void> {
 		const reportFolderName = this.plugin.settings.highlightsFolder;
-		const uniqueReportPath = await generateUniqueFilePath(
+		const uniqueReportPath = await generateUniqueVaultPath(
 			this.app.vault,
 			reportFolderName,
 			ScanManager.SCAN_REPORT_FILENAME,

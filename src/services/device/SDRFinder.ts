@@ -80,7 +80,16 @@ export class SDRFinder implements SettingsObserver {
 	 * @returns File content as string or null if not found/readable
 	 */
 	async readMetadataFileContent(sdrDir: string): Promise<string | null> {
-		const name = await this.getMetadataFileName(sdrDir);
+		const mountPoint = await this.findActiveMountPoint();
+		if (!mountPoint) {
+			this.loggingService.warn(
+				this.SCOPE,
+				"Cannot read metadata file without an active mount point.",
+			);
+			return null;
+		}
+
+		const name = await this.getMetadataFileName(sdrDir, mountPoint);
 		if (!name) return null;
 
 		const fullPath = joinPath(sdrDir, name);
@@ -101,7 +110,7 @@ export class SDRFinder implements SettingsObserver {
 		newSettings: KoreaderHighlightImporterSettings,
 	): void {
 		const prevKey = this.cacheKey;
-		this.updateCacheKey(newSettings); // Pass new settings to update the key
+		this.updateCacheKey(newSettings);
 		if (this.cacheKey !== prevKey) {
 			this.cacheManager.clear("sdr.*");
 			this.loggingService.info(
@@ -133,21 +142,20 @@ export class SDRFinder implements SettingsObserver {
 	 */
 	private async scan(cacheKey: string): Promise<string[]> {
 		if (this.cacheKey !== cacheKey) return []; // Stale call check
-		const { isReady } = await this.checkMountPoint();
-		if (!isReady) return [];
 
-		const { koreaderMountPoint, excludedFolders } = this.plugin.settings;
-		if (koreaderMountPoint === null) {
-			this.loggingService.warn(this.SCOPE, `Found mountpoint to be null.`);
+		const mountPoint = await this.findActiveMountPoint();
+		if (!mountPoint) {
 			return [];
 		}
-		const root = koreaderMountPoint;
+
+		const { excludedFolders } = this.plugin.settings;
+		const root = mountPoint;
 		const excluded = new Set(
 			excludedFolders.map((e) => e.trim().toLowerCase()),
 		);
 
 		const results: string[] = [];
-		await this.walk(root, excluded, results);
+		await this.walk(root, excluded, results, mountPoint);
 		this.loggingService.info(
 			this.SCOPE,
 			`Scan finished. Found ${results.length} valid SDR directories.`,
@@ -165,6 +173,7 @@ export class SDRFinder implements SettingsObserver {
 		dir: string,
 		excluded: Set<string>,
 		out: string[],
+		mountPoint: string,
 	): Promise<void> {
 		for await (const entry of this.fs.iterateNodeDirectory(dir)) {
 			if (!entry.isDirectory()) continue;
@@ -173,11 +182,11 @@ export class SDRFinder implements SettingsObserver {
 			const fullPath = joinPath(dir, entry.name);
 
 			if (entry.name.endsWith(SDR_SUFFIX)) {
-				if (await this.getMetadataFileName(fullPath)) {
+				if (await this.getMetadataFileName(fullPath, mountPoint)) {
 					out.push(fullPath);
 				}
 			} else if (!entry.name.startsWith(".") && entry.name !== "$RECYCLE.BIN") {
-				await this.walk(fullPath, excluded, out);
+				await this.walk(fullPath, excluded, out, mountPoint);
 			}
 		}
 	}
@@ -188,8 +197,12 @@ export class SDRFinder implements SettingsObserver {
 	 * @param dir - SDR directory path
 	 * @returns Metadata filename or null if not found
 	 */
-	private async getMetadataFileName(dir: string): Promise<string | null> {
-		const cached = this.metadataNameCache.get(dir);
+	private async getMetadataFileName(
+		dir: string,
+		mountPoint: string,
+	): Promise<string | null> {
+		const cacheKey = `${mountPoint}::${dir}`;
+		const cached = this.metadataNameCache.get(cacheKey);
 		if (cached !== undefined) return cached;
 
 		const { allowedFileTypes } = this.plugin.settings;
@@ -205,53 +218,37 @@ export class SDRFinder implements SettingsObserver {
 			if (match) {
 				const ext = match[1]?.toLowerCase();
 				if (allowAll || allow.has(ext)) {
-					this.metadataNameCache.set(dir, entry.name);
+					this.metadataNameCache.set(cacheKey, entry.name);
 					return entry.name;
 				}
 			}
 		}
 
-		this.metadataNameCache.set(dir, null);
+		this.metadataNameCache.set(cacheKey, null);
 		return null;
 	}
 
 	/* ---------- mount-point handling / auto-detect ----------------- */
 
-	/**
-	 * Checks if mount point is accessible, attempts auto-detection if not.
-	 * Updates plugin settings with auto-detected path.
-	 * @returns True if a usable mount point is available
-	 */
-	async checkMountPoint(): Promise<{
-		isReady: boolean;
-		autoDetectedPath?: string;
-	}> {
+	public async findActiveMountPoint(): Promise<string | null> {
 		const { koreaderMountPoint } = this.plugin.settings;
 		if (koreaderMountPoint && (await this.isUsableDir(koreaderMountPoint))) {
-			return { isReady: true };
+			return koreaderMountPoint;
 		}
-
-		this.loggingService.warn(
-			this.SCOPE,
-			"Configured mount point not accessible – attempting auto-detect.",
-		);
 
 		for (const candidate of await this.detectCandidates()) {
 			if (await this.isUsableDir(candidate)) {
 				this.loggingService.info(
 					this.SCOPE,
-					"Successfully auto-detected mount point:",
+					"Auto-detected a usable mount point:",
 					candidate,
 				);
-				return { isReady: true, autoDetectedPath: candidate };
+				return candidate;
 			}
 		}
 
-		this.loggingService.warn(
-			this.SCOPE,
-			"Failed to find or access any KOReader mount point.",
-		);
-		return { isReady: false };
+		// Return null if no configured or auto-detected path is found.
+		return null;
 	}
 
 	/**

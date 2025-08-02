@@ -74,10 +74,14 @@ export class PluginSettings {
 			structuredClone(DEFAULT_SETTINGS);
 
 		// Primitives
-		settings.koreaderMountPoint = ensureString(
+		const rawMountPoint = ensureString(
 			raw.koreaderMountPoint,
 			DEFAULT_SETTINGS.koreaderMountPoint,
 		);
+		// Normalize the path to use forward slashes and remove any trailing slash
+		settings.koreaderMountPoint =
+			FileSystemService.normalizeSystemPath(rawMountPoint);
+
 		settings.logToFile = ensureBoolean(
 			raw.logToFile,
 			DEFAULT_SETTINGS.logToFile,

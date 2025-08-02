@@ -9,35 +9,11 @@ import { MigrationManager } from "./MigrationManager";
 import { PluginSettings } from "./PluginSettings";
 import { registerServices } from "./registerServices";
 
-export class PluginCommands {
-	constructor(private plugin: KoreaderImporterPlugin) {}
-
-	public registerCommands(): void {
-		this.plugin.addCommand({
-			id: "import-koreader-highlights",
-			name: "Import KOReader Highlights",
-			callback: () => this.plugin.triggerImport(),
-		});
-
-		this.plugin.addCommand({
-			id: "scan-koreader-highlights",
-			name: "Scan KOReader for Highlights",
-			callback: () => this.plugin.triggerScan(),
-		});
-
-		this.plugin.addCommand({
-			id: "convert-comment-style",
-			name: "Convert All Files to Current Comment Style",
-			callback: () => this.plugin.triggerConvertCommentStyle(),
-		});
-	}
-}
-
 export default class KoreaderImporterPlugin extends Plugin {
 	public settings!: KoreaderHighlightImporterSettings;
 	public settingTab!: SettingsTab;
 	private pluginSettings!: PluginSettings;
-	private loggingService!: LoggingService;
+	public loggingService!: LoggingService;
 	private diContainer!: DIContainer;
 	private servicesInitialized = false;
 	private migrationManager!: MigrationManager;
@@ -45,107 +21,71 @@ export default class KoreaderImporterPlugin extends Plugin {
 
 	async onload() {
 		console.log("KOReaderImporterPlugin: Loading...");
-		this.servicesInitialized = false;
 
-		// --- Bootstrap Sequence ---
-		// 1. Load settings data without dependencies
-		this.pluginSettings = new PluginSettings(this);
-		try {
-			this.settings = await this.pluginSettings.loadSettings();
-		} catch (error) {
-			console.error(
-				"KOReaderImporterPlugin: CRITICAL ERROR loading settings:",
-				error,
+		await this.initialize();
+
+		if (this.servicesInitialized) {
+			this.registerPluginCommands();
+			this.addSettingTab(new SettingsTab(this.app, this));
+			this.loggingService.info(
+				"KoreaderImporterPlugin",
+				"UI components loaded.",
 			);
-			new Notice(
-				"Failed to load KOReader Importer settings. Plugin disabled.",
-				0,
+			console.log("KOReaderImporterPlugin: Loaded successfully.");
+		} else {
+			this.loggingService.error(
+				"KoreaderImporterPlugin",
+				"Plugin loaded in a disabled state due to initialization errors.",
 			);
-			return;
 		}
+	}
 
-		// 2. Create LoggingService
-		this.loggingService = new LoggingService(this.app.vault);
-
-		// 3. Manually configure the logger for the first time with loaded settings
-		this.loggingService.onSettingsChanged(this.settings);
-
-		// 4. Create the DI Container and register the logger instance
-		this.diContainer = new DIContainer(this.loggingService);
-		this.diContainer.registerValue(LoggingService, this.loggingService);
-
-		// 5. Initialize the rest of the services
+	private async initialize(): Promise<void> {
 		try {
+			this.servicesInitialized = false;
+
+			// Step 1: Settings
+			this.pluginSettings = new PluginSettings(this);
+			this.settings = await this.pluginSettings.loadSettings();
+
+			// Step 2: Logging
+			this.loggingService = new LoggingService(this.app.vault);
+			this.loggingService.onSettingsChanged(this.settings);
+
+			// Step 3: DI Container
+			this.diContainer = new DIContainer(this.loggingService);
+			this.diContainer.registerValue(LoggingService, this.loggingService);
+
+			// Step 4: Services
 			registerServices(this.diContainer, this, this.app);
 
+			// Step 5: Critical Service Post-Init
 			this.templateManager =
 				this.diContainer.resolve<TemplateManager>(TemplateManager);
 			await this.templateManager.loadBuiltInTemplates();
+			await this.templateManager.ensureTemplates();
+			this.loggingService.info(
+				"KoreaderImporterPlugin",
+				"Templates initialized.",
+			);
+
+			// Step 6: Migrations (run before services are used)
 			this.migrationManager = new MigrationManager(this, this.loggingService);
+			await this.migrationManager.run();
+			this.loggingService.info("KoreaderImporterPlugin", "Migrations checked.");
 
 			this.servicesInitialized = true;
 			this.loggingService.info(
 				"KoreaderImporterPlugin",
 				"All services initialized successfully.",
 			);
-
-			setTimeout(
-				() =>
-					this.migrationManager
-						.run()
-						.catch((e) =>
-							this.loggingService.error(
-								"KoreaderImporterPlugin",
-								"Migration failed",
-								e,
-							),
-						),
-				0,
-			);
 		} catch (error) {
 			this.servicesInitialized = false;
-			this.loggingService.error(
-				"KoreaderImporterPlugin",
-				"CRITICAL error initializing services:",
-				error,
-			);
-			new Notice(
-				"Error initializing KOReader Importer services. Plugin functionality may be limited. Please check settings or reload.",
-				1500,
-			);
+			const errorMessage =
+				"KOReader Importer failed to initialize. Check the developer console for more details. The plugin will be disabled.";
+			console.error("KOReader Importer: CRITICAL BOOTSTRAP ERROR", error);
+			new Notice(errorMessage, 0); // Display notice indefinitely until dismissed
 		}
-
-		if (this.servicesInitialized) {
-			const pluginCommands = new PluginCommands(this);
-			pluginCommands.registerCommands();
-		} else {
-			this.loggingService.warn(
-				"KoreaderImporterPlugin",
-				"Skipping command registration due to service initialization failure.",
-			);
-		}
-
-		this.addSettingTab(new SettingsTab(this.app, this));
-		this.loggingService.info("KoreaderImporterPlugin", "Settings tab added.");
-
-		try {
-			const templateManager =
-				this.diContainer.resolve<TemplateManager>(TemplateManager);
-			await templateManager.ensureTemplates();
-			this.loggingService.info(
-				"KoreaderImporterPlugin",
-				"Default templates ensured.",
-			);
-		} catch (error) {
-			this.loggingService.error(
-				"KoreaderImporterPlugin",
-				"Failed to ensure default templates:",
-				error,
-			);
-			new Notice("Could not create default KOReader templates.");
-		}
-
-		console.log("KOReaderImporterPlugin: Loaded successfully.");
 	}
 
 	async onunload() {
@@ -160,6 +100,27 @@ export default class KoreaderImporterPlugin extends Plugin {
 		}
 
 		this.servicesInitialized = false;
+	}
+
+	// --- Command Registration ---
+	private registerPluginCommands(): void {
+		this.addCommand({
+			id: "import-koreader-highlights",
+			name: "Import KOReader Highlights",
+			callback: () => this.triggerImport(),
+		});
+
+		this.addCommand({
+			id: "scan-koreader-highlights",
+			name: "Scan KOReader for Highlights",
+			callback: () => this.triggerScan(),
+		});
+
+		this.addCommand({
+			id: "convert-comment-style",
+			name: "Convert All Files to Current Comment Style",
+			callback: () => this.triggerConvertCommentStyle(),
+		});
 	}
 
 	// --- Utility Methods ---

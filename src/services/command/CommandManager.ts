@@ -1,7 +1,9 @@
 import { Notice } from "obsidian";
-import type { MountPointService } from "src/services/device/MountPointService";
+import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import type { ScanManager } from "src/services/device/ScanManager";
 import type { CacheManager } from "src/utils/cache/CacheManager";
+import type { SDRFinder } from "../device/SDRFinder";
+import { FileSystemService } from "../FileSystemService";
 import type { ImportManager } from "../ImportManager";
 import type { LoggingService } from "../LoggingService";
 
@@ -11,10 +13,43 @@ export class CommandManager {
 	constructor(
 		private readonly importManager: ImportManager,
 		private readonly scanManager: ScanManager,
-		private readonly mountPointService: MountPointService,
+		private readonly sdrFinder: SDRFinder,
 		private readonly cacheManager: CacheManager,
 		private readonly loggingService: LoggingService,
+		private readonly plugin: KoreaderImporterPlugin,
 	) {}
+
+	/**
+	 * Ensures the KOReader mount point is available and settings are up-to-date.
+	 * @returns The mount point path if successful, otherwise null.
+	 */
+	private async prepareExecution(): Promise<string | null> {
+		const rawMountPoint = await this.sdrFinder.findActiveMountPoint();
+		if (!rawMountPoint) {
+			this.loggingService.warn(
+				this.SCOPE,
+				"Mount point not available. Aborting command execution.",
+			);
+			new Notice(
+				"KOReader device not found. Please check the mount point in settings.",
+			);
+			return null;
+		}
+
+		const mountPoint = FileSystemService.normalizeSystemPath(rawMountPoint);
+
+		if (mountPoint !== this.plugin.settings.koreaderMountPoint) {
+			this.loggingService.info(
+				this.SCOPE,
+				`Auto-detected new mount point: ${mountPoint}`,
+			);
+			this.plugin.settings.koreaderMountPoint = mountPoint;
+			await this.plugin.saveSettings();
+			new Notice(`KOReader: Auto-detected device at "${mountPoint}"`, 5000);
+		}
+
+		return mountPoint;
+	}
 
 	/**
 	 * Executes the highlight import process.
@@ -24,10 +59,8 @@ export class CommandManager {
 	async executeImport(): Promise<void> {
 		this.loggingService.info(this.SCOPE, "Import triggered.");
 
-		if (!(await this.mountPointService.ensureMountPoint())) {
-			new Notice(
-				"KOReader device not found. Please check the mount point in settings.",
-			);
+		const mountPoint = await this.prepareExecution();
+		if (!mountPoint) {
 			return;
 		}
 
@@ -58,10 +91,8 @@ export class CommandManager {
 	async executeScan(): Promise<void> {
 		this.loggingService.info(this.SCOPE, "Scan triggered.");
 
-		if (!(await this.mountPointService.ensureMountPoint())) {
-			new Notice(
-				"KOReader device not found. Please check the mount point in settings.",
-			);
+		const mountPoint = await this.prepareExecution();
+		if (!mountPoint) {
 			return;
 		}
 

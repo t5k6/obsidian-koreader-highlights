@@ -4,7 +4,7 @@ import {
 	Notice,
 	normalizePath,
 	type Plugin,
-	type TFile,
+	TFile,
 	TFolder,
 	type Vault,
 } from "obsidian";
@@ -115,6 +115,21 @@ export class FileSystemService {
 	/* ------------------------------------------------------------------ */
 
 	/**
+	 * Normalizes an absolute system path to use forward slashes, which is safer
+	 * for internal consistency and cross-platform compatibility.
+	 * @param absolutePath The platform-specific absolute path (e.g., "C:\\Users\\User").
+	 * @returns A path string using only forward slashes (e.g., "C:/Users/User").
+	 */
+	public static normalizeSystemPath(
+		absolutePath: string | null | undefined,
+	): string {
+		if (!absolutePath) {
+			return "";
+		}
+		return absolutePath.replace(/\\/g, "/");
+	}
+
+	/**
 	 * Converts a path to a canonical, vault-relative format.
 	 * This is the single source of truth for path normalization.
 	 *
@@ -155,6 +170,37 @@ export class FileSystemService {
 	/* ------------------------------------------------------------------ */
 	/*                         VAULT OPERATIONS                          */
 	/* ------------------------------------------------------------------ */
+
+	public async writeVaultFile(
+		vaultPath: string,
+		content: string,
+	): Promise<TFile> {
+		const normalizedPath = FileSystemService.toVaultPath(vaultPath);
+		if (!normalizedPath) {
+			const message = "A valid vault path must be provided.";
+			console.error(`${this.LOG_PREFIX} ${message}`);
+			throw new Error(message);
+		}
+
+		await this.ensureParentDirectory(normalizedPath);
+
+		const existingFile = this.vault.getAbstractFileByPath(normalizedPath);
+
+		if (existingFile instanceof TFolder) {
+			const message = `Path exists but is a folder: ${normalizedPath}`;
+			console.error(`${this.LOG_PREFIX} ${message}`);
+			throw new Error(message);
+		}
+
+		if (existingFile instanceof TFile) {
+			// File exists, modify it.
+			await this.vault.modify(existingFile, content);
+			return existingFile; // Return the original TFile object
+		} else {
+			// File does not exist, create it.
+			return this.vault.create(normalizedPath, content);
+		}
+	}
 
 	public async ensurePluginDataDirExists(): Promise<void> {
 		const pluginDataPath = path.join(

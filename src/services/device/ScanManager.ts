@@ -1,4 +1,4 @@
-import { type App, Notice, TFile } from "obsidian";
+import { type App, Notice } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import { ProgressModal } from "src/ui/ProgressModal";
 import type { FileSystemService } from "../FileSystemService";
@@ -85,37 +85,18 @@ export class ScanManager {
 	 * @param sdrFilePaths - Array of SDR directory paths found
 	 */
 	private async createOrUpdateScanNote(sdrFilePaths: string[]): Promise<void> {
-		// 1. Define the constant file path components
-		const reportFilename = ScanManager.SCAN_REPORT_FILENAME; // "KOReader SDR Scan Report.md"
+		const reportFilename = ScanManager.SCAN_REPORT_FILENAME;
 		const reportFolderPath = this.plugin.settings.highlightsFolder;
 		const fullReportPath = `${reportFolderPath}/${reportFilename}`;
 
-		// 2. Generate the content you intend to write
 		const reportContent = this.generateReportContent(sdrFilePaths);
 
 		try {
-			// 3. Check if the file already exists in the vault
-			const existingReportFile =
-				this.app.vault.getAbstractFileByPath(fullReportPath);
-
-			if (existingReportFile instanceof TFile) {
-				// 4. If it exists, MODIFY it with the new content
-				this.loggingService.info(
-					this.SCOPE,
-					`Updating existing scan report: ${fullReportPath}`,
-				);
-				await this.app.vault.modify(existingReportFile, reportContent);
-			} else {
-				// 5. If it does NOT exist, CREATE it.
-				// First, ensure the parent directory exists.
-				await this.fs.ensureVaultFolder(reportFolderPath);
-
-				this.loggingService.info(
-					this.SCOPE,
-					`Creating new scan report: ${fullReportPath}`,
-				);
-				await this.app.vault.create(fullReportPath, reportContent);
-			}
+			this.loggingService.info(
+				this.SCOPE,
+				`Creating or updating scan report: ${fullReportPath}`,
+			);
+			await this.fs.writeVaultFile(fullReportPath, reportContent);
 		} catch (error) {
 			this.loggingService.error(
 				this.SCOPE,
@@ -123,7 +104,6 @@ export class ScanManager {
 				error,
 			);
 			new Notice("Failed to save scan report note.");
-			throw error;
 		}
 	}
 

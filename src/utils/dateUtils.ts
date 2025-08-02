@@ -1,17 +1,39 @@
 import type { LoggingService } from "src/services/LoggingService";
 
 /**
+ * A centralized, safe date formatter using toLocaleDateString.
+ * @param date The Date object to format.
+ * @param locale The locale string (e.g., "en-US") or undefined for system locale.
+ * @param logger Optional logging service for error reporting.
+ * @returns A formatted date string or an empty string on error.
+ */
+function _toLocaleDate(
+	date: Date,
+	locale: string | undefined,
+	logger?: LoggingService,
+): string {
+	try {
+		if (Number.isNaN(date.getTime())) {
+			throw new Error("Invalid date object");
+		}
+		return date.toLocaleDateString(locale, {
+			year: "numeric",
+			month: "short",
+			day: "numeric",
+		});
+	} catch (e) {
+		logger?.warn("dateUtils:Date", `Could not format date "${date}"`, e);
+		return "";
+	}
+}
+
+/**
  * Formats a date string to US English format.
  * @param dateStr - ISO date string
  * @returns Formatted date like "Jan 1, 2025"
  */
 export function formatDate(dateStr: string): string {
-	const date = new Date(dateStr);
-	return date.toLocaleDateString("en-US", {
-		year: "numeric",
-		month: "short",
-		day: "numeric",
-	});
+	return _toLocaleDate(new Date(dateStr), "en-US");
 }
 
 /**
@@ -60,16 +82,7 @@ export function formatDateLocale(
 	dateStr: string,
 	logger?: LoggingService,
 ): string {
-	try {
-		return new Date(dateStr).toLocaleDateString(undefined, {
-			year: "numeric",
-			month: "short",
-			day: "numeric",
-		});
-	} catch (e) {
-		logger?.warn("dateUtils:Date", `Could not format date "${dateStr}"`, e);
-		return "";
-	}
+	return _toLocaleDate(new Date(dateStr), undefined, logger);
 }
 
 /**
@@ -89,11 +102,7 @@ export function formatDateAsDailyNote(dateStr: string): string {
  * @returns Formatted date like "Jan 1, 2025"
  */
 export function formatUnixTimestamp(timestamp: number): string {
-	return new Date(timestamp * 1000).toLocaleDateString("en-US", {
-		year: "numeric",
-		month: "short",
-		day: "numeric",
-	});
+	return _toLocaleDate(new Date(timestamp * 1000), "en-US");
 }
 
 /**

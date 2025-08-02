@@ -17,6 +17,7 @@ import {
 } from "../types";
 import type { DatabaseService } from "./DatabaseService";
 import type { SDRFinder } from "./device/SDRFinder";
+import type { FileSystemService } from "./FileSystemService";
 import type { LoggingService } from "./LoggingService";
 import type { FrontmatterGenerator } from "./parsing/FrontmatterGenerator";
 import type { MetadataParser } from "./parsing/MetadataParser";
@@ -38,6 +39,7 @@ export class ImportManager {
 		private readonly duplicateHandler: DuplicateHandler,
 		private readonly snapshotManager: SnapshotManager,
 		private readonly loggingService: LoggingService,
+		private readonly fs: FileSystemService,
 	) {}
 
 	/**
@@ -489,7 +491,7 @@ export class ImportManager {
 		);
 
 		const newContent = this.reconstructFileContent(frontmatter, newBody);
-		await this.app.vault.modify(file, newContent);
+		await this.fs.writeVaultFile(file.path, newContent);
 	}
 
 	/**
@@ -544,7 +546,7 @@ export class ImportManager {
 		}
 
 		const newContent = this.reconstructFileContent(frontmatter, newBody);
-		await this.app.vault.modify(file, newContent);
+		await this.fs.writeVaultFile(file.path, newContent);
 	}
 
 	/**

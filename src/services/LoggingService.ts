@@ -139,16 +139,29 @@ class FileSink {
 		}
 	}
 
+	/**
+	 * Appends a closing code fence to the current log file, if one exists.
+	 */
+	private async closeCurrentFile(): Promise<void> {
+		if (this.curFile) {
+			try {
+				await this.vault.adapter.append(this.curFile.path, "\n```\n");
+			} catch (e) {
+				console.error("KOReader Logger: failed to close log file", e);
+			}
+			this.curFile = null; // Mark as closed
+		}
+	}
+
 	private async rotate() {
 		try {
+			await this.closeCurrentFile();
 			await mkdirp(this.vault, this.dir);
 
 			const date = datestamp();
-			if (this.curDate === date && this.curSize < this.MAX_FILE_SIZE) return;
-
 			this.curDate = date;
 			const path = normalizePath(`${this.dir}/log_${timestamp()}.md`);
-			this.curFile = await this.vault.create(path, `# ${path}` + "\n\n```\n");
+			this.curFile = await this.vault.create(path, `# ${path}\n\n` + "```\n");
 			this.curSize = 0;
 		} catch (e) {
 			console.error("KOReader Logger: rotate failed", e);
@@ -168,8 +181,13 @@ class FileSink {
 				child.path !== this.curFile?.path
 			) {
 				try {
-					const txt = await this.vault.adapter.read(child.path);
-					const gz = pako.gzip(txt);
+					// We must close the fence for any lingering md files before gzipping
+					const content = await this.vault.adapter.read(child.path);
+					const closedContent = content.endsWith("```\n")
+						? content
+						: `${content}\n\`\`\`\n`;
+
+					const gz = pako.gzip(closedContent);
 					await this.vault.adapter.writeBinary(
 						`${child.path}.gz`,
 						new Uint8Array(gz.buffer, gz.byteOffset, gz.byteLength).slice()
@@ -198,6 +216,7 @@ class FileSink {
 
 	async dispose() {
 		await this.rotating;
+		await this.closeCurrentFile();
 	}
 }
 

@@ -22,6 +22,7 @@ import type { LoggingService } from "./LoggingService";
 import type { FrontmatterGenerator } from "./parsing/FrontmatterGenerator";
 import type { MetadataParser } from "./parsing/MetadataParser";
 import type { ContentGenerator } from "./vault/ContentGenerator";
+import type { DuplicateFinder } from "./vault/DuplicateFinder";
 import type { DuplicateHandler } from "./vault/DuplicateHandler";
 import type { FileNameGenerator } from "./vault/FileNameGenerator";
 import type { LocalIndexService } from "./vault/LocalIndexService";
@@ -40,6 +41,7 @@ export class ImportManager {
 		private readonly localIndexService: LocalIndexService,
 		private readonly frontmatterGenerator: FrontmatterGenerator,
 		private readonly contentGenerator: ContentGenerator,
+		private readonly duplicateFinder: DuplicateFinder,
 		private readonly duplicateHandler: DuplicateHandler,
 		private readonly snapshotManager: SnapshotManager,
 		private readonly loggingService: LoggingService,
@@ -75,8 +77,8 @@ export class ImportManager {
 		modal.open();
 		modal.setTotal(sdrPaths.length);
 
-		this.duplicateHandler.resetApplyToAll();
-		this.duplicateHandler.clearCache();
+		this.duplicateHandler.reset();
+		this.duplicateFinder.clearCache();
 
 		let summary = blankSummary();
 
@@ -222,13 +224,27 @@ export class ImportManager {
 		// Create a lazy provider for the file content
 		const contentProvider = () => this.generateFileContent(luaMetadata);
 
-		const result = await this.duplicateHandler.resolveDuplicate(
-			luaMetadata,
-			contentProvider,
-		);
+		const bestMatch = await this.duplicateFinder.findBestMatch(luaMetadata);
+
+		let result: { status: string; file: TFile | null };
+
+		if (!bestMatch) {
+			const newFile = await this.createNewFile(luaMetadata, contentProvider);
+			result = { status: "created", file: newFile };
+		} else {
+			result = await this.duplicateHandler.handleDuplicate(
+				bestMatch,
+				contentProvider,
+			);
+			if (result.status === "keep-both") {
+				const newFile = await this.createNewFile(luaMetadata, contentProvider);
+				// The summary will still count this as 'created'
+				result = { status: "created", file: newFile };
+			}
+		}
 
 		// Update summary based on the single, clear status returned
-		summary[result.status]++;
+		summary[result.status as keyof Summary]++;
 
 		// If a file was created or modified, perform post-import actions
 		if (result.file) {
@@ -248,6 +264,29 @@ export class ImportManager {
 		}
 
 		return summary;
+	}
+
+	private async createNewFile(
+		luaMetadata: LuaMetadata,
+		contentProvider: () => Promise<string>,
+	): Promise<TFile> {
+		const content = await contentProvider();
+		const fileNameWithExt = this.fileNameGenerator.generate(
+			{
+				useCustomTemplate: this.plugin.settings.useCustomFileNameTemplate,
+				template: this.plugin.settings.fileNameTemplate,
+				highlightsFolder: this.plugin.settings.highlightsFolder,
+			},
+			luaMetadata.docProps,
+			luaMetadata.originalFilePath,
+		);
+		const fileNameStem = getFileNameWithoutExt(fileNameWithExt);
+
+		return await this.fs.createVaultFileSafely(
+			this.plugin.settings.highlightsFolder,
+			fileNameStem, // Use the stem here
+			content,
+		);
 	}
 
 	/**

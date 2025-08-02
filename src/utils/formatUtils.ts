@@ -381,3 +381,12 @@ export function computeAnnotationId(annotation: Annotation): string {
 	const input = `${pageno}|${pos0}|${pos1}|${(text ?? "").trim()}`;
 	return createHash("sha1").update(input).digest("hex").slice(0, 16);
 }
+
+/**
+ * Gets a unique key for an annotation used for deduplication.
+ * @param annotation - The annotation to get a key for
+ * @returns Unique identifier string
+ */
+export function getHighlightKey(annotation: Annotation): string {
+	return annotation.id ?? computeAnnotationId(annotation);
+}

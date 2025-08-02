@@ -2,8 +2,8 @@ import path from "node:path";
 import {
 	type App,
 	debounce,
-	Notice,
 	normalizePath,
+	Notice,
 	type TAbstractFile,
 	TFile,
 	TFolder,
@@ -265,7 +265,10 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 			);
 			try {
 				const data = this.idxDb!.export();
-				await this.fsService.writeNodeFile(this.idxPath, data);
+				// Use the Obsidian vault adapter for writing internal data files.
+				// This is the correct API for paths inside the vault's .obsidian directory.
+				// this.idxPath is already a vault-relative path.
+				await this.app.vault.adapter.writeBinary(this.idxPath, data);
 				this.isDirty = false;
 				this.loggingService.info(
 					this.SCOPE,

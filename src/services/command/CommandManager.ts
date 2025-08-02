@@ -11,12 +11,12 @@ export class CommandManager {
 	private readonly SCOPE = "CommandManager";
 
 	constructor(
+		private readonly plugin: KoreaderImporterPlugin,
 		private readonly importManager: ImportManager,
 		private readonly scanManager: ScanManager,
 		private readonly sdrFinder: SDRFinder,
 		private readonly cacheManager: CacheManager,
 		private readonly loggingService: LoggingService,
-		private readonly plugin: KoreaderImporterPlugin,
 	) {}
 
 	/**

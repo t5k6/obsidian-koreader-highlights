@@ -3,10 +3,10 @@ import { diff3Merge } from "node-diff3";
 import type { App, TFile, Vault } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import type { FrontmatterGenerator } from "src/services/parsing/FrontmatterGenerator";
+import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
 import type { Annotation, LuaMetadata } from "src/types";
-import { compareAnnotations, computeAnnotationId } from "src/utils/formatUtils";
+import { compareAnnotations, getHighlightKey } from "src/utils/formatUtils";
 import { extractHighlights } from "src/utils/highlightExtractor";
-import { getFrontmatterAndBody } from "src/utils/obsidianUtils";
 import type { LoggingService } from "../LoggingService";
 import type { ContentGenerator } from "./ContentGenerator";
 import type { SnapshotManager } from "./SnapshotManager";
@@ -19,6 +19,7 @@ export class MergeService {
 		private vault: Vault,
 		private plugin: KoreaderImporterPlugin,
 		private snapshotManager: SnapshotManager,
+		private fmService: FrontmatterService,
 		private frontmatterGenerator: FrontmatterGenerator,
 		private contentGenerator: ContentGenerator,
 		private loggingService: LoggingService,
@@ -37,7 +38,7 @@ export class MergeService {
 	): Promise<{ status: "merged"; file: TFile }> {
 		await this.snapshotManager.createBackup(file);
 		const { frontmatter: existingFm, body: existingBody } =
-			await getFrontmatterAndBody(this.app, file, this.loggingService);
+			this.fmService.parse(await this.vault.read(file));
 		const existingAnnotations = extractHighlights(
 			existingBody,
 			this.plugin.settings.commentStyle,
@@ -84,14 +85,9 @@ export class MergeService {
 	): Promise<{ status: "merged"; file: TFile }> {
 		await this.snapshotManager.createBackup(file);
 
-		const parse = async (source: TFile | string) => {
-			const content = typeof source === "string" ? { content: source } : source;
-			return getFrontmatterAndBody(this.app, content, this.loggingService);
-		};
-
-		const base = await parse(baseContent);
-		const ours = await parse(file);
-		const theirs = await parse(newFileContent);
+		const base = this.fmService.parse(baseContent);
+		const ours = this.fmService.parse(await this.vault.read(file));
+		const theirs = this.fmService.parse(newFileContent);
 
 		const mergeRegions = this.performSynchronousDiff3(
 			ours.body,
@@ -189,26 +185,15 @@ export class MergeService {
 		existing: Annotation[],
 		incoming: Annotation[],
 	): Annotation[] {
-		const map = new Map(
-			existing.map((ann) => [this.getHighlightKey(ann), ann]),
-		);
+		const map = new Map(existing.map((ann) => [getHighlightKey(ann), ann]));
 
 		for (const ann of incoming) {
-			const k = this.getHighlightKey(ann);
+			const k = getHighlightKey(ann);
 			if (!map.has(k)) {
 				map.set(k, ann);
 			}
 		}
 
 		return Array.from(map.values()).sort(compareAnnotations);
-	}
-
-	/**
-	 * Gets a unique key for an annotation used for deduplication.
-	 * @param annotation - The annotation to get a key for
-	 * @returns Unique identifier string
-	 */
-	public getHighlightKey(annotation: Annotation): string {
-		return annotation.id ?? computeAnnotationId(annotation);
 	}
 }

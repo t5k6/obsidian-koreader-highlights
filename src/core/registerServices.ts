@@ -7,10 +7,12 @@ import { FileSystemService } from "src/services/FileSystemService";
 import { ImportManager } from "src/services/ImportManager";
 import { LoggingService } from "src/services/LoggingService";
 import { FrontmatterGenerator } from "src/services/parsing/FrontmatterGenerator";
+import { FrontmatterService } from "src/services/parsing/FrontmatterService";
 import { MetadataParser } from "src/services/parsing/MetadataParser";
 import { TemplateManager } from "src/services/parsing/TemplateManager";
 import { SqlJsManager } from "src/services/SqlJsManager";
 import { ContentGenerator } from "src/services/vault/ContentGenerator";
+import { DuplicateFinder } from "src/services/vault/DuplicateFinder";
 import { DuplicateHandler } from "src/services/vault/DuplicateHandler";
 import { FileNameGenerator } from "src/services/vault/FileNameGenerator";
 import { LocalIndexService } from "src/services/vault/LocalIndexService";
@@ -48,6 +50,7 @@ export function registerServices(
 	container.register(FileNameGenerator, [LoggingService]);
 	container.register(FrontmatterGenerator, []);
 	container.register(SqlJsManager, []);
+	container.register(FrontmatterService, [LoggingService]);
 
 	// --- Level 1: Depends on Level 0 or Tokens ---
 	container.register(FileSystemService, [
@@ -96,15 +99,12 @@ export function registerServices(
 	]);
 	container.register(DuplicateHandler, [
 		APP_TOKEN,
-		DUPLICATE_MODAL_FACTORY_TOKEN,
 		PLUGIN_TOKEN,
-		LocalIndexService,
-		SnapshotManager,
+		DUPLICATE_MODAL_FACTORY_TOKEN,
 		MergeService,
-		CacheManager,
+		SnapshotManager,
 		FileSystemService,
 		LoggingService,
-		FileNameGenerator,
 	]);
 	container.register(LocalIndexService, [
 		PLUGIN_TOKEN,
@@ -112,6 +112,16 @@ export function registerServices(
 		FileSystemService,
 		CacheManager,
 		SqlJsManager,
+		LoggingService,
+	]);
+
+	// --- Level 2.5: Duplicate Finding
+	container.register(DuplicateFinder, [
+		VAULT_TOKEN,
+		LocalIndexService,
+		FrontmatterService,
+		SnapshotManager,
+		CacheManager,
 		LoggingService,
 	]);
 
@@ -126,18 +136,19 @@ export function registerServices(
 		LocalIndexService,
 		FrontmatterGenerator,
 		ContentGenerator,
+		DuplicateFinder,
 		DuplicateHandler,
 		SnapshotManager,
 		LoggingService,
 		FileSystemService,
 	]);
 	container.register(CommandManager, [
+		PLUGIN_TOKEN,
 		ImportManager,
 		ScanManager,
 		SDRFinder,
 		CacheManager,
 		LoggingService,
-		PLUGIN_TOKEN,
 	]);
 	container.register(DeviceStatisticsService, [
 		PLUGIN_TOKEN,

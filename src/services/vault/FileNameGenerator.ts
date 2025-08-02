@@ -6,13 +6,6 @@ import {
 	simplifySdrName,
 } from "src/utils/formatUtils";
 
-function renderTemplate(
-	template: string,
-	data: Record<string, string>,
-): string {
-	return template.replace(/\{\{(\w+)\}\}/g, (_, key) => data[key] || "");
-}
-
 const MAX_TOTAL_PATH_LENGTH = 255;
 const FILE_EXTENSION = ".md";
 

@@ -262,3 +262,8 @@ export interface SettingsObserver {
 		oldSettings: KoreaderHighlightImporterSettings,
 	): void;
 }
+
+export interface DebouncedFn {
+	(): void;
+	cancel(): void;
+}

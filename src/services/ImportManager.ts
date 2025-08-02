@@ -15,7 +15,7 @@ import {
 	type LuaMetadata,
 	type Summary,
 } from "../types";
-import type { DatabaseService } from "./DatabaseService";
+import type { DeviceStatisticsService } from "./device/DeviceStatisticsService";
 import type { SDRFinder } from "./device/SDRFinder";
 import type { FileSystemService } from "./FileSystemService";
 import type { LoggingService } from "./LoggingService";
@@ -23,6 +23,7 @@ import type { FrontmatterGenerator } from "./parsing/FrontmatterGenerator";
 import type { MetadataParser } from "./parsing/MetadataParser";
 import type { ContentGenerator } from "./vault/ContentGenerator";
 import type { DuplicateHandler } from "./vault/DuplicateHandler";
+import type { LocalIndexService } from "./vault/LocalIndexService";
 import type { SnapshotManager } from "./vault/SnapshotManager";
 
 export class ImportManager {
@@ -33,7 +34,8 @@ export class ImportManager {
 		private readonly plugin: KoreaderImporterPlugin,
 		private readonly sdrFinder: SDRFinder,
 		private readonly metadataParser: MetadataParser,
-		private readonly databaseService: DatabaseService,
+		private readonly deviceStatisticsService: DeviceStatisticsService,
+		private readonly localIndexService: LocalIndexService,
 		private readonly frontmatterGenerator: FrontmatterGenerator,
 		private readonly contentGenerator: ContentGenerator,
 		private readonly duplicateHandler: DuplicateHandler,
@@ -125,7 +127,7 @@ export class ImportManager {
 			clearInterval(progressTicker);
 
 			this.loggingService.info(this.SCOPE, "Flushing database index …");
-			await this.databaseService.flushIndex();
+			await this.localIndexService.flushIndex();
 
 			modal.close();
 		}
@@ -183,7 +185,7 @@ export class ImportManager {
 		const { md5, docProps } = luaMetadata;
 		const { authors, title } = docProps;
 
-		const stats = await this.databaseService.findBookStatistics(
+		const stats = await this.deviceStatisticsService.findBookStatistics(
 			title,
 			authors,
 			md5,
@@ -229,10 +231,10 @@ export class ImportManager {
 
 		// If a file was created or modified, perform post-import actions
 		if (result.file) {
-			const bookKey = this.databaseService.bookKeyFromDocProps(
+			const bookKey = this.localIndexService.bookKeyFromDocProps(
 				luaMetadata.docProps,
 			);
-			await this.databaseService.upsertBook(
+			await this.localIndexService.upsertBook(
 				luaMetadata.statistics?.book.id ?? null,
 				bookKey,
 

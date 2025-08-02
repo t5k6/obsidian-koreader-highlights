@@ -1,6 +1,6 @@
 import type { App } from "obsidian";
 import { CommandManager } from "src/services/command/CommandManager";
-import { DatabaseService } from "src/services/DatabaseService";
+import { DeviceStatisticsService } from "src/services/device/DeviceStatisticsService";
 import { ScanManager } from "src/services/device/ScanManager";
 import { SDRFinder } from "src/services/device/SDRFinder";
 import { FileSystemService } from "src/services/FileSystemService";
@@ -9,8 +9,10 @@ import { LoggingService } from "src/services/LoggingService";
 import { FrontmatterGenerator } from "src/services/parsing/FrontmatterGenerator";
 import { MetadataParser } from "src/services/parsing/MetadataParser";
 import { TemplateManager } from "src/services/parsing/TemplateManager";
+import { SqlJsManager } from "src/services/SqlJsManager";
 import { ContentGenerator } from "src/services/vault/ContentGenerator";
 import { DuplicateHandler } from "src/services/vault/DuplicateHandler";
+import { LocalIndexService } from "src/services/vault/LocalIndexService";
 import { MergeService } from "src/services/vault/MergeService";
 import { SnapshotManager } from "src/services/vault/SnapshotManager";
 import type { DuplicateMatch } from "src/types";
@@ -43,18 +45,13 @@ export function registerServices(
 	// --- Level 0: Foundational ---
 	container.register(CacheManager, [LoggingService]);
 	container.register(FrontmatterGenerator, []);
+	container.register(SqlJsManager, []);
 
 	// --- Level 1: Depends on Level 0 or Tokens ---
 	container.register(FileSystemService, [
 		VAULT_TOKEN,
 		PLUGIN_TOKEN,
 		CacheManager,
-		LoggingService,
-	]);
-	container.register(DatabaseService, [
-		PLUGIN_TOKEN,
-		FileSystemService,
-		LoggingService,
 	]);
 	container.register(SDRFinder, [
 		PLUGIN_TOKEN,
@@ -65,7 +62,6 @@ export function registerServices(
 	container.register(SnapshotManager, [
 		APP_TOKEN,
 		PLUGIN_TOKEN,
-		VAULT_TOKEN,
 		FileSystemService,
 		LoggingService,
 	]);
@@ -100,11 +96,19 @@ export function registerServices(
 		APP_TOKEN,
 		DUPLICATE_MODAL_FACTORY_TOKEN,
 		PLUGIN_TOKEN,
-		DatabaseService,
+		LocalIndexService,
 		SnapshotManager,
 		MergeService,
 		CacheManager,
 		FileSystemService,
+		LoggingService,
+	]);
+	container.register(LocalIndexService, [
+		PLUGIN_TOKEN,
+		APP_TOKEN,
+		FileSystemService,
+		CacheManager,
+		SqlJsManager,
 		LoggingService,
 	]);
 
@@ -114,7 +118,8 @@ export function registerServices(
 		PLUGIN_TOKEN,
 		SDRFinder,
 		MetadataParser,
-		DatabaseService,
+		DeviceStatisticsService,
+		LocalIndexService,
 		FrontmatterGenerator,
 		ContentGenerator,
 		DuplicateHandler,
@@ -129,5 +134,12 @@ export function registerServices(
 		CacheManager,
 		LoggingService,
 		PLUGIN_TOKEN,
+	]);
+	container.register(DeviceStatisticsService, [
+		PLUGIN_TOKEN,
+		FileSystemService,
+		SqlJsManager,
+		LoggingService,
+		CacheManager,
 	]);
 }

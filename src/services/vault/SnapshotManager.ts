@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { type App, normalizePath, type TFile, type Vault } from "obsidian";
+import { type App, normalizePath, type TFile } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import { normalizeFileNamePiece } from "src/utils/formatUtils";
 import type { FileSystemService } from "../FileSystemService";
@@ -14,7 +14,6 @@ export class SnapshotManager {
 	constructor(
 		private app: App,
 		private plugin: KoreaderImporterPlugin,
-		private vault: Vault,
 		private fs: FileSystemService,
 		private loggingService: LoggingService,
 	) {

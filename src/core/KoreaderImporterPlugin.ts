@@ -2,6 +2,7 @@ import { Notice, Plugin } from "obsidian";
 import { CommandManager } from "src/services/command/CommandManager";
 import { LoggingService } from "src/services/LoggingService";
 import { TemplateManager } from "src/services/parsing/TemplateManager";
+import { LocalIndexService } from "src/services/vault/LocalIndexService";
 import { SettingsTab } from "src/ui/SettingsTab";
 import type { KoreaderHighlightImporterSettings } from "../types";
 import { DIContainer } from "./DIContainer";
@@ -18,6 +19,7 @@ export default class KoreaderImporterPlugin extends Plugin {
 	private servicesInitialized = false;
 	private migrationManager!: MigrationManager;
 	public templateManager!: TemplateManager;
+	public localIndexService!: LocalIndexService;
 
 	async onload() {
 		console.log("KOReaderImporterPlugin: Loading...");
@@ -58,6 +60,9 @@ export default class KoreaderImporterPlugin extends Plugin {
 
 			// Step 4: Services
 			registerServices(this.diContainer, this, this.app);
+			this.localIndexService =
+				this.diContainer.resolve<LocalIndexService>(LocalIndexService);
+			await this.localIndexService.initialize();
 
 			// Step 5: Critical Service Post-Init
 			this.templateManager =

@@ -13,9 +13,9 @@ import type { CacheManager } from "src/utils/cache/CacheManager";
 import { generateObsidianFileName } from "src/utils/formatUtils";
 import { extractHighlights } from "src/utils/highlightExtractor";
 import { getFrontmatterAndBody } from "src/utils/obsidianUtils";
-import type { DatabaseService } from "../DatabaseService";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
+import type { LocalIndexService } from "./LocalIndexService";
 import type { MergeService } from "./MergeService";
 import type { SnapshotManager } from "./SnapshotManager";
 
@@ -37,7 +37,7 @@ export class DuplicateHandler {
 			message: string,
 		) => IDuplicateHandlingModal,
 		private plugin: KoreaderImporterPlugin,
-		private databaseService: DatabaseService,
+		private localIndexService: LocalIndexService,
 		private snapshotManager: SnapshotManager,
 		private mergeService: MergeService,
 		private cacheManager: CacheManager,
@@ -159,7 +159,7 @@ export class DuplicateHandler {
 	 * @returns Array of TFile objects that match the book key
 	 */
 	public async findPotentialDuplicates(docProps: DocProps): Promise<TFile[]> {
-		const bookKey = this.databaseService.bookKeyFromDocProps(docProps);
+		const bookKey = this.localIndexService.bookKeyFromDocProps(docProps);
 		if (this.potentialDuplicatesCache.has(bookKey)) {
 			this.loggingService.info(
 				this.SCOPE,
@@ -172,7 +172,7 @@ export class DuplicateHandler {
 			this.SCOPE,
 			`Querying index for existing files with book key: ${bookKey}`,
 		);
-		const paths = await this.databaseService.findExistingBookFiles(bookKey);
+		const paths = await this.localIndexService.findExistingBookFiles(bookKey);
 
 		const files = paths
 			.map((p) => this.app.vault.getAbstractFileByPath(p))

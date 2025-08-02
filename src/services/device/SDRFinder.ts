@@ -186,7 +186,7 @@ export class SDRFinder implements SettingsObserver {
 					out.push(fullPath);
 				}
 			} else if (!entry.name.startsWith(".") && entry.name !== "$RECYCLE.BIN") {
-				await this.walk(fullPath, excluded, out, mountPoint);
+				await io(() => this.walk(fullPath, excluded, out, mountPoint));
 			}
 		}
 	}

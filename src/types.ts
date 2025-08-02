@@ -161,6 +161,7 @@ export interface KoreaderHighlightImporterSettings {
 	mergeOverlappingHighlights: boolean;
 	template: KoreaderTemplateSettings;
 	commentStyle: CommentStyle;
+	backupRetentionDays: number;
 }
 
 // --- UI / Modal Related Types ---

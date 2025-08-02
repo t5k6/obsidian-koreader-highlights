@@ -7,6 +7,7 @@ import {
 import { FileSystemService } from "src/services/FileSystemService";
 import {
 	ensureBoolean,
+	ensureNumber,
 	ensureNumberInRange,
 	ensureString,
 	ensureStringArray,
@@ -57,6 +58,7 @@ export const DEFAULT_SETTINGS: KoreaderHighlightImporterSettings = {
 		templateDir: DEFAULT_TEMPLATES_FOLDER,
 	},
 	commentStyle: "html",
+	backupRetentionDays: 30,
 };
 
 /* ------------------------------------------------------------------ */
@@ -173,6 +175,14 @@ export class PluginSettings {
 				? commentStyle
 				: DEFAULT_SETTINGS.commentStyle
 		) as CommentStyle;
+
+		settings.backupRetentionDays = Math.max(
+			0, // Ensure it's not negative
+			ensureNumber(
+				raw.backupRetentionDays,
+				DEFAULT_SETTINGS.backupRetentionDays,
+			),
+		);
 
 		return settings;
 	}

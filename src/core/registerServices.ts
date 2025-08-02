@@ -93,6 +93,7 @@ export function registerServices(
 		VAULT_TOKEN,
 		PLUGIN_TOKEN,
 		SnapshotManager,
+		FrontmatterService,
 		FrontmatterGenerator,
 		ContentGenerator,
 		LoggingService,

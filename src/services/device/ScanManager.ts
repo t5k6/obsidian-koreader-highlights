@@ -1,4 +1,5 @@
 import { type App, Notice } from "obsidian";
+import path from "path";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import { ProgressModal } from "src/ui/ProgressModal";
 import type { FileSystemService } from "../FileSystemService";
@@ -124,10 +125,14 @@ export class ScanManager {
 		} else {
 			content += `Found ${sdrFilePaths.length} ".sdr" directories with metadata:\n\n`;
 			content += sdrFilePaths
-				.map(
-					(filePath) =>
-						`- \`${filePath.replace(this.plugin.settings.koreaderMountPoint, "")}\``,
-				) // Show relative path from mount point
+				.map((filePath) => {
+					const mountPoint = this.plugin.settings.koreaderMountPoint;
+					// Generate a relative path and ensure it uses forward slashes
+					const relativePath = path
+						.relative(mountPoint, filePath)
+						.replace(/\\/g, "/");
+					return `- \`${relativePath}\``;
+				})
 				.join("\n");
 		}
 

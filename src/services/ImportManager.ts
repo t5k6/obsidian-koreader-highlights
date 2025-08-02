@@ -133,6 +133,18 @@ export class ImportManager {
 			this.loggingService.info(this.SCOPE, "Flushing database index …");
 			await this.localIndexService.flushIndex();
 
+			try {
+				await this.snapshotManager.cleanupOldBackups(
+					this.plugin.settings.backupRetentionDays,
+				);
+			} catch (cleanupError) {
+				this.loggingService.error(
+					this.SCOPE,
+					"An error occurred during backup cleanup.",
+					cleanupError,
+				);
+			}
+
 			modal.close();
 		}
 	}
@@ -171,12 +183,12 @@ export class ImportManager {
 			summary.merged += fileSummary.merged;
 			summary.automerged += fileSummary.automerged;
 			summary.skipped += fileSummary.skipped;
+			return addSummary(summary, fileSummary);
 		} catch (err) {
 			this.loggingService.error(this.SCOPE, `Error processing ${sdrPath}`, err);
 			summary.errors++;
+			return summary;
 		}
-
-		return summary;
 	}
 
 	/**

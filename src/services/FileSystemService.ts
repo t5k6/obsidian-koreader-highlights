@@ -378,6 +378,22 @@ export class FileSystemService {
 		}
 	}
 
+	async deleteNodeFile(filePath: string): Promise<void> {
+		try {
+			await fsp.unlink(filePath);
+		} catch (error) {
+			// Don't throw if the file is already gone, just log it.
+			if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+				console.log(
+					`${this.LOG_PREFIX} deleteNodeFile: File not found, likely already deleted: ${filePath}`,
+				);
+				return;
+			}
+			// For other errors, handle and re-throw
+			this.handleError("deleteNodeFile", filePath, error, true);
+		}
+	}
+
 	async getNodeStats(
 		filePath: string,
 	): Promise<import("node:fs").Stats | null> {

@@ -145,31 +145,44 @@ export class DuplicateHandlingModal
 			if (opts.primary) btn.setCta();
 		};
 
-		mk("Replace ", "replace", "replace-all", {
-			warning: this.match.matchType === "exact",
-			tooltip: "Replace the existing file with the new one (overwrite).",
-		});
-		const isMergeDisabled = this.match.matchType === "exact" || !canMergeSafely;
-		let mergeTooltip = "Merge new highlights with existing content.";
-		if (this.match.matchType === "exact") {
-			mergeTooltip = "No new content to merge.";
+		// --- Button Creation Logic ---
+
+		const isExactMatch = this.match.matchType === "exact";
+
+		// Button 1: Merge (Primary action if safe)
+		const isMergeDisabled = isExactMatch || !canMergeSafely;
+		let mergeTooltip =
+			"Performs a 3-way merge, safely combining your local edits with new highlights from your device.";
+		if (isExactMatch) {
+			mergeTooltip =
+				"Merge is disabled because the content is identical. There is nothing to merge.";
 		} else if (!canMergeSafely) {
 			mergeTooltip =
-				"Cannot merge safely – no snapshot exists for a 3-way merge.";
+				"Merge is disabled. A snapshot of the previously imported version was not found, which is required for a safe 3-way merge.";
 		}
 
-		mk("Merge ", "merge", "git-merge", {
+		mk("Merge", "merge", "git-merge", {
+			primary: !isMergeDisabled, // CTA if it's the best option
 			disabled: isMergeDisabled,
 			tooltip: mergeTooltip,
 		});
 
-		mk("Keep Both ", "keep-both", "copy", {
-			tooltip: "Create a new file and keep the original.",
+		// Button 2: Replace
+		mk("Replace", "replace", "replace-all", {
+			warning: true, // Overwriting is always a destructive action
+			tooltip:
+				"Overwrites the existing note in your vault with the new version from your device. Any local edits will be lost.",
 		});
 
-		mk("Skip ", "skip", "x", {
-			primary: true,
-			tooltip: "Skip importing this file.",
+		// Button 3: Keep Both
+		mk("Keep Both", "keep-both", "copy", {
+			tooltip:
+				"Ignores this match and creates a new, separate note for the incoming highlights.",
+		});
+
+		// Button 4: Skip
+		mk("Skip", "skip", "x", {
+			tooltip: "Skips importing this book for now.",
 		});
 	}
 

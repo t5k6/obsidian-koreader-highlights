@@ -1,11 +1,10 @@
-import type { App, TFile } from "obsidian";
+import { type App, Notice, type TFile } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import type {
 	DuplicateChoice,
 	DuplicateMatch,
 	IDuplicateHandlingModal,
 } from "src/types";
-import { ConfirmModal } from "src/ui/ConfirmModal";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 import type { MergeService } from "./MergeService";
@@ -87,28 +86,27 @@ export class DuplicateHandler {
 				const baseContent = await this.snapshotManager.getSnapshotContent(
 					analysis.file,
 				);
+
 				if (!baseContent) {
-					const confirmed = await new ConfirmModal(
-						this.app,
-						"Snapshot Not Available",
-						"A 3-way merge is not possible without a snapshot. Local edits may be lost.\n\nProceed with a 2-way merge?",
-					).openAndConfirm();
-
-					if (!confirmed) return { status: "skipped", file: null };
-
-					await this.mergeService.execute2WayMerge(
-						analysis.file,
-						analysis.luaMetadata,
+					this.loggingService.error(
+						this.SCOPE,
+						"UI allowed a merge choice but no snapshot was found. This should not happen. Aborting merge.",
+						analysis,
 					);
-				} else {
-					const newContent = await contentProvider();
-					await this.mergeService.execute3WayMerge(
-						analysis.file,
-						baseContent,
-						newContent,
-						analysis.luaMetadata,
+					new Notice(
+						"Merge failed: could not find the previous version's snapshot.",
+						7000,
 					);
+					return { status: "skipped", file: null };
 				}
+
+				const newContent = await contentProvider();
+				await this.mergeService.execute3WayMerge(
+					analysis.file,
+					baseContent,
+					newContent,
+					analysis.luaMetadata,
+				);
 				return { status: "merged", file: analysis.file };
 			}
 			case "keep-both":

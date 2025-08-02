@@ -80,6 +80,76 @@ export class SnapshotManager {
 	}
 
 	/**
+	 * Cleans up old backup files based on a retention policy.
+	 * @param retentionDays - The maximum age of backup files to keep, in days.
+	 *                        If 0 or less, no backups will be deleted.
+	 */
+	public async cleanupOldBackups(retentionDays: number): Promise<void> {
+		if (retentionDays <= 0) {
+			this.loggingService.info(
+				this.SCOPE,
+				"Backup cleanup skipped (retention period is disabled).",
+			);
+			return;
+		}
+
+		this.loggingService.info(
+			this.SCOPE,
+			`Starting cleanup of backups older than ${retentionDays} days...`,
+		);
+		const cutoffTime = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+		let deletedCount = 0;
+
+		try {
+			for await (const entry of this.fs.iterateNodeDirectory(this.backupDir)) {
+				if (!entry.isFile() || !entry.name.endsWith(".md")) {
+					continue;
+				}
+
+				const backupFilePath = path.join(this.backupDir, entry.name);
+				try {
+					const stats = await this.fs.getNodeStats(backupFilePath);
+					if (stats && stats.mtimeMs < cutoffTime) {
+						// eslint-disable-next-line no-await-in-loop
+						await this.fs.deleteNodeFile(backupFilePath);
+						this.loggingService.info(
+							this.SCOPE,
+							`Deleted old backup: ${entry.name}`,
+						);
+						deletedCount++;
+					}
+				} catch (statError) {
+					// Log but continue if we can't get stats for one file
+					this.loggingService.error(
+						this.SCOPE,
+						`Could not process backup file ${backupFilePath} for cleanup`,
+						statError,
+					);
+				}
+			}
+		} catch (dirError) {
+			this.loggingService.error(
+				this.SCOPE,
+				`Failed to read backup directory for cleanup: ${this.backupDir}`,
+				dirError,
+			);
+			return; // Stop if we can't even read the directory
+		}
+
+		if (deletedCount > 0) {
+			this.loggingService.info(
+				this.SCOPE,
+				`Cleanup complete. Deleted ${deletedCount} old backup file(s).`,
+			);
+		} else {
+			this.loggingService.info(
+				this.SCOPE,
+				"Cleanup complete. No old backups found to delete.",
+			);
+		}
+	}
+
+	/**
 	 * Retrieves the content of a file's snapshot.
 	 * Used as the base version for 3-way merges.
 	 * @param targetFile - File to get snapshot for

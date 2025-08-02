@@ -339,38 +339,6 @@ export function isWithinGap(
 }
 
 /**
- * Calculates Levenshtein edit distance between two strings.
- * Optimized with early exit when distance exceeds max.
- * @param a - First string
- * @param b - Second string
- * @param max - Maximum distance to calculate (default 50)
- * @returns Edit distance or max+1 if exceeded
- */
-export function levenshteinDistance(a: string, b: string, max = 50): number {
-	if (Math.abs(a.length - b.length) > max) return max + 1; // impossible
-
-	const aLower = a.toLowerCase();
-	const bLower = b.toLowerCase();
-
-	// classic DP but we bail out when current row min > max
-	const prev = new Uint16Array(bLower.length + 1).map((_, i) => i);
-	for (let i = 1; i <= aLower.length; i++) {
-		prev[0] = i;
-		let min = i;
-		let upper = prev[0] - 1;
-		for (let j = 1; j <= bLower.length; j++) {
-			const cost = aLower[i - 1] === bLower[j - 1] ? 0 : 1;
-			const val = Math.min(prev[j] + 1, prev[j - 1] + 1, upper + cost);
-			upper = prev[j];
-			prev[j] = val;
-			if (val < min) min = val;
-		}
-		if (min > max) return max + 1; // early-exit row
-	}
-	return prev[bLower.length];
-}
-
-/**
  * Generates a unique ID for an annotation based on its content.
  * Uses SHA1 hash of position and text data.
  * @param annotation - The annotation to generate ID for

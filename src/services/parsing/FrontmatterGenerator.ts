@@ -14,9 +14,9 @@ import type {
 import {
 	formatDate,
 	formatDateWithFormat,
-	formatPercent,
 	secondsToHoursMinutesSeconds,
-} from "src/utils/formatUtils";
+} from "src/utils/dateUtils";
+import { formatPercent } from "src/utils/formatUtils";
 
 /* ------------------------------------------------------------------ */
 /*               1.  Key mapping / helpers (typed)                    */

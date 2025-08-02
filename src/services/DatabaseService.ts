@@ -1,11 +1,10 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 import path from "node:path";
-import { normalizePath } from "obsidian";
+import { debounce, normalizePath } from "obsidian";
 import initSqlJs, { type SqlJsStatic } from "sql.js";
 import { SQLITE_WASM } from "src/binaries/sql-wasm-base64";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import { LruCache } from "src/utils/cache/LruCache";
-import { debounce } from "src/utils/debounce";
 import {
 	levenshteinDistance,
 	normalizeFileNamePiece,

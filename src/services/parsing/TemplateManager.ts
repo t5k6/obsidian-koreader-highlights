@@ -15,7 +15,7 @@ import {
 	formatDate,
 	formatDateAsDailyNote,
 	formatDateLocale,
-} from "src/utils/formatUtils";
+} from "src/utils/dateUtils";
 import { styleHighlight } from "src/utils/highlightStyle";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";

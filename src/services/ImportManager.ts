@@ -23,6 +23,7 @@ import type { FrontmatterGenerator } from "./parsing/FrontmatterGenerator";
 import type { MetadataParser } from "./parsing/MetadataParser";
 import type { ContentGenerator } from "./vault/ContentGenerator";
 import type { DuplicateHandler } from "./vault/DuplicateHandler";
+import type { FileNameGenerator } from "./vault/FileNameGenerator";
 import type { LocalIndexService } from "./vault/LocalIndexService";
 import type { SnapshotManager } from "./vault/SnapshotManager";
 
@@ -32,6 +33,7 @@ export class ImportManager {
 	constructor(
 		private readonly app: App,
 		private readonly plugin: KoreaderImporterPlugin,
+		private readonly fileNameGenerator: FileNameGenerator,
 		private readonly sdrFinder: SDRFinder,
 		private readonly metadataParser: MetadataParser,
 		private readonly deviceStatisticsService: DeviceStatisticsService,
@@ -220,7 +222,6 @@ export class ImportManager {
 		// Create a lazy provider for the file content
 		const contentProvider = () => this.generateFileContent(luaMetadata);
 
-		// Delegate the entire decision tree to the DuplicateHandler
 		const result = await this.duplicateHandler.resolveDuplicate(
 			luaMetadata,
 			contentProvider,

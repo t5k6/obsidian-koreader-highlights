@@ -39,6 +39,8 @@ export const DEFAULT_SETTINGS: KoreaderHighlightImporterSettings = {
 	logLevel: 1,
 	logsFolder: DEFAULT_LOGS_FOLDER,
 	enableFullDuplicateCheck: false,
+	fileNameTemplate: "{{title}} - {{authors}}",
+	useCustomFileNameTemplate: false,
 	autoMergeOnAddition: true,
 	frontmatter: {
 		disabledFields: [],
@@ -93,6 +95,14 @@ export class PluginSettings {
 		settings.autoMergeOnAddition = ensureBoolean(
 			raw.autoMergeOnAddition,
 			DEFAULT_SETTINGS.autoMergeOnAddition,
+		);
+		settings.useCustomFileNameTemplate = ensureBoolean(
+			raw.useCustomFileNameTemplate,
+			DEFAULT_SETTINGS.useCustomFileNameTemplate,
+		);
+		settings.fileNameTemplate = ensureString(
+			raw.fileNameTemplate,
+			DEFAULT_SETTINGS.fileNameTemplate,
 		);
 
 		// Number with range validation

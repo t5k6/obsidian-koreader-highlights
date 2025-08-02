@@ -152,6 +152,8 @@ export interface KoreaderHighlightImporterSettings {
 	logLevel: 0 | 1 | 2 | 3; // 0=None, 1=Info, 2=Warn, 3=Error
 	logsFolder: string;
 	enableFullDuplicateCheck: boolean;
+	fileNameTemplate: string;
+	useCustomFileNameTemplate: boolean;
 	autoMergeOnAddition: boolean;
 	frontmatter: FrontmatterSettings;
 	maxHighlightGap: number;

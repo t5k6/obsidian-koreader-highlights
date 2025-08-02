@@ -1,10 +1,57 @@
 import { Setting } from "obsidian";
+import { FileNameGenerator } from "src/services/vault/FileNameGenerator";
 import { FrontmatterFieldModal } from "src/ui/FrontmatterFieldModal";
-import { booleanSetting } from "../SettingHelpers";
+import { booleanSetting, createSetting } from "../SettingHelpers";
 import { SettingsSection } from "../SettingsSection";
 
 export class FormattingSettingsSection extends SettingsSection {
 	protected renderContent(containerEl: HTMLElement): void {
+		booleanSetting(
+			containerEl,
+			"Use custom file name template",
+			"Define a custom naming scheme for imported highlight notes.",
+			() => this.plugin.settings.useCustomFileNameTemplate,
+			async (value) => {
+				this.plugin.settings.useCustomFileNameTemplate = value;
+				await this.plugin.saveSettings(true); // Force re-render
+			},
+		);
+
+		if (this.plugin.settings.useCustomFileNameTemplate) {
+			const setting = createSetting(
+				containerEl,
+				"File name template",
+				"Available placeholders: {{title}}, {{authors}}, {{importDate}}.",
+			);
+
+			const validator = new FileNameGenerator(this.plugin.loggingService);
+			const validationEl = setting.descEl.createDiv({
+				cls: "setting-item-description koreader-setting-validation",
+			});
+
+			const updateValidation = (value: string) => {
+				const { errors, warnings } = validator.validate(value);
+				const errorHtml = errors.map((e) => `<li>${e}</li>`).join("");
+				const warningHtml = warnings.map((w) => `<li>${w}</li>`).join("");
+				validationEl.innerHTML = `<ul>${errorHtml}${warningHtml}</ul>`;
+				validationEl.style.color =
+					errors.length > 0 ? "var(--text-error)" : "var(--text-muted)";
+			};
+
+			setting.addText((text) => {
+				text
+					.setPlaceholder("{{title}} - {{authors}}")
+					.setValue(this.plugin.settings.fileNameTemplate)
+					.onChange(async (value) => {
+						this.plugin.settings.fileNameTemplate = value;
+						updateValidation(value);
+						await this.plugin.saveSettings();
+					});
+			});
+
+			updateValidation(this.plugin.settings.fileNameTemplate);
+		}
+
 		new Setting(containerEl)
 			.setName("Frontmatter fields")
 			.setDesc("Choose which standard fields to EXCLUDE from frontmatter.")

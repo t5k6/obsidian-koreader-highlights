@@ -12,6 +12,7 @@ import { TemplateManager } from "src/services/parsing/TemplateManager";
 import { SqlJsManager } from "src/services/SqlJsManager";
 import { ContentGenerator } from "src/services/vault/ContentGenerator";
 import { DuplicateHandler } from "src/services/vault/DuplicateHandler";
+import { FileNameGenerator } from "src/services/vault/FileNameGenerator";
 import { LocalIndexService } from "src/services/vault/LocalIndexService";
 import { MergeService } from "src/services/vault/MergeService";
 import { SnapshotManager } from "src/services/vault/SnapshotManager";
@@ -44,6 +45,7 @@ export function registerServices(
 
 	// --- Level 0: Foundational ---
 	container.register(CacheManager, [LoggingService]);
+	container.register(FileNameGenerator, [LoggingService]);
 	container.register(FrontmatterGenerator, []);
 	container.register(SqlJsManager, []);
 
@@ -102,6 +104,7 @@ export function registerServices(
 		CacheManager,
 		FileSystemService,
 		LoggingService,
+		FileNameGenerator,
 	]);
 	container.register(LocalIndexService, [
 		PLUGIN_TOKEN,
@@ -116,6 +119,7 @@ export function registerServices(
 	container.register(ImportManager, [
 		APP_TOKEN,
 		PLUGIN_TOKEN,
+		FileNameGenerator,
 		SDRFinder,
 		MetadataParser,
 		DeviceStatisticsService,

@@ -10,11 +10,12 @@ import type {
 } from "src/types";
 import { ConfirmModal } from "src/ui/ConfirmModal";
 import type { CacheManager } from "src/utils/cache/CacheManager";
-import { generateObsidianFileName } from "src/utils/formatUtils";
+import { getFileNameWithoutExt } from "src/utils/formatUtils";
 import { extractHighlights } from "src/utils/highlightExtractor";
 import { getFrontmatterAndBody } from "src/utils/obsidianUtils";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
+import type { FileNameGenerator } from "./FileNameGenerator";
 import type { LocalIndexService } from "./LocalIndexService";
 import type { MergeService } from "./MergeService";
 import type { SnapshotManager } from "./SnapshotManager";
@@ -43,6 +44,7 @@ export class DuplicateHandler {
 		private cacheManager: CacheManager,
 		private fs: FileSystemService,
 		private loggingService: LoggingService,
+		private fileNameGenerator: FileNameGenerator,
 	) {
 		this.potentialDuplicatesCache = cacheManager.createMap(
 			"duplicate.potential",
@@ -313,16 +315,20 @@ export class DuplicateHandler {
 		contentProvider: () => Promise<string>,
 	): Promise<{ status: "created"; file: TFile }> {
 		const content = await contentProvider();
-		const fileName = generateObsidianFileName(
+		const fileNameWithExt = this.fileNameGenerator.generate(
+			{
+				useCustomTemplate: this.plugin.settings.useCustomFileNameTemplate,
+				template: this.plugin.settings.fileNameTemplate,
+				highlightsFolder: this.plugin.settings.highlightsFolder,
+			},
 			luaMetadata.docProps,
-			this.plugin.settings.highlightsFolder,
-			this.loggingService,
 			luaMetadata.originalFilePath,
 		);
+		const fileNameStem = getFileNameWithoutExt(fileNameWithExt);
 
 		const targetFile = await this.fs.createVaultFileSafely(
 			this.plugin.settings.highlightsFolder,
-			fileName,
+			fileNameStem, // Use the stem here
 			content,
 		);
 

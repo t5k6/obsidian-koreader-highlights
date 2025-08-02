@@ -2,8 +2,8 @@ import path from "node:path";
 import {
 	type App,
 	debounce,
-	normalizePath,
 	Notice,
+	normalizePath,
 	type TAbstractFile,
 	TFile,
 	TFolder,

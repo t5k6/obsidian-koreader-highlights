@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { type App, normalizePath, type TFile, type Vault } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import { normalizeFileNamePiece } from "src/utils/formatUtils";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 
@@ -52,7 +53,15 @@ export class SnapshotManager {
 	 */
 	public async createBackup(targetFile: TFile): Promise<void> {
 		const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-		const backupFileName = `${targetFile.basename}-${timestamp}.md`;
+		const safeBaseName = normalizeFileNamePiece(targetFile.basename).slice(
+			0,
+			50,
+		);
+		const pathHash = createHash("sha1")
+			.update(targetFile.path)
+			.digest("hex")
+			.slice(0, 8);
+		const backupFileName = `${safeBaseName}-${pathHash}-${timestamp}.md`;
 		const backupPath = path.join(this.backupDir, backupFileName);
 
 		try {

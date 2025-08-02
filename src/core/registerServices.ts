@@ -11,6 +11,7 @@ import { MetadataParser } from "src/services/parsing/MetadataParser";
 import { TemplateManager } from "src/services/parsing/TemplateManager";
 import { ContentGenerator } from "src/services/vault/ContentGenerator";
 import { DuplicateHandler } from "src/services/vault/DuplicateHandler";
+import { MergeService } from "src/services/vault/MergeService";
 import { SnapshotManager } from "src/services/vault/SnapshotManager";
 import { DuplicateHandlingModal } from "src/ui/DuplicateModal";
 import { CacheManager } from "src/utils/cache/CacheManager";
@@ -100,15 +101,22 @@ export function registerServices(
 		FileSystemService,
 		LOGGING_SERVICE_TOKEN,
 	]);
-	container.register(DuplicateHandler, [
+	container.register(MergeService, [
+		APP_TOKEN,
 		VAULT_TOKEN,
+		PLUGIN_TOKEN,
+		SnapshotManager,
+		FrontmatterGenerator,
+		ContentGenerator,
+		LOGGING_SERVICE_TOKEN,
+	]);
+	container.register(DuplicateHandler, [
 		APP_TOKEN,
 		DUPLICATE_MODAL_FACTORY_TOKEN,
-		FrontmatterGenerator,
 		PLUGIN_TOKEN,
-		ContentGenerator,
 		DatabaseService,
 		SnapshotManager,
+		MergeService,
 		CacheManager,
 		FileSystemService,
 		LOGGING_SERVICE_TOKEN,

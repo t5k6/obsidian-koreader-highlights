@@ -363,9 +363,9 @@ export class FileSystemService {
 	async *iterateNodeDirectory(
 		dirPath: string,
 	): AsyncIterable<import("node:fs").Dirent> {
-		let dirHandle: import("node:fs").Dir | undefined;
 		try {
-			dirHandle = await fsp.opendir(dirPath);
+			// The for-await-of loop will automatically handle opening and closing the directory handle.
+			const dirHandle = await fsp.opendir(dirPath);
 			for await (const dirent of dirHandle) {
 				yield dirent;
 			}
@@ -376,23 +376,16 @@ export class FileSystemService {
 				error,
 			);
 			if (fsError.isPermissionDenied) {
+				// This is a common, expected error for system folders, so we log it as info.
 				console.log(
 					`${this.LOG_PREFIX} Permission denied while scanning directory (skipping): ${dirPath}`,
 				);
-			} else {
+			} else if (!fsError.isNotFound) {
+				// Log other errors (except 'Not Found', which is also common) as warnings.
 				console.warn(
 					`${this.LOG_PREFIX} Could not fully read directory, skipping rest of its contents: ${dirPath}`,
 					error,
 				);
-			}
-		} finally {
-			if (dirHandle) {
-				await dirHandle.close().catch((closeError) => {
-					console.warn(
-						`${this.LOG_PREFIX} Non-critical error closing directory handle for: ${dirPath}`,
-						closeError,
-					);
-				});
 			}
 		}
 	}

@@ -1,0 +1,214 @@
+import type { MergeRegion } from "node-diff3";
+import { diff3Merge } from "node-diff3";
+import type { App, TFile, Vault } from "obsidian";
+import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import type { FrontmatterGenerator } from "src/services/parsing/FrontmatterGenerator";
+import type { Annotation, LuaMetadata } from "src/types";
+import { compareAnnotations, computeAnnotationId } from "src/utils/formatUtils";
+import { extractHighlights } from "src/utils/highlightExtractor";
+import { getFrontmatterAndBody } from "src/utils/obsidianUtils";
+import type { LoggingService } from "../LoggingService";
+import type { ContentGenerator } from "./ContentGenerator";
+import type { SnapshotManager } from "./SnapshotManager";
+
+export class MergeService {
+	private readonly SCOPE = "MergeService";
+
+	constructor(
+		private app: App,
+		private vault: Vault,
+		private plugin: KoreaderImporterPlugin,
+		private snapshotManager: SnapshotManager,
+		private frontmatterGenerator: FrontmatterGenerator,
+		private contentGenerator: ContentGenerator,
+		private loggingService: LoggingService,
+	) {}
+
+	/**
+	 * Performs a 2-way merge when no snapshot is available.
+	 * Merges annotations and frontmatter without conflict detection.
+	 * @param file - The existing file to merge into
+	 * @param luaMetadata - New metadata to merge
+	 * @returns Status indicating merge completion
+	 */
+	public async execute2WayMerge(
+		file: TFile,
+		luaMetadata: LuaMetadata,
+	): Promise<{ status: "merged"; file: TFile }> {
+		await this.snapshotManager.createBackup(file);
+		const { frontmatter: existingFm, body: existingBody } =
+			await getFrontmatterAndBody(this.app, file, this.loggingService);
+		const existingAnnotations = extractHighlights(
+			existingBody,
+			this.plugin.settings.commentStyle,
+		);
+
+		const mergedAnnotations = this.mergeAnnotationArrays(
+			existingAnnotations,
+			luaMetadata.annotations,
+		);
+
+		const newBody =
+			await this.contentGenerator.generateHighlightsContent(mergedAnnotations);
+
+		const mergedFm = this.frontmatterGenerator.mergeFrontmatterData(
+			existingFm ?? {},
+			luaMetadata,
+			this.plugin.settings.frontmatter,
+		);
+		const newFrontmatter = this.frontmatterGenerator.formatDataToYaml(
+			mergedFm,
+			{ useFriendlyKeys: true, sortKeys: true },
+		);
+
+		const finalContent = [newFrontmatter, newBody].filter(Boolean).join("\n\n");
+		await this.app.vault.modify(file, finalContent);
+
+		return { status: "merged", file };
+	}
+
+	/**
+	 * Performs a safe 3-way merge using snapshots to preserve user edits.
+	 * Adds conflict markers when automatic resolution isn't possible.
+	 * @param file - The existing file to merge into
+	 * @param baseContent - The snapshot content (common ancestor)
+	 * @param newFileContent - The new content from KOReader
+	 * @param luaMetadata - Metadata for frontmatter merging
+	 * @returns Status indicating merge completion
+	 */
+	public async execute3WayMerge(
+		file: TFile,
+		baseContent: string,
+		newFileContent: string,
+		luaMetadata: LuaMetadata,
+	): Promise<{ status: "merged"; file: TFile }> {
+		await this.snapshotManager.createBackup(file);
+
+		const parse = async (source: TFile | string) => {
+			const content = typeof source === "string" ? { content: source } : source;
+			return getFrontmatterAndBody(this.app, content, this.loggingService);
+		};
+
+		const base = await parse(baseContent);
+		const ours = await parse(file);
+		const theirs = await parse(newFileContent);
+
+		const mergeRegions = this.performSynchronousDiff3(
+			ours.body,
+			base.body,
+			theirs.body,
+		);
+
+		const mergedLines: string[] = [];
+		let hasConflict = false;
+		let initialConflictCalloutAdded = false;
+
+		for (const region of mergeRegions) {
+			if (region.ok) {
+				mergedLines.push(...region.ok);
+			} else if (region.conflict) {
+				hasConflict = true;
+
+				if (!initialConflictCalloutAdded) {
+					mergedLines.push(
+						`> [!caution] Merge Conflict Detected`,
+						`> This note contains conflicting changes between the version in your vault and the new version from KOReader. Please resolve the conflicts below and then remove the conflict blocks.`,
+					);
+					initialConflictCalloutAdded = true;
+				}
+
+				mergedLines.push(
+					`\n> [!conflict]- Conflict Start: Your Edits (Vault)`,
+					...region.conflict.a.map((line) => `> ${line}`),
+					`> [!tip]- Incoming Changes (KOReader)`,
+					...region.conflict.b.map((line) => `> ${line}`),
+					`> [!conflict]- Conflict End`,
+					`\n`,
+				);
+			}
+		}
+		const mergedBody = mergedLines.join("\n");
+
+		const mergedFm = this.frontmatterGenerator.mergeFrontmatterData(
+			ours.frontmatter ?? {},
+			luaMetadata,
+			this.plugin.settings.frontmatter,
+		);
+
+		mergedFm["last-merged"] = new Date().toISOString().slice(0, 10);
+		if (hasConflict) {
+			mergedFm.conflicts = "unresolved";
+		}
+
+		const finalFm = this.frontmatterGenerator.formatDataToYaml(mergedFm, {
+			useFriendlyKeys: true,
+			sortKeys: true,
+		});
+
+		const finalContent = `${finalFm}\n\n${mergedBody}`;
+
+		if (hasConflict) {
+			this.loggingService.warn(
+				this.SCOPE,
+				`Merge conflict detected in ${file.path}. Adding conflict callouts.`,
+			);
+		} else {
+			this.loggingService.info(
+				this.SCOPE,
+				`Successfully merged content for ${file.path} without conflicts.`,
+			);
+		}
+
+		await this.vault.modify(file, finalContent);
+		return { status: "merged", file };
+	}
+
+	/**
+	 * Performs a 3-way diff to detect conflicts between versions.
+	 * @param ours - Current vault version
+	 * @param base - Last imported version (snapshot)
+	 * @param theirs - New KOReader version
+	 * @returns Array of merge regions with conflicts marked
+	 */
+	private performSynchronousDiff3(
+		ours: string,
+		base: string,
+		theirs: string,
+	): MergeRegion<string>[] {
+		return diff3Merge(ours.split("\n"), base.split("\n"), theirs.split("\n"));
+	}
+
+	/**
+	 * Merges two arrays of annotations, avoiding duplicates.
+	 * Uses highlight keys for deduplication.
+	 * @param existing - Existing annotations in the vault
+	 * @param incoming - New annotations from KOReader
+	 * @returns Merged array sorted by position
+	 */
+	private mergeAnnotationArrays(
+		existing: Annotation[],
+		incoming: Annotation[],
+	): Annotation[] {
+		const map = new Map(
+			existing.map((ann) => [this.getHighlightKey(ann), ann]),
+		);
+
+		for (const ann of incoming) {
+			const k = this.getHighlightKey(ann);
+			if (!map.has(k)) {
+				map.set(k, ann);
+			}
+		}
+
+		return Array.from(map.values()).sort(compareAnnotations);
+	}
+
+	/**
+	 * Gets a unique key for an annotation used for deduplication.
+	 * @param annotation - The annotation to get a key for
+	 * @returns Unique identifier string
+	 */
+	public getHighlightKey(annotation: Annotation): string {
+		return annotation.id ?? computeAnnotationId(annotation);
+	}
+}

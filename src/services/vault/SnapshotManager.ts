@@ -2,10 +2,11 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { type App, normalizePath, type TFile, type Vault } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
-import { logger } from "src/utils/logging";
 import type { FileSystemService } from "../FileSystemService";
+import type { LoggingService } from "../LoggingService";
 
 export class SnapshotManager {
+	private readonly SCOPE = "SnapshotManager";
 	private snapshotDir: string;
 	private backupDir: string;
 
@@ -14,30 +15,11 @@ export class SnapshotManager {
 		private plugin: KoreaderImporterPlugin,
 		private vault: Vault,
 		private fs: FileSystemService,
+		private loggingService: LoggingService,
 	) {
 		const pluginDataDir = `${this.plugin.app.vault.configDir}/plugins/${this.plugin.manifest.id}`;
 		this.snapshotDir = normalizePath(`${pluginDataDir}/snapshots`);
 		this.backupDir = normalizePath(`${pluginDataDir}/backups`);
-	}
-
-	/**
-	 * Ensures a directory exists, creating it if necessary.
-	 * @param dirPath - Path to the directory
-	 */
-	private async ensureDir(dirPath: string): Promise<void> {
-		try {
-			const adapter = this.vault.adapter;
-			if (!(await adapter.exists(dirPath))) {
-				await adapter.mkdir(dirPath);
-				logger.info(`SnapshotManager: Directory created at ${dirPath}`);
-			}
-		} catch (error) {
-			logger.error(
-				`SnapshotManager: Failed to create directory: ${dirPath}`,
-				error,
-			);
-			throw new Error(`Failed to ensure directory exists: ${dirPath}`);
-		}
 	}
 
 	/**
@@ -50,12 +32,14 @@ export class SnapshotManager {
 		try {
 			const content = await this.app.vault.read(targetFile);
 			await this.fs.writeNodeFile(snapshotPath, content);
-			logger.info(
-				`SnapshotManager: Created snapshot for ${targetFile.path} at ${snapshotPath}`,
+			this.loggingService.info(
+				this.SCOPE,
+				`Created snapshot for ${targetFile.path} at ${snapshotPath}`,
 			);
 		} catch (error) {
-			logger.error(
-				`SnapshotManager: Failed to write snapshot for ${targetFile.path}`,
+			this.loggingService.error(
+				this.SCOPE,
+				`Failed to write snapshot for ${targetFile.path}`,
 				error,
 			);
 		}
@@ -74,12 +58,14 @@ export class SnapshotManager {
 		try {
 			const content = await this.app.vault.read(targetFile);
 			await this.fs.writeNodeFile(backupPath, content);
-			logger.info(
-				`SnapshotManager: Created backup for ${targetFile.path} at ${backupPath}`,
+			this.loggingService.info(
+				this.SCOPE,
+				`Created backup for ${targetFile.path} at ${backupPath}`,
 			);
 		} catch (error) {
-			logger.error(
-				`SnapshotManager: Failed to create backup for ${targetFile.path}`,
+			this.loggingService.error(
+				this.SCOPE,
+				`Failed to create backup for ${targetFile.path}`,
 				error,
 			);
 		}
@@ -99,8 +85,9 @@ export class SnapshotManager {
 			}
 			return null;
 		} catch (error) {
-			logger.error(
-				`SnapshotManager: Failed to read snapshot for ${targetFile.path}`,
+			this.loggingService.error(
+				this.SCOPE,
+				`Failed to read snapshot for ${targetFile.path}`,
 				error,
 			);
 			return null;

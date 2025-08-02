@@ -8,8 +8,8 @@ import type {
 } from "src/types";
 import { type CacheManager, memoizeAsync } from "src/utils/cache/CacheManager";
 import { ConcurrencyLimiter } from "src/utils/concurrency";
-import { logger } from "src/utils/logging";
 import type { FileSystemService } from "../FileSystemService";
+import type { LoggingService } from "../LoggingService";
 
 /* ------------------------------------------------------------------ */
 /*                              CONSTS                                */
@@ -31,6 +31,7 @@ const io = <T>(fn: () => Promise<T>) => ioLimiter.schedule(fn);
 /* ------------------------------------------------------------------ */
 
 export class SDRFinder implements SettingsObserver {
+	private readonly SCOPE = "SDRFinder";
 	private sdrDirCache: Map<string, Promise<string[]>>;
 	private metadataNameCache: Map<string, string | null>;
 	private findSdrDirectoriesWithMetadataMemoized: (
@@ -42,6 +43,7 @@ export class SDRFinder implements SettingsObserver {
 		private plugin: KoreaderImporterPlugin,
 		private cacheManager: CacheManager,
 		private fs: FileSystemService,
+		private loggingService: LoggingService,
 	) {
 		this.sdrDirCache = cacheManager.createMap("sdr.dirPromise");
 		this.metadataNameCache = cacheManager.createMap("sdr.metaName");
@@ -84,10 +86,14 @@ export class SDRFinder implements SettingsObserver {
 
 		const fullPath = joinPath(sdrDir, name);
 		try {
-			logger.info("SDRFinder: Reading metadata:", fullPath);
+			this.loggingService.info(this.SCOPE, "Reading metadata:", fullPath);
 			return await this.fs.readNodeFile(fullPath);
 		} catch (err) {
-			logger.error(`SDRFinder: Failed to read metadata file: ${fullPath}`, err);
+			this.loggingService.error(
+				this.SCOPE,
+				`Failed to read metadata file: ${fullPath}`,
+				err,
+			);
 			return null;
 		}
 	}
@@ -99,7 +105,10 @@ export class SDRFinder implements SettingsObserver {
 		this.updateCacheKey(newSettings); // Pass new settings to update the key
 		if (this.cacheKey !== prevKey) {
 			this.cacheManager.clear("sdr.*");
-			logger.info("SDRFinder: Settings changed, SDR caches cleared.");
+			this.loggingService.info(
+				this.SCOPE,
+				"Settings changed, SDR caches cleared.",
+			);
 		}
 	}
 
@@ -129,7 +138,7 @@ export class SDRFinder implements SettingsObserver {
 
 		const { koreaderMountPoint, excludedFolders } = this.plugin.settings;
 		if (koreaderMountPoint === null) {
-			logger.warn(`SDRFinder: Found mountpoint to be null.`);
+			this.loggingService.warn(this.SCOPE, `Found mountpoint to be null.`);
 			return [];
 		}
 		const root = koreaderMountPoint;
@@ -139,8 +148,9 @@ export class SDRFinder implements SettingsObserver {
 
 		const results: string[] = [];
 		await this.walk(root, excluded, results);
-		logger.info(
-			`SDRFinder: Scan finished. Found ${results.length} valid SDR directories.`,
+		this.loggingService.info(
+			this.SCOPE,
+			`Scan finished. Found ${results.length} valid SDR directories.`,
 		);
 		return results;
 	}
@@ -217,21 +227,27 @@ export class SDRFinder implements SettingsObserver {
 		if (koreaderMountPoint && (await this.isUsableDir(koreaderMountPoint)))
 			return true;
 
-		logger.warn(
-			"SDRFinder: Configured mount point not accessible – attempting auto-detect.",
+		this.loggingService.warn(
+			this.SCOPE,
+			"Configured mount point not accessible – attempting auto-detect.",
 		);
 
 		for (const candidate of await this.detectCandidates()) {
 			if (await this.isUsableDir(candidate)) {
 				this.plugin.settings.koreaderMountPoint = candidate;
 				new Notice(`KOReader: auto-detected device at "${candidate}"`, 5_000);
-				logger.info("Using auto-detected mount point:", candidate);
+				this.loggingService.info(
+					this.SCOPE,
+					"Using auto-detected mount point:",
+					candidate,
+				);
 				this.updateCacheKey(this.plugin.settings);
 				return true;
 			}
 		}
-		logger.warn(
-			"SDRFinder: Failed to find or access any KOReader mount point.",
+		this.loggingService.warn(
+			this.SCOPE,
+			"Failed to find or access any KOReader mount point.",
 		);
 		return false;
 	}

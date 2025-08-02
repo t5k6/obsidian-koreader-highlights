@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { parse } from "node:path";
+import type { LoggingService } from "src/services/LoggingService";
 import type { Annotation } from "../types";
-import { logger } from "./logging";
 
 const DEFAULT_AUTHOR = "Unknown Author";
 const DEFAULT_TITLE = "Untitled";
@@ -42,9 +42,11 @@ const CFI_REGEX_COMBINED =
 export function generateObsidianFileName(
 	docProps: { title?: string; authors?: string },
 	highlightsFolder: string,
+	logger: LoggingService,
 	originalSdrName?: string,
 	maxTotalPathLength = 255,
 ): string {
+	const SCOPE = "formatUtils";
 	const effectiveAuthor = docProps.authors?.trim();
 	const effectiveTitle = docProps.title?.trim();
 
@@ -61,7 +63,6 @@ export function generateObsidianFileName(
 		: undefined;
 
 	if (!isAuthorEffectivelyMissing && !isTitleEffectivelyMissing) {
-		// Case 1: BOTH author and title are known and not default.
 		const authorArray = (effectiveAuthor || "")
 			.split(",")
 			.map((author) => normalizeFileNamePiece(author.trim()))
@@ -70,7 +71,6 @@ export function generateObsidianFileName(
 		const normalizedTitle = normalizeFileNamePiece(effectiveTitle);
 		baseName = `${authorsString}${TITLE_SEPARATOR}${normalizedTitle}`;
 	} else if (!isAuthorEffectivelyMissing) {
-		// Case 2: Author is known, but title is missing.
 		const authorArray = (effectiveAuthor || "")
 			.split(",")
 			.map((author) => normalizeFileNamePiece(author.trim()))
@@ -81,27 +81,28 @@ export function generateObsidianFileName(
 			: DEFAULT_TITLE;
 		baseName = `${authorsString}${TITLE_SEPARATOR}${titleFallback}`;
 		logger.warn(
-			`formatUtils: Using filename based on author and SDR/default title: ${baseName}`,
+			SCOPE,
+			`Using filename based on author and SDR/default title: ${baseName}`,
 		);
 	} else if (!isTitleEffectivelyMissing) {
-		// Case 3: Title is known, but author is missing.
 		baseName = normalizeFileNamePiece(effectiveTitle);
 		logger.warn(
-			`formatUtils: Using filename based on title (author missing): ${baseName}`,
+			SCOPE,
+			`Using filename based on title (author missing): ${baseName}`,
 		);
 	} else {
-		// Case 4: BOTH are missing. Use ONLY the original SDR name (skip docProps.authors entirely).
 		baseName = sdrBaseName ? simplifySdrName(sdrBaseName) : DEFAULT_TITLE;
 		logger.warn(
-			`formatUtils: Using cleaned SDR name (author/title missing): ${baseName}`,
+			SCOPE,
+			`Using cleaned SDR name (author/title missing): ${baseName}`,
 		);
 	}
 
-	// Final safety net: if baseName is somehow empty, use DEFAULT_TITLE.
 	if (!baseName?.trim()) {
 		baseName = DEFAULT_TITLE;
 		logger.warn(
-			`formatUtils: Filename defaulted to "${DEFAULT_TITLE}" due to empty base after processing.`,
+			SCOPE,
+			`Filename defaulted to "${DEFAULT_TITLE}" due to empty base after processing.`,
 		);
 	}
 
@@ -111,7 +112,8 @@ export function generateObsidianFileName(
 
 	if (maxLengthForName <= 0) {
 		logger.warn(
-			`formatUtils: highlightsFolder path is too long; falling back to default file name "${DEFAULT_TITLE}${FILE_EXTENSION}".`,
+			SCOPE,
+			`highlightsFolder path is too long; falling back to default file name "${DEFAULT_TITLE}${FILE_EXTENSION}".`,
 		);
 		return DEFAULT_TITLE + FILE_EXTENSION;
 	}
@@ -120,12 +122,13 @@ export function generateObsidianFileName(
 	if (baseName.length > maxLengthForName) {
 		finalName = baseName.slice(0, maxLengthForName);
 		logger.warn(
-			`formatUtils: Filename truncated: "${baseName}${FILE_EXTENSION}" -> "${finalName}${FILE_EXTENSION}" due to path length constraints.`,
+			SCOPE,
+			`Filename truncated: "${baseName}${FILE_EXTENSION}" -> "${finalName}${FILE_EXTENSION}" due to path length constraints.`,
 		);
 	}
 
 	const fullPath = `${highlightsFolder}/${finalName}${FILE_EXTENSION}`;
-	logger.warn(`Full path length: ${fullPath.length}, Path: ${fullPath}`);
+	logger.warn(SCOPE, `Full path length: ${fullPath.length}, Path: ${fullPath}`);
 
 	return `${finalName}${FILE_EXTENSION}`;
 }
@@ -271,11 +274,12 @@ export function parsePosition(
  * @param cfi - The CFI string to parse
  * @returns Parsed CFI parts or null if invalid
  */
-export function parseCfi(cfi: string): CfiParts | null {
+export function parseCfi(cfi: string, logger: LoggingService): CfiParts | null {
+	const SCOPE = "formatUtils:CFI";
 	const match = cfi.match(CFI_REGEX_COMBINED);
 
 	if (!match) {
-		logger.warn(`formatUtils: Could not parse CFI string: "${cfi}"`);
+		logger.warn(SCOPE, `Could not parse CFI string: "${cfi}"`);
 		return null;
 	}
 
@@ -292,9 +296,7 @@ export function parseCfi(cfi: string): CfiParts | null {
 		textNodeIndexStr = match[5];
 		offsetStr = match[6];
 	} else {
-		logger.warn(
-			`formatUtils: Could not determine offset structure in CFI: "${cfi}"`,
-		);
+		logger.warn(SCOPE, `Could not determine offset structure in CFI: "${cfi}"`);
 		return null;
 	}
 
@@ -303,7 +305,8 @@ export function parseCfi(cfi: string): CfiParts | null {
 
 	if (Number.isNaN(offset) || Number.isNaN(textNodeIndex)) {
 		logger.warn(
-			`formatUtils: Error parsing offset/text node index from CFI: "${cfi}"`,
+			SCOPE,
+			`Error parsing offset/text node index from CFI: "${cfi}"`,
 		);
 		return null;
 	}
@@ -421,25 +424,28 @@ export function formatDate(dateStr: string): string {
  * @param format The format string.
  * @returns The formatted date string, or an empty string on error.
  */
-export function formatDateWithFormat(dateStr: string, format: string): string {
+export function formatDateWithFormat(
+	dateStr: string,
+	format: string,
+	logger?: LoggingService,
+): string {
 	if (!dateStr || !format) return "";
 	try {
 		const date = new Date(dateStr);
-		// getTime() returns NaN for invalid dates
 		if (Number.isNaN(date.getTime())) {
 			throw new Error("Invalid date");
 		}
-
 		return format
 			.replace(/YYYY/g, String(date.getFullYear()))
 			.replace(/MM/g, String(date.getMonth() + 1).padStart(2, "0"))
 			.replace(/DD/g, String(date.getDate()).padStart(2, "0"));
 	} catch (e) {
-		logger.warn(
-			`formatDateWithFormat: Could not parse or format date "${dateStr}" with format "${format}"`,
+		logger?.warn(
+			"formatUtils:Date",
+			`Could not parse or format date "${dateStr}" with format "${format}"`,
 			e,
 		);
-		return ""; // Return empty string on failure
+		return "";
 	}
 }
 
@@ -448,16 +454,18 @@ export function formatDateWithFormat(dateStr: string, format: string): string {
  * @param dateStr The ISO-like date string.
  * @returns A locale-specific date string.
  */
-export function formatDateLocale(dateStr: string): string {
+export function formatDateLocale(
+	dateStr: string,
+	logger?: LoggingService,
+): string {
 	try {
 		return new Date(dateStr).toLocaleDateString(undefined, {
-			// 'undefined' uses the system locale
 			year: "numeric",
 			month: "short",
 			day: "numeric",
 		});
 	} catch (e) {
-		logger.warn(`formatDateLocale: Could not format date "${dateStr}"`, e);
+		logger?.warn("formatUtils:Date", `Could not format date "${dateStr}"`, e);
 		return "";
 	}
 }

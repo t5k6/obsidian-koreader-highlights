@@ -1,5 +1,5 @@
+import type { LoggingService } from "src/services/LoggingService";
 import type { AsyncLoader, Cache, Disposable } from "src/types";
-import { logger } from "../logging";
 import { LruCache } from "./LruCache";
 
 /**
@@ -7,7 +7,10 @@ import { LruCache } from "./LruCache";
  * This centralizes cache management, removing duplicated logic from other services.
  */
 export class CacheManager implements Disposable {
+	private readonly SCOPE = "CacheManager";
 	private caches = new Map<string, Cache<unknown, unknown>>();
+
+	constructor(private loggingService: LoggingService) {}
 
 	/* ---------- Factory Methods ---------- */
 
@@ -42,8 +45,9 @@ export class CacheManager implements Disposable {
 		cache: T,
 	): T {
 		if (this.caches.has(name)) {
-			logger.warn(
-				`CacheManager: Overwriting already registered cache "${name}"`,
+			this.loggingService.warn(
+				this.SCOPE,
+				`Overwriting already registered cache "${name}"`,
 			);
 		}
 		this.caches.set(name, cache);
@@ -70,7 +74,10 @@ export class CacheManager implements Disposable {
 			for (const cache of this.caches.values()) {
 				cache.clear();
 			}
-			logger.info(`CacheManager: Cleared all ${this.caches.size} caches.`);
+			this.loggingService.info(
+				this.SCOPE,
+				`Cleared all ${this.caches.size} caches.`,
+			);
 			return;
 		}
 
@@ -78,8 +85,9 @@ export class CacheManager implements Disposable {
 		for (const [name, cache] of this.caches.entries()) {
 			if (regex.test(name)) {
 				cache.clear();
-				logger.info(
-					`CacheManager: Cleared cache "${name}" via pattern "${pattern}"`,
+				this.loggingService.info(
+					this.SCOPE,
+					`Cleared cache "${name}" via pattern "${pattern}"`,
 				);
 			}
 		}
@@ -91,7 +99,7 @@ export class CacheManager implements Disposable {
 	public dispose(): void {
 		this.clear();
 		this.caches.clear();
-		logger.info("CacheManager: Disposed and cleared registry.");
+		this.loggingService.info(this.SCOPE, "Disposed and cleared registry.");
 	}
 }
 

@@ -105,7 +105,7 @@ export function externalFolderSetting(
 		.addText((text) => {
 			text.setPlaceholder(placeholder).setValue(get());
 			text.inputEl.addEventListener("blur", async () => {
-				const path = text.getValue().trim(); // External paths are not vault-relative
+				const path = text.getValue().trim();
 				text.setValue(path);
 				await set(path);
 			});

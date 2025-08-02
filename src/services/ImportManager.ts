@@ -7,7 +7,6 @@ import {
 	convertCommentStyle,
 	extractHighlightsWithStyle,
 } from "src/utils/highlightExtractor";
-import { logger } from "src/utils/logging";
 import { getFrontmatterAndBody } from "src/utils/obsidianUtils";
 import {
 	addSummary,
@@ -18,6 +17,7 @@ import {
 } from "../types";
 import type { DatabaseService } from "./DatabaseService";
 import type { SDRFinder } from "./device/SDRFinder";
+import type { LoggingService } from "./LoggingService";
 import type { FrontmatterGenerator } from "./parsing/FrontmatterGenerator";
 import type { MetadataParser } from "./parsing/MetadataParser";
 import type { ContentGenerator } from "./vault/ContentGenerator";
@@ -25,6 +25,8 @@ import type { DuplicateHandler } from "./vault/DuplicateHandler";
 import type { SnapshotManager } from "./vault/SnapshotManager";
 
 export class ImportManager {
+	private readonly SCOPE = "ImportManager";
+
 	constructor(
 		private readonly app: App,
 		private readonly plugin: KoreaderImporterPlugin,
@@ -35,6 +37,7 @@ export class ImportManager {
 		private readonly contentGenerator: ContentGenerator,
 		private readonly duplicateHandler: DuplicateHandler,
 		private readonly snapshotManager: SnapshotManager,
+		private readonly loggingService: LoggingService,
 	) {}
 
 	/**
@@ -44,12 +47,15 @@ export class ImportManager {
 	 * @returns Promise that resolves when import is complete
 	 */
 	async importHighlights(): Promise<void> {
-		logger.info("ImportManager: Starting KOReader highlight import process…");
+		this.loggingService.info(
+			this.SCOPE,
+			"Starting KOReader highlight import process…",
+		);
 
 		const sdrPaths = await this.sdrFinder.findSdrDirectoriesWithMetadata();
 		if (!sdrPaths?.length) {
 			new Notice("No KOReader highlight files found (.sdr with metadata.lua).");
-			logger.info("ImportManager: No SDR files found to import.");
+			this.loggingService.info(this.SCOPE, "No SDR files found to import.");
 			return;
 		}
 
@@ -57,7 +63,7 @@ export class ImportManager {
 			6,
 			Math.max(2, navigator.hardwareConcurrency || 4),
 		);
-		logger.info(`ImportManager: Import concurrency = ${poolSize}`);
+		this.loggingService.info(this.SCOPE, `Import concurrency = ${poolSize}`);
 
 		const modal = new ProgressModal(this.app);
 		modal.open();
@@ -101,13 +107,14 @@ export class ImportManager {
 				} skipped • ${summary.errors} error(s)`,
 				10_000,
 			);
-			logger.info("ImportManager: Import process finished", summary);
+			this.loggingService.info(this.SCOPE, "Import process finished", summary);
 		} catch (err: any) {
 			if (err?.name === "AbortError") {
 				new Notice("Import cancelled by user.");
 			} else {
-				logger.error(
-					"ImportManager: Critical error during highlight import process:",
+				this.loggingService.error(
+					this.SCOPE,
+					"Critical error during highlight import process:",
 					err,
 				);
 				new Notice("KOReader Importer: critical error. Check console.");
@@ -115,7 +122,7 @@ export class ImportManager {
 		} finally {
 			clearInterval(progressTicker);
 
-			logger.info("ImportManager: Flushing database index …");
+			this.loggingService.info(this.SCOPE, "Flushing database index …");
 			await this.databaseService.flushIndex();
 
 			modal.close();
@@ -133,8 +140,9 @@ export class ImportManager {
 		try {
 			const luaMetadata = await this.metadataParser.parseFile(sdrPath);
 			if (!luaMetadata?.annotations?.length) {
-				logger.info(
-					`ImportManager: Skipping – no annotations found in ${sdrPath}`,
+				this.loggingService.info(
+					this.SCOPE,
+					`Skipping – no annotations found in ${sdrPath}`,
 				);
 				summary.skipped++;
 				return summary;
@@ -144,8 +152,9 @@ export class ImportManager {
 
 			if (!luaMetadata.docProps.title) {
 				luaMetadata.docProps.title = getFileNameWithoutExt(sdrPath);
-				logger.warn(
-					`ImportManager: Metadata missing title for ${sdrPath}, using filename as fallback.`,
+				this.loggingService.warn(
+					this.SCOPE,
+					`Metadata missing title for ${sdrPath}, using filename as fallback.`,
 				);
 			}
 
@@ -155,7 +164,7 @@ export class ImportManager {
 			summary.automerged += fileSummary.automerged;
 			summary.skipped += fileSummary.skipped;
 		} catch (err) {
-			logger.error(`ImportManager: Error processing ${sdrPath}`, err);
+			this.loggingService.error(this.SCOPE, `Error processing ${sdrPath}`, err);
 			summary.errors++;
 		}
 
@@ -187,8 +196,9 @@ export class ImportManager {
 		) {
 			luaMetadata.docProps.authors = stats.book.authors;
 		}
-		logger.info(
-			`ImportManager: Enriched metadata for "${title}" with stats DB info.`,
+		this.loggingService.info(
+			this.SCOPE,
+			`Enriched metadata for "${title}" with stats DB info.`,
 		);
 	}
 
@@ -258,8 +268,9 @@ export class ImportManager {
 	 * @returns Promise that resolves when all files have been converted
 	 */
 	async convertAllFilesToCommentStyle(): Promise<void> {
-		logger.info(
-			"ImportManager: Starting comment style conversion for all highlight files…",
+		this.loggingService.info(
+			this.SCOPE,
+			"Starting comment style conversion for all highlight files…",
 		);
 
 		const targetStyle = this.plugin.settings.commentStyle;
@@ -310,15 +321,17 @@ export class ImportManager {
 				`Comment style conversion complete: ${counts.converted} files converted, ${counts.skipped} files skipped.`,
 				8000,
 			);
-			logger.info(
-				`ImportManager: Comment style conversion finished - ${counts.converted} converted, ${counts.skipped} skipped`,
+			this.loggingService.info(
+				this.SCOPE,
+				`Comment style conversion finished - ${counts.converted} converted, ${counts.skipped} skipped`,
 			);
 		} catch (err: any) {
 			if (err?.name === "AbortError") {
 				new Notice("Comment style conversion cancelled by user.");
 			} else {
-				logger.error(
-					"ImportManager: Error during comment style conversion:",
+				this.loggingService.error(
+					this.SCOPE,
+					"Error during comment style conversion:",
 					err,
 				);
 				new Notice(
@@ -339,11 +352,9 @@ export class ImportManager {
 		// Don't care if we want none anyway
 		if (targetStyle === "none") return;
 
-		const folder = <TFolder>(
-			this.app.vault.getAbstractFileByPath(
-				this.plugin.settings.highlightsFolder,
-			)
-		);
+		const folder = this.app.vault.getAbstractFileByPath(
+			this.plugin.settings.highlightsFolder,
+		) as TFolder;
 		if (!folder || !folder.children) return;
 
 		const sampleFiles = folder.children
@@ -379,8 +390,9 @@ export class ImportManager {
 				`Warning: Some files appear to have no comment markers. Converting from "None" style to ${targetStyle} style cannot restore tracking information. New imports may create duplicates.`,
 				8000,
 			);
-			logger.warn(
-				"ImportManager: Detected files without KOHL comments during conversion to comment style",
+			this.loggingService.warn(
+				this.SCOPE,
+				"Detected files without KOHL comments during conversion to comment style",
 			);
 		}
 	}
@@ -390,16 +402,15 @@ export class ImportManager {
 	 * @returns Promise resolving to array of files, or null if no files found
 	 */
 	private async getHighlightFilesToConvert(): Promise<TFile[] | null> {
-		const folder = <TFolder>(
-			this.app.vault.getAbstractFileByPath(
-				this.plugin.settings.highlightsFolder,
-			)
-		);
+		const folder = this.app.vault.getAbstractFileByPath(
+			this.plugin.settings.highlightsFolder,
+		) as TFolder;
 
 		if (!folder || folder.children === undefined) {
 			new Notice("Highlights folder not found. No files to convert.");
-			logger.warn(
-				"ImportManager: Highlights folder not found for comment style conversion.",
+			this.loggingService.warn(
+				this.SCOPE,
+				"Highlights folder not found for comment style conversion.",
 			);
 			return null;
 		}
@@ -410,7 +421,7 @@ export class ImportManager {
 
 		if (files.length === 0) {
 			new Notice("No markdown files found in highlights folder.");
-			logger.info("ImportManager: No files found to convert.");
+			this.loggingService.info(this.SCOPE, "No files found to convert.");
 			return null;
 		}
 
@@ -429,7 +440,11 @@ export class ImportManager {
 		counts: { converted: number; skipped: number },
 	): Promise<void> {
 		try {
-			const { frontmatter, body } = await getFrontmatterAndBody(this.app, file);
+			const { frontmatter, body } = await getFrontmatterAndBody(
+				this.app,
+				file,
+				this.loggingService,
+			);
 
 			if (targetStyle === "none") {
 				await this.convertToNoneStyle(file, body, frontmatter, counts);
@@ -443,7 +458,11 @@ export class ImportManager {
 				);
 			}
 		} catch (error) {
-			logger.error(`ImportManager: Error converting file ${file.path}:`, error);
+			this.loggingService.error(
+				this.SCOPE,
+				`Error converting file ${file.path}:`,
+				error,
+			);
 			counts.skipped++;
 		}
 	}
@@ -464,7 +483,10 @@ export class ImportManager {
 		// Remove any existing KOHL comments
 		const newBody = convertCommentStyle(body, "html", "none"); // This removes all comments
 		counts.converted++;
-		logger.info(`ImportManager: Removing KOHL comments from ${file.path}`);
+		this.loggingService.info(
+			this.SCOPE,
+			`Removing KOHL comments from ${file.path}`,
+		);
 
 		const newContent = this.reconstructFileContent(frontmatter, newBody);
 		await this.app.vault.modify(file, newContent);
@@ -491,36 +513,32 @@ export class ImportManager {
 			targetStyle,
 		);
 
-		// Check if this file has content but no KOHL comments (could be "none" style)
 		if (annotations.length === 0 && body.trim().length > 100) {
-			// This file likely has "none" style - no comments to convert from
-			logger.info(
-				`ImportManager: File ${file.path} appears to have no KOHL comments - likely "none" style`,
+			this.loggingService.info(
+				this.SCOPE,
+				`File ${file.path} appears to have no KOHL comments - likely "none" style`,
 			);
-			counts.skipped++; // Can't convert from none to comment style
+			counts.skipped++;
 			return;
 		}
 
 		if (annotations.length === 0) {
-			// No highlights found at all, skip
 			counts.skipped++;
 			return;
 		}
 
 		let newBody = body;
 
-		// Convert comment style if needed
 		if (usedStyle && usedStyle !== targetStyle) {
 			newBody = convertCommentStyle(body, usedStyle, targetStyle);
 			counts.converted++;
-			logger.info(
-				`ImportManager: Converting ${file.path} from ${usedStyle} to ${targetStyle} style`,
+			this.loggingService.info(
+				this.SCOPE,
+				`Converting ${file.path} from ${usedStyle} to ${targetStyle} style`,
 			);
 		} else if (usedStyle === targetStyle) {
-			// Already correct style, but we still "rewrite" to ensure consistency
 			counts.converted++;
 		} else {
-			// No KOHL comments found, skip
 			counts.skipped++;
 			return;
 		}

@@ -1,23 +1,16 @@
-import { type ButtonComponent, Notice } from "obsidian";
-import { logger } from "./logging";
+import type { ButtonComponent } from "obsidian";
 
 export async function runPluginAction(
 	action: () => Promise<void>,
 	options: {
-		successNotice?: string;
-		failureNotice: string;
 		button?: ButtonComponent;
 		inProgressText?: string;
 		completedText?: string;
 	},
 ): Promise<void> {
-	const {
-		button,
-		successNotice,
-		failureNotice,
-		inProgressText,
-		completedText,
-	} = options;
+	const { button, inProgressText, completedText } = options;
+
+	const originalText = button?.buttonEl.innerText;
 
 	try {
 		if (button) {
@@ -29,19 +22,16 @@ export async function runPluginAction(
 
 		await action();
 	} catch (error) {
-		logger.error("actionUtils: Action failed", failureNotice, error);
-		new Notice(`${failureNotice}. Check console for details.`);
+		// Re-throw the error to be handled by the caller.
+		// The caller is responsible for logging and user notification.
+		throw error;
 	} finally {
 		if (button) {
 			button.setDisabled(false);
-			if (completedText) {
-				button.setButtonText(completedText);
+			const textToShow = completedText || originalText;
+			if (textToShow) {
+				button.setButtonText(textToShow);
 			}
-		}
-
-		// Show success notice after button state is restored
-		if (successNotice) {
-			new Notice(successNotice);
 		}
 	}
 }

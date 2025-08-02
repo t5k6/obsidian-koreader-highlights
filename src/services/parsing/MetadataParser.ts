@@ -14,9 +14,7 @@ import {
 } from "src/types";
 import type { CacheManager } from "src/utils/cache/CacheManager";
 import type { LruCache } from "src/utils/cache/LruCache";
-import { createLogger, logger } from "src/utils/logging";
-
-const log = createLogger("MetadataParser");
+import type { LoggingService } from "../LoggingService";
 
 const DEFAULT_DOC_PROPS: DocProps = {
 	authors: "",
@@ -28,12 +26,14 @@ const DEFAULT_DOC_PROPS: DocProps = {
 };
 
 export class MetadataParser {
+	private readonly SCOPE = "MetadataParser";
 	private parsedMetadataCache: LruCache<string, LuaMetadata>;
 	private stringCache: LruCache<string, string>;
 
 	constructor(
 		private sdrFinder: SDRFinder,
 		private cacheManager: CacheManager,
+		private loggingService: LoggingService, // Injected dependency
 	) {
 		this.parsedMetadataCache = cacheManager.createLru("metadata.parsed", 50);
 		this.stringCache = cacheManager.createLru("metadata.strings", 2000);
@@ -48,19 +48,24 @@ export class MetadataParser {
 	async parseFile(sdrDirectoryPath: string): Promise<LuaMetadata | null> {
 		const cached = this.parsedMetadataCache.get(sdrDirectoryPath);
 		if (cached) {
-			logger.info(
-				`MetadataParser: Using cached metadata for: ${sdrDirectoryPath}`,
+			this.loggingService.info(
+				this.SCOPE,
+				`Using cached metadata for: ${sdrDirectoryPath}`,
 			);
 			return cached;
 		}
 
-		logger.info(`MetadataParser: Parsing metadata for: ${sdrDirectoryPath}`);
+		this.loggingService.info(
+			this.SCOPE,
+			`Parsing metadata for: ${sdrDirectoryPath}`,
+		);
 		try {
 			const luaContent =
 				await this.sdrFinder.readMetadataFileContent(sdrDirectoryPath);
 			if (!luaContent) {
-				logger.warn(
-					`MetadataParser: No metadata content found or readable in: ${sdrDirectoryPath}`,
+				this.loggingService.warn(
+					this.SCOPE,
+					`No metadata content found or readable in: ${sdrDirectoryPath}`,
 				);
 				return null;
 			}
@@ -75,8 +80,9 @@ export class MetadataParser {
 			this.parsedMetadataCache.set(sdrDirectoryPath, fullMetadata);
 			return fullMetadata;
 		} catch (error) {
-			logger.error(
-				`MetadataParser: Error parsing metadata file in ${sdrDirectoryPath}:`,
+			this.loggingService.error(
+				this.SCOPE,
+				`Error parsing metadata file in ${sdrDirectoryPath}:`,
 				error,
 			);
 			return null;
@@ -161,8 +167,9 @@ export class MetadataParser {
 				ast.body.length === 0 ||
 				ast.body[0].type !== "ReturnStatement"
 			) {
-				logger.warn(
-					"MetadataParser: Invalid Lua structure: Expected top-level return statement.",
+				this.loggingService.warn(
+					this.SCOPE,
+					"Invalid Lua structure: Expected top-level return statement.",
 				);
 				return result;
 			}
@@ -170,8 +177,9 @@ export class MetadataParser {
 			const returnArg = ast.body[0]
 				.arguments![0] as luaparser.TableConstructorExpression;
 			if (!returnArg || returnArg.type !== "TableConstructorExpression") {
-				logger.warn(
-					"MetadataParser: Invalid Lua structure: Expected return statement to return a table.",
+				this.loggingService.warn(
+					this.SCOPE,
+					"Invalid Lua structure: Expected return statement to return a table.",
 				);
 				return result;
 			}
@@ -207,7 +215,10 @@ export class MetadataParser {
 
 			// 1. Try to process the modern 'annotations' table first.
 			if (modernAnnotationsData?.value.type === "TableConstructorExpression") {
-				log.info("Processing modern 'annotations' table.");
+				this.loggingService.info(
+					this.SCOPE,
+					"Processing modern 'annotations' table.",
+				);
 				annotations = this.collectAnnotations(modernAnnotationsData.value);
 			}
 
@@ -216,7 +227,8 @@ export class MetadataParser {
 				annotations.length === 0 &&
 				legacyHighlightData?.value.type === "TableConstructorExpression"
 			) {
-				log.info(
+				this.loggingService.info(
+					this.SCOPE,
 					"No modern annotations found. Processing legacy 'highlight' table.",
 				);
 				annotations = this.collectAnnotations(legacyHighlightData.value);
@@ -225,16 +237,24 @@ export class MetadataParser {
 			// 3. Filter out any annotations that might be empty.
 			result.annotations = annotations.filter((a) => a.text?.trim());
 
-			log.info(`Parsed ${result.annotations.length} valid annotation(s).`);
+			this.loggingService.info(
+				this.SCOPE,
+				`Parsed ${result.annotations.length} valid annotation(s).`,
+			);
 			return result;
 		} catch (error) {
 			if (error instanceof Error && "line" in error && "column" in error) {
-				logger.error(
-					`MetadataParser: Lua parsing error at Line ${(error as any).line}, Column ${(error as any).column}: ${error.message}`,
+				this.loggingService.error(
+					this.SCOPE,
+					`Lua parsing error at Line ${(error as any).line}, Column ${(error as any).column}: ${error.message}`,
 					error.stack,
 				);
 			} else {
-				logger.error("MetadataParser: Error parsing Lua content:", error);
+				this.loggingService.error(
+					this.SCOPE,
+					"Error parsing Lua content:",
+					error,
+				);
 			}
 			throw error; // Re-throw the error for parseFile to catch and return null
 		}
@@ -250,7 +270,10 @@ export class MetadataParser {
 	private extractDocProps(valueNode: Expression): DocProps {
 		const docProps = { ...DEFAULT_DOC_PROPS };
 		if (valueNode.type !== "TableConstructorExpression") {
-			logger.warn("MetadataParser: doc_props was not a table, using defaults.");
+			this.loggingService.warn(
+				this.SCOPE,
+				"doc_props was not a table, using defaults.",
+			);
 			return docProps;
 		}
 
@@ -276,7 +299,6 @@ export class MetadataParser {
 					(docProps as any)[propKey] = extractedValue;
 				} else {
 					// Optional: log unknown keys if you want to detect them
-					// logger.warn(`MetadataParser: Unknown doc_prop key encountered: ${propKey}`);
 				}
 			} // If extractedValue is null, the default from DEFAULT_DOC_PROPS remains
 		}
@@ -331,8 +353,9 @@ export class MetadataParser {
 					) {
 						annotation.drawer = drawerVal as any;
 					} else if (drawerVal) {
-						logger.warn(
-							`MetadataParser: Invalid/unhandled drawer value: ${drawerVal}`,
+						this.loggingService.warn(
+							this.SCOPE,
+							`Invalid/unhandled drawer value: ${drawerVal}`,
 						);
 					}
 					break;
@@ -358,13 +381,15 @@ export class MetadataParser {
 		if (!annotation.text || annotation.text.trim() === "") return null;
 		if (!annotation.datetime) {
 			annotation.datetime = new Date().toISOString();
-			logger.warn(
-				`MetadataParser: Annotation missing datetime, using current time.`,
+			this.loggingService.warn(
+				this.SCOPE,
+				`Annotation missing datetime, using current time.`,
 			);
 		}
 		if (!annotation.pos0 || !annotation.pos1) {
-			logger.info(
-				`MetadataParser: Annotation for text "${annotation.text.slice(
+			this.loggingService.info(
+				this.SCOPE,
+				`Annotation for text "${annotation.text.slice(
 					0,
 					20,
 				)}..." missing pos0/pos1.`,
@@ -389,8 +414,9 @@ export class MetadataParser {
 		if (keyNode.type === "Identifier") {
 			return keyNode.name;
 		}
-		logger.warn(
-			`MetadataParser: Cannot extract string key from node type: ${keyNode.type}`,
+		this.loggingService.warn(
+			this.SCOPE,
+			`Cannot extract string key from node type: ${keyNode.type}`,
 		);
 		return null;
 	}
@@ -447,7 +473,6 @@ export class MetadataParser {
 		if (valueNode.type === "BooleanLiteral") {
 			return valueNode.value.toString();
 		}
-		// logger.warn(`Expected StringLiteral, got ${valueNode.type}`);
 		return null;
 	}
 
@@ -464,7 +489,6 @@ export class MetadataParser {
 			const num = Number.parseFloat(this.sanitizeString(valueNode.raw));
 			if (!Number.isNaN(num)) return num;
 		}
-		// logger.warn(`Expected NumericLiteral, got ${valueNode.type}`);
 		return null;
 	}
 }

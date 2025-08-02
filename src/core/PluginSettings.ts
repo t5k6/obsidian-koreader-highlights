@@ -5,7 +5,6 @@ import {
 	DEFAULT_TEMPLATES_FOLDER,
 } from "src/constants";
 import { FileSystemService } from "src/services/FileSystemService";
-import { logger } from "src/utils/logging";
 import {
 	ensureBoolean,
 	ensureNumberInRange,
@@ -63,10 +62,11 @@ export const DEFAULT_SETTINGS: KoreaderHighlightImporterSettings = {
 /* ------------------------------------------------------------------ */
 
 export class PluginSettings {
+	private readonly SCOPE = "PluginSettings";
+
 	constructor(private plugin: Plugin) {}
 
 	public async loadSettings(): Promise<KoreaderHighlightImporterSettings> {
-		logger.info("PluginSettings: Loading KOReader Importer settings…");
 		const raw: Partial<KoreaderHighlightImporterSettings> =
 			(await this.plugin.loadData()) ?? {};
 
@@ -160,7 +160,6 @@ export class PluginSettings {
 				: DEFAULT_SETTINGS.commentStyle
 		) as CommentStyle;
 
-		logger.info("PluginSettings: Settings validated:", settings);
 		return settings;
 	}
 
@@ -169,11 +168,6 @@ export class PluginSettings {
 	public async saveSettings(
 		settings: KoreaderHighlightImporterSettings,
 	): Promise<void> {
-		try {
-			await this.plugin.saveData(settings);
-			logger.info("PluginSettings: KOReader Importer settings saved.");
-		} catch (e) {
-			logger.error("PluginSettings: Failed to save settings", e);
-		}
+		await this.plugin.saveData(settings);
 	}
 }

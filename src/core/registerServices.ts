@@ -19,6 +19,7 @@ import type KoreaderImporterPlugin from "./KoreaderImporterPlugin";
 import {
 	APP_TOKEN,
 	DUPLICATE_MODAL_FACTORY_TOKEN,
+	LOGGING_SERVICE_TOKEN,
 	PLUGIN_TOKEN,
 	VAULT_TOKEN,
 } from "./tokens";
@@ -37,9 +38,14 @@ export function registerServices(
 		(app: App, match: any, message: string) =>
 			new DuplicateHandlingModal(app, match, message),
 	);
+	// LoggingService is instantiated in the plugin and registered here
+	container.registerValue(
+		LOGGING_SERVICE_TOKEN,
+		(plugin as any).loggingService,
+	);
 
-	// --- Level 0: Foundational & No Dependencies ---
-	container.register(CacheManager, []);
+	// --- Level 0: Foundational ---
+	container.register(CacheManager, [LOGGING_SERVICE_TOKEN]);
 	container.register(FrontmatterGenerator, []);
 
 	// --- Level 1: Depends on Level 0 or Tokens ---
@@ -47,31 +53,49 @@ export function registerServices(
 		VAULT_TOKEN,
 		PLUGIN_TOKEN,
 		CacheManager,
+		LOGGING_SERVICE_TOKEN,
 	]);
-	container.register(DatabaseService, [PLUGIN_TOKEN, FileSystemService]);
+	container.register(DatabaseService, [
+		PLUGIN_TOKEN,
+		FileSystemService,
+		LOGGING_SERVICE_TOKEN,
+	]);
 	container.register(SDRFinder, [
 		PLUGIN_TOKEN,
 		CacheManager,
 		FileSystemService,
+		LOGGING_SERVICE_TOKEN,
 	]);
 	container.register(SnapshotManager, [
 		APP_TOKEN,
 		PLUGIN_TOKEN,
 		VAULT_TOKEN,
 		FileSystemService,
+		LOGGING_SERVICE_TOKEN,
 	]);
 	container.register(TemplateManager, [
 		PLUGIN_TOKEN,
 		VAULT_TOKEN,
 		CacheManager,
 		FileSystemService,
+		LOGGING_SERVICE_TOKEN,
 	]);
-	container.register(MountPointService, [SDRFinder]);
+	container.register(MountPointService, [SDRFinder, LOGGING_SERVICE_TOKEN]);
 
 	// --- Level 2: Depends on Level 1 ---
 	container.register(ContentGenerator, [TemplateManager, PLUGIN_TOKEN]);
-	container.register(MetadataParser, [SDRFinder, CacheManager]);
-	container.register(ScanManager, [APP_TOKEN, PLUGIN_TOKEN, SDRFinder]);
+	container.register(MetadataParser, [
+		SDRFinder,
+		CacheManager,
+		LOGGING_SERVICE_TOKEN,
+	]);
+	container.register(ScanManager, [
+		APP_TOKEN,
+		PLUGIN_TOKEN,
+		SDRFinder,
+		FileSystemService,
+		LOGGING_SERVICE_TOKEN,
+	]);
 	container.register(DuplicateHandler, [
 		VAULT_TOKEN,
 		APP_TOKEN,
@@ -83,6 +107,7 @@ export function registerServices(
 		SnapshotManager,
 		CacheManager,
 		FileSystemService,
+		LOGGING_SERVICE_TOKEN,
 	]);
 
 	// --- Level 3: Depends on Level 2 ---
@@ -96,11 +121,13 @@ export function registerServices(
 		ContentGenerator,
 		DuplicateHandler,
 		SnapshotManager,
+		LOGGING_SERVICE_TOKEN,
 	]);
 	container.register(CommandManager, [
 		ImportManager,
 		ScanManager,
 		MountPointService,
 		CacheManager,
+		LOGGING_SERVICE_TOKEN,
 	]);
 }

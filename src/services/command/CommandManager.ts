@@ -1,17 +1,19 @@
 import { Notice } from "obsidian";
 import type { MountPointService } from "src/services/device/MountPointService";
 import type { ScanManager } from "src/services/device/ScanManager";
-import { runPluginAction } from "src/utils/actionUtils";
 import type { CacheManager } from "src/utils/cache/CacheManager";
-import { logger } from "src/utils/logging";
 import type { ImportManager } from "../ImportManager";
+import type { LoggingService } from "../LoggingService";
 
 export class CommandManager {
+	private readonly SCOPE = "CommandManager";
+
 	constructor(
 		private readonly importManager: ImportManager,
 		private readonly scanManager: ScanManager,
 		private readonly mountPointService: MountPointService,
 		private readonly cacheManager: CacheManager,
+		private readonly loggingService: LoggingService,
 	) {}
 
 	/**
@@ -20,7 +22,7 @@ export class CommandManager {
 	 * Handles cancellation and error reporting.
 	 */
 	async executeImport(): Promise<void> {
-		logger.info("CommandManager: Import triggered.");
+		this.loggingService.info(this.SCOPE, "Import triggered.");
 
 		if (!(await this.mountPointService.ensureMountPoint())) {
 			new Notice(
@@ -29,20 +31,24 @@ export class CommandManager {
 			return;
 		}
 
-		await runPluginAction(() => this.importManager.importHighlights(), {
-			failureNotice: "An unexpected error occurred during import",
-		}).catch((error) => {
-			if (error.name === "AbortError") {
-				// user cancellation
-				logger.info("CommandManager: Import was cancelled by the user.");
+		try {
+			await this.importManager.importHighlights();
+		} catch (error) {
+			if ((error as DOMException)?.name === "AbortError") {
+				this.loggingService.info(
+					this.SCOPE,
+					"Import was cancelled by the user.",
+				);
+				new Notice("Import cancelled.");
 			} else {
-				logger.error(
-					"CommandManager: Import failed with an unexpected error",
+				this.loggingService.error(
+					this.SCOPE,
+					"Import failed with an unexpected error",
 					error,
 				);
 				new Notice("Import failed. Check console for details.");
 			}
-		});
+		}
 	}
 
 	/**
@@ -50,7 +56,7 @@ export class CommandManager {
 	 * Shows what files would be processed in an import.
 	 */
 	async executeScan(): Promise<void> {
-		logger.info("CommandManager: Scan triggered.");
+		this.loggingService.info(this.SCOPE, "Scan triggered.");
 
 		if (!(await this.mountPointService.ensureMountPoint())) {
 			new Notice(
@@ -59,9 +65,16 @@ export class CommandManager {
 			return;
 		}
 
-		await runPluginAction(() => this.scanManager.scanForHighlights(), {
-			failureNotice: "An unexpected error occurred during scan",
-		});
+		try {
+			await this.scanManager.scanForHighlights();
+		} catch (error) {
+			this.loggingService.error(
+				this.SCOPE,
+				"Scan failed with an unexpected error",
+				error,
+			);
+			new Notice("Scan failed. Check console for details.");
+		}
 	}
 
 	/**
@@ -69,12 +82,9 @@ export class CommandManager {
 	 * Useful when encountering issues or after changing settings.
 	 */
 	async executeClearCaches(): Promise<void> {
-		logger.info("CommandManager: Cache clear triggered from plugin.");
-
-		await runPluginAction(() => Promise.resolve(this.cacheManager.clear()), {
-			successNotice: "KOReader Importer caches cleared.",
-			failureNotice: "Failed to clear caches",
-		});
+		this.loggingService.info(this.SCOPE, "Cache clear triggered from plugin.");
+		this.cacheManager.clear();
+		new Notice("KOReader Importer caches cleared.");
 	}
 
 	/**
@@ -82,29 +92,25 @@ export class CommandManager {
 	 * Rewrites all files to ensure consistency across the highlights folder.
 	 */
 	async executeConvertCommentStyle(): Promise<void> {
-		logger.info("CommandManager: Comment style conversion triggered.");
+		this.loggingService.info(this.SCOPE, "Comment style conversion triggered.");
 
-		await runPluginAction(
-			() => this.importManager.convertAllFilesToCommentStyle(),
-			{
-				failureNotice:
-					"An unexpected error occurred during comment style conversion",
-			},
-		).catch((error) => {
-			if (error.name === "AbortError") {
-				// user cancellation
-				logger.info(
-					"CommandManager: Comment style conversion was cancelled by the user.",
+		try {
+			await this.importManager.convertAllFilesToCommentStyle();
+		} catch (error) {
+			if ((error as DOMException)?.name === "AbortError") {
+				this.loggingService.info(
+					this.SCOPE,
+					"Comment style conversion was cancelled by the user.",
 				);
+				new Notice("Conversion cancelled.");
 			} else {
-				logger.error(
-					"CommandManager: Comment style conversion failed with an unexpected error",
+				this.loggingService.error(
+					this.SCOPE,
+					"Comment style conversion failed with an unexpected error",
 					error,
 				);
-				new Notice(
-					"Comment style conversion failed. Check console for details.",
-				);
+				new Notice("Conversion failed. Check console for details.");
 			}
-		});
+		}
 	}
 }

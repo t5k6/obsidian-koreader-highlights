@@ -1,9 +1,9 @@
+import type { LoggingService } from "src/services/LoggingService";
 import type {
 	Disposable,
 	KoreaderHighlightImporterSettings,
 	SettingsObserver,
 } from "src/types";
-import { logger } from "src/utils/logging";
 
 export type Ctor<T> = new (...args: any[]) => T;
 export type Token<T> = Ctor<T> | symbol;
@@ -33,6 +33,9 @@ export class DIContainer {
 		new: KoreaderHighlightImporterSettings;
 		old: KoreaderHighlightImporterSettings;
 	} | null = null;
+	private readonly SCOPE = "DIContainer";
+
+	constructor(private loggingService: LoggingService) {}
 
 	private getTokenName(token: Token<unknown>): string {
 		return typeof token === "symbol" ? token.toString() : token.name;
@@ -45,10 +48,9 @@ export class DIContainer {
 	): this {
 		const token = ctor as Token<T>;
 		if (this.registrations.has(token)) {
-			logger.warn(
-				`DIContainer: DI registration for ${this.getTokenName(
-					token,
-				)} is being overwritten.`,
+			this.loggingService.warn(
+				this.SCOPE,
+				`DI registration for ${this.getTokenName(token)} is being overwritten.`,
 			);
 		}
 		this.registrations.set(token, {
@@ -61,10 +63,9 @@ export class DIContainer {
 
 	public registerValue<T>(token: Token<T>, value: T): this {
 		if (this.values.has(token)) {
-			logger.warn(
-				`DIContainer: DI value for ${this.getTokenName(
-					token,
-				)} is being overwritten.`,
+			this.loggingService.warn(
+				this.SCOPE,
+				`DI value for ${this.getTokenName(token)} is being overwritten.`,
 			);
 		}
 		this.values.set(token, value);
@@ -134,15 +135,17 @@ export class DIContainer {
 					instance.onSettingsChanged(newSettings, oldSettings);
 					notifiedCount++;
 				} catch (error) {
-					logger.error(
-						`DIContainer: Error notifying observer ${instance.constructor.name} of settings change.`,
+					this.loggingService.error(
+						this.SCOPE,
+						`Error notifying observer ${instance.constructor.name} of settings change.`,
 						error,
 					);
 				}
 			}
 		}
-		logger.info(
-			`DIContainer: Notified ${notifiedCount} observers of settings changes.`,
+		this.loggingService.info(
+			this.SCOPE,
+			`Notified ${notifiedCount} observers of settings changes.`,
 		);
 	}
 
@@ -155,15 +158,20 @@ export class DIContainer {
 		}
 
 		await Promise.all(disposalPromises).catch((error) => {
-			logger.error("DIContainer: Error during instance disposal.", error);
+			this.loggingService.error(
+				this.SCOPE,
+				"Error during instance disposal.",
+				error,
+			);
 		});
 
 		this.instances.clear();
 		this.registrations.clear();
 		this.values.clear();
 
-		logger.info(
-			"DIContainer: All disposable instances have been cleared and container is disposed.",
+		this.loggingService.info(
+			this.SCOPE,
+			"All disposable instances have been cleared and container is disposed.",
 		);
 	}
 }

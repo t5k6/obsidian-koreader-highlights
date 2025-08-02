@@ -1,20 +1,13 @@
 import { Notice, Plugin } from "obsidian";
-import { DEFAULT_LOGS_FOLDER } from "src/constants";
 import { CommandManager } from "src/services/command/CommandManager";
-import { DatabaseService } from "src/services/DatabaseService";
-import { SDRFinder } from "src/services/device/SDRFinder";
+import { LoggingService } from "src/services/LoggingService";
 import { TemplateManager } from "src/services/parsing/TemplateManager";
 import { SettingsTab } from "src/ui/SettingsTab";
-import { logger } from "src/utils/logging";
-import type {
-	KoreaderHighlightImporterSettings,
-	SettingsObserver,
-} from "../types";
+import type { KoreaderHighlightImporterSettings } from "../types";
 import { DIContainer } from "./DIContainer";
 import { MigrationManager } from "./MigrationManager";
 import { PluginSettings } from "./PluginSettings";
 import { registerServices } from "./registerServices";
-import { APP_TOKEN, PLUGIN_TOKEN, VAULT_TOKEN } from "./tokens";
 
 export class PluginCommands {
 	constructor(private plugin: KoreaderImporterPlugin) {}
@@ -44,7 +37,8 @@ export default class KoreaderImporterPlugin extends Plugin {
 	public settings!: KoreaderHighlightImporterSettings;
 	public settingTab!: SettingsTab;
 	private pluginSettings!: PluginSettings;
-	private diContainer = new DIContainer();
+	private loggingService!: LoggingService;
+	private diContainer!: DIContainer;
 	private servicesInitialized = false;
 	private migrationManager!: MigrationManager;
 	public templateManager!: TemplateManager;
@@ -53,9 +47,10 @@ export default class KoreaderImporterPlugin extends Plugin {
 		console.log("KOReaderImporterPlugin: Loading...");
 		this.servicesInitialized = false;
 
-		// Load Settings
+		// --- Bootstrap Sequence ---
+		// 1. Load settings data without dependencies
+		this.pluginSettings = new PluginSettings(this);
 		try {
-			this.pluginSettings = new PluginSettings(this);
 			this.settings = await this.pluginSettings.loadSettings();
 		} catch (error) {
 			console.error(
@@ -69,75 +64,82 @@ export default class KoreaderImporterPlugin extends Plugin {
 			return;
 		}
 
-		// Initialize Logging
-		logger.setLevel(this.settings.logLevel);
-		logger.enableFileSink(
-			this.settings.logToFile,
-			this.app.vault,
-			this.settings.logsFolder || DEFAULT_LOGS_FOLDER,
-		);
+		// 2. Create LoggingService
+		this.loggingService = new LoggingService(this.app.vault);
 
+		// 3. Manually configure the logger for the first time with loaded settings
+		this.loggingService.onSettingsChanged(this.settings);
+
+		// 4. Create the DI Container and register the logger instance
+		this.diContainer = new DIContainer(this.loggingService);
+		this.diContainer.registerValue(LoggingService, this.loggingService);
+
+		// 5. Initialize the rest of the services
 		try {
-			// Register all services with the DI container
 			registerServices(this.diContainer, this, this.app);
 
-			// Resolve services needed by the plugin itself
 			this.templateManager =
 				this.diContainer.resolve<TemplateManager>(TemplateManager);
 			await this.templateManager.loadBuiltInTemplates();
-			this.migrationManager = new MigrationManager(this);
+			this.migrationManager = new MigrationManager(this, this.loggingService);
 
 			this.servicesInitialized = true;
-			logger.info(
-				"KOReaderImporterPlugin: All services initialized successfully.",
+			this.loggingService.info(
+				"KoreaderImporterPlugin",
+				"All services initialized successfully.",
 			);
 
-			// Run migrations in the background so we don't block Obsidian load
 			setTimeout(
 				() =>
 					this.migrationManager
 						.run()
 						.catch((e) =>
-							logger.error("KOReaderImporterPlugin: Migration failed", e),
+							this.loggingService.error(
+								"KoreaderImporterPlugin",
+								"Migration failed",
+								e,
+							),
 						),
 				0,
 			);
 		} catch (error) {
 			this.servicesInitialized = false;
-			logger.error(
-				"KOReaderImporterPlugin: CRITICAL error initializing services:",
+			this.loggingService.error(
+				"KoreaderImporterPlugin",
+				"CRITICAL error initializing services:",
 				error,
 			);
 			new Notice(
 				"Error initializing KOReader Importer services. Plugin functionality may be limited. Please check settings or reload.",
-				15000,
+				1500,
 			);
 		}
 
-		// Register Commands
 		if (this.servicesInitialized) {
 			const pluginCommands = new PluginCommands(this);
 			pluginCommands.registerCommands();
 		} else {
-			logger.warn(
-				"KOReaderImporterPlugin: Skipping command registration due to service initialization failure.",
+			this.loggingService.warn(
+				"KoreaderImporterPlugin",
+				"Skipping command registration due to service initialization failure.",
 			);
 		}
 
-		// Add Settings Tab
-		this.settingTab = new SettingsTab(this.app, this);
-		this.addSettingTab(this.settingTab);
-		logger.info("KOReaderImporterPlugin: Settings tab added.");
+		this.addSettingTab(new SettingsTab(this.app, this));
+		this.loggingService.info("KoreaderImporterPlugin", "Settings tab added.");
 
-		// Ensure Templates
 		try {
 			const templateManager =
 				this.diContainer.resolve<TemplateManager>(TemplateManager);
 			await templateManager.ensureTemplates();
-			logger.info("KOReaderImporterPlugin: Default templates ensured.");
+			this.loggingService.info(
+				"KoreaderImporterPlugin",
+				"Default templates ensured.",
+			);
 		} catch (error) {
-			logger.error(
-				"KoreaderImporterPlugin: Failed to ensure default templates:",
+			this.loggingService.error(
+				"KoreaderImporterPlugin",
+				"Failed to ensure default templates:",
 				error,
 			);
 			new Notice("Could not create default KOReader templates.");
@@ -149,8 +151,13 @@ export default class KoreaderImporterPlugin extends Plugin {
 	async onunload() {
 		console.log("KOReaderImporterPlugin: Unloading...");
 
-		await this.diContainer.dispose();
-		await logger.dispose();
+		if (this.diContainer) {
+			await this.diContainer.dispose();
+		}
+
+		if (this.loggingService) {
+			await this.loggingService.dispose();
+		}
 
 		this.servicesInitialized = false;
 	}
@@ -158,8 +165,9 @@ export default class KoreaderImporterPlugin extends Plugin {
 	// --- Utility Methods ---
 	private checkServiceStatus(operation: string): boolean {
 		if (!this.servicesInitialized) {
-			logger.error(
-				`KOReaderImporterPlugin: Cannot trigger ${operation}: Services not fully initialized.`,
+			this.loggingService.error(
+				"KoreaderImporterPlugin",
+				`Cannot trigger ${operation}: Services not fully initialized.`,
 			);
 			new Notice(
 				"Error: KOReader Importer services not ready. Please check settings or reload the plugin.",
@@ -201,8 +209,9 @@ export default class KoreaderImporterPlugin extends Plugin {
 
 	async saveSettings(forceUpdate: boolean = false): Promise<void> {
 		if (!this.pluginSettings) {
-			logger.error(
-				"KOReaderImporterPlugin: Cannot save settings: PluginSettings helper not initialized.",
+			this.loggingService.error(
+				"KoreaderImporterPlugin",
+				"Cannot save settings: PluginSettings helper not initialized.",
 			);
 			return;
 		}
@@ -210,24 +219,15 @@ export default class KoreaderImporterPlugin extends Plugin {
 		const oldSettings = { ...this.settings };
 		await this.pluginSettings.saveSettings(this.settings);
 
-		// Update logger immediately
-		logger.setLevel(this.settings.logLevel);
-		logger.enableFileSink(
-			this.settings.logToFile,
-			this.app.vault,
-			this.settings.logsFolder || DEFAULT_LOGS_FOLDER,
-		);
-
-		// Notify all registered observer services of the change
 		this.diContainer.notifySettingsChanged(this.settings, oldSettings);
 
-		if (forceUpdate) {
-			// Re-render the entire settings tab to show/hide dependent settings
+		if (forceUpdate && this.settingTab) {
 			this.settingTab.display();
 		}
 
-		logger.info(
-			"KOReaderImporterPlugin: Settings saved. Services notified of changes.",
+		this.loggingService.info(
+			"KoreaderImporterPlugin",
+			"Settings saved. Services notified of changes.",
 		);
 	}
 }

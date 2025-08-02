@@ -1,5 +1,5 @@
 import { type Plugin, TFile, TFolder, type Vault } from "obsidian";
-import { logger } from "../utils/logging";
+import type { LoggingService } from "src/services/LoggingService";
 
 // --- Helper Functions ---
 
@@ -40,11 +40,15 @@ interface PluginData {
 type MigrationFn = () => Promise<void>;
 
 export class MigrationManager {
+	private readonly SCOPE = "MigrationManager";
 	private lastDone = "0.0.0";
 	private vault: Vault;
 	private migrations: Record<string, MigrationFn>;
 
-	constructor(private plugin: Plugin) {
+	constructor(
+		private plugin: Plugin,
+		private loggingService: LoggingService,
+	) {
 		this.vault = this.plugin.app.vault;
 		// Define migrations here, binding them to the class instance
 		this.migrations = {
@@ -66,16 +70,18 @@ export class MigrationManager {
 				cmpVer(version, this.lastDone) === 1 && // version > lastDone
 				cmpVer(version, current) <= 0 // version <= current
 			) {
-				logger.info(
-					`MigrationManager: Running migration for version -> ${version}`,
+				this.loggingService.info(
+					this.SCOPE,
+					`Running migration for version -> ${version}`,
 				);
 				try {
 					// eslint-disable-next-line no-await-in-loop
 					await this.migrations[version]();
 					this.lastDone = version; // Mark as done only on success
 				} catch (error) {
-					logger.error(
-						`MigrationManager: Migration for ${version} failed. Halting further migrations.`,
+					this.loggingService.error(
+						this.SCOPE,
+						`Migration for ${version} failed. Halting further migrations.`,
 						error,
 					);
 					break; // Stop migrations if one fails
@@ -108,8 +114,9 @@ export class MigrationManager {
 						await this.vault.delete(f);
 						removed++;
 					} catch (e) {
-						logger.warn(
-							`MigrationManager: Could not delete old log ${f.path}`,
+						this.loggingService.warn(
+							this.SCOPE,
+							`Could not delete old log ${f.path}`,
 							e,
 						);
 					}
@@ -117,8 +124,9 @@ export class MigrationManager {
 			);
 		}
 		if (removed > 0) {
-			logger.info(
-				`MigrationManager: Removed ${removed} old log files during 1.2.0 migration.`,
+			this.loggingService.info(
+				this.SCOPE,
+				`Removed ${removed} old log files during 1.2.0 migration.`,
 			);
 		}
 	}

@@ -10,15 +10,15 @@ import type {
 	TemplateDefinition,
 } from "src/types";
 import type { CacheManager } from "src/utils/cache/CacheManager";
-import { LruCache } from "src/utils/cache/LruCache";
+import type { LruCache } from "src/utils/cache/LruCache";
 import {
 	formatDate,
 	formatDateAsDailyNote,
 	formatDateLocale,
 } from "src/utils/formatUtils";
 import { styleHighlight } from "src/utils/highlightStyle";
-import { createLogger, logger } from "src/utils/logging";
 import type { FileSystemService } from "../FileSystemService";
+import type { LoggingService } from "../LoggingService";
 
 export const FALLBACK_TEMPLATE_ID = "default";
 const DARK_THEME_CLASS = "theme-dark";
@@ -46,12 +46,11 @@ export interface TemplateValidationResult {
 	suggestions: string[];
 }
 
-const log = createLogger("TemplateManager");
-
 export class TemplateManager implements SettingsObserver {
+	private readonly SCOPE = "TemplateManager";
 	private isDarkTheme: boolean = true;
-	private rawTemplateCache = new LruCache<string, string>(10);
-	private compiledTemplateCache = new LruCache<string, CachedTemplate>(10);
+	private rawTemplateCache: LruCache<string, string>;
+	private compiledTemplateCache: LruCache<string, CachedTemplate>;
 	public builtInTemplates: Map<string, TemplateDefinition> = new Map();
 
 	constructor(
@@ -59,6 +58,7 @@ export class TemplateManager implements SettingsObserver {
 		private vault: Vault,
 		private cacheManager: CacheManager,
 		private fs: FileSystemService,
+		private loggingService: LoggingService, // Injected dependency
 	) {
 		this.rawTemplateCache = cacheManager.createLru("template.raw", 10);
 		this.compiledTemplateCache = cacheManager.createLru(
@@ -71,7 +71,10 @@ export class TemplateManager implements SettingsObserver {
 		this.plugin.registerEvent(
 			this.plugin.app.workspace.on("css-change", this.updateTheme),
 		);
-		logger.info(`TemplateManager initialized. Dark theme: ${this.isDarkTheme}`);
+		this.loggingService.info(
+			this.SCOPE,
+			`Initialized. Dark theme: ${this.isDarkTheme}`,
+		);
 	}
 
 	public onSettingsChanged(
@@ -87,8 +90,9 @@ export class TemplateManager implements SettingsObserver {
 
 		if (templateChanged) {
 			this.cacheManager.clear("template.*");
-			logger.info(
-				"TemplateManager: Template settings changed, relevant caches cleared.",
+			this.loggingService.info(
+				this.SCOPE,
+				"Template settings changed, relevant caches cleared.",
 			);
 		}
 	}
@@ -101,8 +105,9 @@ export class TemplateManager implements SettingsObserver {
 		const newThemeState = document.body.classList.contains(DARK_THEME_CLASS);
 		if (this.isDarkTheme !== newThemeState) {
 			this.isDarkTheme = newThemeState;
-			logger.info(
-				`TemplateManager: Theme changed. Dark theme: ${this.isDarkTheme}`,
+			this.loggingService.info(
+				this.SCOPE,
+				`Theme changed. Dark theme: ${this.isDarkTheme}`,
 			);
 		}
 	}
@@ -161,9 +166,14 @@ export class TemplateManager implements SettingsObserver {
 			// eslint-disable-next-line no-new-func
 			return new Function("d", functionBody) as CompiledTemplate;
 		} catch (error) {
-			logger.error("TemplateManager: Failed to compile template.", error, {
-				template: functionBody,
-			});
+			this.loggingService.error(
+				this.SCOPE,
+				"Failed to compile template.",
+				error,
+				{
+					template: functionBody,
+				},
+			);
 			return () => "Error: Template compilation failed.";
 		}
 	}
@@ -208,13 +218,15 @@ export class TemplateManager implements SettingsObserver {
 				});
 			}
 		} catch (error) {
-			logger.error(
-				"TemplateManager: Failed to parse built-in templates.",
+			this.loggingService.error(
+				this.SCOPE,
+				"Failed to parse built-in templates.",
 				error,
 			);
 		}
-		logger.info(
-			`TemplateManager: Loaded ${this.builtInTemplates.size} built-in templates.`,
+		this.loggingService.info(
+			this.SCOPE,
+			`Loaded ${this.builtInTemplates.size} built-in templates.`,
 		);
 	}
 
@@ -291,8 +303,9 @@ export class TemplateManager implements SettingsObserver {
 			new Notice(
 				`Template "${templateId}" has errors. Falling back to Default.`,
 			);
-			logger.error(
-				"TemplateManager: Template validation failed:",
+			this.loggingService.error(
+				this.SCOPE,
+				"Template validation failed:",
 				validation.errors,
 			);
 			templateContent =
@@ -337,8 +350,9 @@ export class TemplateManager implements SettingsObserver {
 		const normalizedPath = normalizePath(vaultPath);
 		const file = this.vault.getAbstractFileByPath(normalizedPath);
 		if (file instanceof TFile) return this.vault.read(file);
-		logger.warn(
-			`TemplateManager: Custom template file not found: "${vaultPath}"`,
+		this.loggingService.warn(
+			this.SCOPE,
+			`Custom template file not found: "${vaultPath}"`,
 		);
 		return null;
 	}
@@ -369,8 +383,9 @@ export class TemplateManager implements SettingsObserver {
 			await this.fs.ensureVaultFolder(templateDir);
 		} catch (err) {
 			// If we can't even create the directory, we can't proceed.
-			logger.error(
-				`TemplateManager: Failed to create template directory at ${templateDir}`,
+			this.loggingService.error(
+				this.SCOPE,
+				`Failed to create template directory at ${templateDir}`,
 				err,
 			);
 			new Notice(`Failed to create template directory: ${templateDir}`);
@@ -389,16 +404,18 @@ export class TemplateManager implements SettingsObserver {
 
 				// Check if the file already exists to avoid unnecessary writes.
 				if (!(await this.fs.vaultFileExists(filePath))) {
-					logger.info(
-						`TemplateManager: Creating built-in template file: ${filePath}`,
+					this.loggingService.info(
+						this.SCOPE,
+						`Creating built-in template file: ${filePath}`,
 					);
 					const fileContent = `---\ndescription: ${template.description}\n---\n\n${template.content}`;
 
 					try {
 						await this.vault.create(filePath, fileContent);
 					} catch (writeError) {
-						logger.error(
-							`TemplateManager: Failed to write template file ${filePath}`,
+						this.loggingService.error(
+							this.SCOPE,
+							`Failed to write template file ${filePath}`,
 							writeError,
 						);
 					}

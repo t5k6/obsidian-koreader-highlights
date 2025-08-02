@@ -1,16 +1,20 @@
 import { type App, Notice, TFile } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import { ProgressModal } from "src/ui/ProgressModal";
-import { logger } from "src/utils/logging";
+import type { FileSystemService } from "../FileSystemService";
+import type { LoggingService } from "../LoggingService";
 import type { SDRFinder } from "./SDRFinder";
 
 export class ScanManager {
 	private static readonly SCAN_REPORT_FILENAME = "KOReader SDR Scan Report.md";
+	private readonly SCOPE = "ScanManager";
 
 	constructor(
 		private app: App,
 		private plugin: KoreaderImporterPlugin,
 		private sdrFinder: SDRFinder,
+		private fs: FileSystemService,
+		private loggingService: LoggingService,
 	) {}
 
 	/**
@@ -19,7 +23,10 @@ export class ScanManager {
 	 * Useful for debugging and verifying settings.
 	 */
 	async scanForHighlights(): Promise<void> {
-		logger.info("ScanManager: Starting KOReader SDR scan process...");
+		this.loggingService.info(
+			this.SCOPE,
+			"Starting KOReader SDR scan process...",
+		);
 
 		const modal = new ProgressModal(this.app);
 		modal.open();
@@ -33,14 +40,18 @@ export class ScanManager {
 				new Notice(
 					"Scan complete: No KOReader highlight files (.sdr directories with metadata.lua) found.",
 				);
-				logger.info("ScanManager: Scan complete. No SDR files found.");
+				this.loggingService.info(
+					this.SCOPE,
+					"Scan complete. No SDR files found.",
+				);
 				modal.close();
 				await this.createOrUpdateScanNote([]);
 				return;
 			}
 
-			logger.info(
-				`ScanManager: Scan found ${sdrFilePaths.length} SDR directories.`,
+			this.loggingService.info(
+				this.SCOPE,
+				`Scan found ${sdrFilePaths.length} SDR directories.`,
 			);
 			modal.statusEl.setText(
 				`Found ${sdrFilePaths.length} files. Generating report...`,
@@ -51,9 +62,16 @@ export class ScanManager {
 			new Notice(
 				`Scan complete: Report saved to "${ScanManager.SCAN_REPORT_FILENAME}"`,
 			);
-			logger.info("ScanManager: Scan process finished successfully.");
+			this.loggingService.info(
+				this.SCOPE,
+				"Scan process finished successfully.",
+			);
 		} catch (error) {
-			logger.error("ScanManager: Error during SDR scan process:", error);
+			this.loggingService.error(
+				this.SCOPE,
+				"Error during SDR scan process:",
+				error,
+			);
 			new Notice(
 				"KOReader Importer: Error during scan. Check console for details.",
 			);
@@ -67,34 +85,41 @@ export class ScanManager {
 	 * @param sdrFilePaths - Array of SDR directory paths found
 	 */
 	private async createOrUpdateScanNote(sdrFilePaths: string[]): Promise<void> {
-		const reportFolderName = this.plugin.settings.highlightsFolder;
-		const uniqueReportPath = await generateUniqueVaultPath(
-			this.app.vault,
-			reportFolderName,
-			ScanManager.SCAN_REPORT_FILENAME,
-		);
+		// 1. Define the constant file path components
+		const reportFilename = ScanManager.SCAN_REPORT_FILENAME; // "KOReader SDR Scan Report.md"
+		const reportFolderPath = this.plugin.settings.highlightsFolder;
+		const fullReportPath = `${reportFolderPath}/${reportFilename}`;
 
+		// 2. Generate the content you intend to write
 		const reportContent = this.generateReportContent(sdrFilePaths);
 
 		try {
-			await ensureParentDirectory(this.app.vault, uniqueReportPath);
+			// 3. Check if the file already exists in the vault
 			const existingReportFile =
-				this.app.vault.getAbstractFileByPath(uniqueReportPath);
+				this.app.vault.getAbstractFileByPath(fullReportPath);
 
 			if (existingReportFile instanceof TFile) {
-				logger.info(
-					`ScanManager: Updating existing scan report: ${uniqueReportPath}`,
+				// 4. If it exists, MODIFY it with the new content
+				this.loggingService.info(
+					this.SCOPE,
+					`Updating existing scan report: ${fullReportPath}`,
 				);
 				await this.app.vault.modify(existingReportFile, reportContent);
 			} else {
-				logger.info(
-					`ScanManager: Creating new scan report: ${uniqueReportPath}`,
+				// 5. If it does NOT exist, CREATE it.
+				// First, ensure the parent directory exists.
+				await this.fs.ensureVaultFolder(reportFolderPath);
+
+				this.loggingService.info(
+					this.SCOPE,
+					`Creating new scan report: ${fullReportPath}`,
 				);
-				await this.app.vault.create(uniqueReportPath, reportContent);
+				await this.app.vault.create(fullReportPath, reportContent);
 			}
 		} catch (error) {
-			logger.error(
-				`ScanManager: Error creating/updating scan report note at ${uniqueReportPath}:`,
+			this.loggingService.error(
+				this.SCOPE,
+				`Error creating/updating scan report note at ${fullReportPath}:`,
 				error,
 			);
 			new Notice("Failed to save scan report note.");

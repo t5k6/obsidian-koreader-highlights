@@ -20,15 +20,16 @@ import {
 	generateObsidianFileName,
 } from "src/utils/formatUtils";
 import { extractHighlights } from "src/utils/highlightExtractor";
-import { logger } from "src/utils/logging";
 import { getFrontmatterAndBody } from "src/utils/obsidianUtils";
 import type { DatabaseService } from "../DatabaseService";
 import type { FileSystemService } from "../FileSystemService";
+import type { LoggingService } from "../LoggingService";
 import type { SnapshotManager } from "./SnapshotManager";
 
 type ResolveStatus = "created" | "merged" | "automerged" | "skipped";
 
 export class DuplicateHandler {
+	private readonly SCOPE = "DuplicateHandler";
 	currentMatch: NonNullable<DuplicateMatch> | null = null;
 	public applyToAll = false;
 	public applyToAllChoice: DuplicateChoice | null = null;
@@ -50,6 +51,7 @@ export class DuplicateHandler {
 		private snapshotManager: SnapshotManager,
 		private cacheManager: CacheManager,
 		private fs: FileSystemService,
+		private loggingService: LoggingService,
 	) {
 		this.potentialDuplicatesCache = cacheManager.createMap(
 			"duplicate.potential",
@@ -65,7 +67,7 @@ export class DuplicateHandler {
 		this.applyToAll = false;
 		this.applyToAllChoice = null;
 		this.currentMatch = null;
-		logger.info("DuplicateHandler: 'Apply to All' state reset.");
+		this.loggingService.info(this.SCOPE, "'Apply to All' state reset.");
 	}
 
 	/**
@@ -74,7 +76,7 @@ export class DuplicateHandler {
 	 */
 	public clearCache(): void {
 		this.potentialDuplicatesCache.clear();
-		logger.info("DuplicateHandler: potential duplicates cache cleared.");
+		this.loggingService.info(this.SCOPE, "potential duplicates cache cleared.");
 	}
 
 	/**
@@ -118,8 +120,9 @@ export class DuplicateHandler {
 			bestMatch.matchType === "updated" && bestMatch.modifiedHighlights === 0;
 
 		if (autoMergeEnabled && isUpdateOnly && snapshotExists) {
-			logger.info(
-				`DuplicateHandler: Auto-merging additions into ${bestMatch.file.path} via safe 3-way merge.`,
+			this.loggingService.info(
+				this.SCOPE,
+				`Auto-merging additions into ${bestMatch.file.path} via safe 3-way merge.`,
 			);
 			const { file } = await this.handleDuplicate(
 				bestMatch,
@@ -130,8 +133,9 @@ export class DuplicateHandler {
 		}
 
 		if (autoMergeEnabled && isUpdateOnly && !snapshotExists) {
-			logger.info(
-				`DuplicateHandler: Skipping auto-merge for ${bestMatch.file.path} because no snapshot exists. Prompting user.`,
+			this.loggingService.info(
+				this.SCOPE,
+				`Skipping auto-merge for ${bestMatch.file.path} because no snapshot exists. Prompting user.`,
 			);
 		}
 
@@ -152,7 +156,7 @@ export class DuplicateHandler {
 			case "keep-both":
 				return this.createNewFile(luaMetadata, contentProvider);
 			default:
-				logger.warn(`DuplicateHandler: Unhandled choice: ${choice}`);
+				this.loggingService.warn(this.SCOPE, `Unhandled choice: ${choice}`);
 				return { status: "skipped", file: null };
 		}
 	}
@@ -166,14 +170,16 @@ export class DuplicateHandler {
 	public async findPotentialDuplicates(docProps: DocProps): Promise<TFile[]> {
 		const bookKey = this.databaseService.bookKeyFromDocProps(docProps);
 		if (this.potentialDuplicatesCache.has(bookKey)) {
-			logger.info(
-				`DuplicateHandler: Cache hit for potential duplicates of key: ${bookKey}`,
+			this.loggingService.info(
+				this.SCOPE,
+				`Cache hit for potential duplicates of key: ${bookKey}`,
 			);
 			return this.potentialDuplicatesCache.get(bookKey)!;
 		}
 
-		logger.info(
-			`DuplicateHandler: Querying index for existing files with book key: ${bookKey}`,
+		this.loggingService.info(
+			this.SCOPE,
+			`Querying index for existing files with book key: ${bookKey}`,
 		);
 		const paths = await this.databaseService.findExistingBookFiles(bookKey);
 
@@ -181,8 +187,9 @@ export class DuplicateHandler {
 			.map((p) => this.app.vault.getAbstractFileByPath(p))
 			.filter((f): f is TFile => f instanceof TFile);
 
-		logger.info(
-			`DuplicateHandler: Found ${files.length} potential duplicate(s) for key: ${bookKey}`,
+		this.loggingService.info(
+			this.SCOPE,
+			`Found ${files.length} potential duplicate(s) for key: ${bookKey}`,
 		);
 		this.potentialDuplicatesCache.set(bookKey, files);
 		return files;
@@ -201,16 +208,16 @@ export class DuplicateHandler {
 		newAnnotations: Annotation[],
 		luaMetadata: LuaMetadata,
 	): Promise<DuplicateMatch> {
-		logger.info(
-			`DuplicateHandler: Analyzing duplicate content: ${existingFile.path}`,
+		this.loggingService.info(
+			this.SCOPE,
+			`Analyzing duplicate content: ${existingFile.path}`,
 		);
 		const { body: existingBody } = await getFrontmatterAndBody(
 			this.app,
 			existingFile,
+			this.loggingService,
 		);
 
-		// When comment style is "none", we can't extract highlights for comparison
-		// So we treat all new annotations as potentially new
 		const isNoneStyle = this.plugin.settings.commentStyle === "none";
 		const existingHighlights = isNoneStyle
 			? []
@@ -221,8 +228,9 @@ export class DuplicateHandler {
 
 		if (isNoneStyle) {
 			newHighlightCount = newAnnotations.length;
-			logger.info(
-				`DuplicateHandler: Comment style is "none" - treating all ${newAnnotations.length} annotations as new for ${existingFile.path}`,
+			this.loggingService.info(
+				this.SCOPE,
+				`Comment style is "none" - treating all ${newAnnotations.length} annotations as new for ${existingFile.path}`,
 			);
 		} else {
 			const existingHighlightsMap = new Map(
@@ -243,8 +251,9 @@ export class DuplicateHandler {
 						)
 					) {
 						modifiedHighlightCount++;
-						logger.info(
-							`DuplicateHandler: Modified highlight found (Page ${newHighlight.pageno}):\n  Old: "${existingMatch.text?.slice(
+						this.loggingService.info(
+							this.SCOPE,
+							`Modified highlight found (Page ${newHighlight.pageno}):\n  Old: "${existingMatch.text?.slice(
 								0,
 								50,
 							)}..."\n  New: "${newHighlight.text?.slice(0, 50)}..."`,
@@ -257,13 +266,15 @@ export class DuplicateHandler {
 								newHighlight.text || "",
 							)
 						) {
-							logger.info(
-								`DuplicateHandler: Note also differs for modified highlight (Page ${newHighlight.pageno})`,
+							this.loggingService.info(
+								this.SCOPE,
+								`Note also differs for modified highlight (Page ${newHighlight.pageno})`,
 							);
 						} else {
 							modifiedHighlightCount++;
-							logger.info(
-								`DuplicateHandler: Note differs for existing highlight (Page ${newHighlight.pageno}):\n  Old: "${existingMatch.note?.slice(
+							this.loggingService.info(
+								this.SCOPE,
+								`Note differs for existing highlight (Page ${newHighlight.pageno}):\n  Old: "${existingMatch.note?.slice(
 									0,
 									50,
 								)}..."\n  New: "${newHighlight.note?.slice(0, 50)}..."`,
@@ -282,8 +293,9 @@ export class DuplicateHandler {
 		const canMergeSafely =
 			(await this.snapshotManager.getSnapshotContent(existingFile)) !== null;
 
-		logger.info(
-			`DuplicateHandler: Analysis result for ${existingFile.path}: Type=${matchType}, New=${newHighlightCount}, Modified=${modifiedHighlightCount}`,
+		this.loggingService.info(
+			this.SCOPE,
+			`Analysis result for ${existingFile.path}: Type=${matchType}, New=${newHighlightCount}, Modified=${modifiedHighlightCount}`,
 		);
 
 		return {
@@ -310,6 +322,7 @@ export class DuplicateHandler {
 		const fileName = generateObsidianFileName(
 			luaMetadata.docProps,
 			this.plugin.settings.highlightsFolder,
+			this.loggingService,
 			luaMetadata.originalFilePath,
 		);
 
@@ -334,13 +347,15 @@ export class DuplicateHandler {
 		}
 		try {
 			await this.snapshotManager.createSnapshot(file);
-			logger.info(
-				`DuplicateHandler: Created on-the-fly snapshot for ${file.path}`,
+			this.loggingService.info(
+				this.SCOPE,
+				`Created on-the-fly snapshot for ${file.path}`,
 			);
 			return true;
 		} catch (err) {
-			logger.error(
-				`DuplicateHandler: Unable to create snapshot for ${file.path}`,
+			this.loggingService.error(
+				this.SCOPE,
+				`Unable to create snapshot for ${file.path}`,
 				err,
 			);
 			return false;
@@ -444,8 +459,9 @@ export class DuplicateHandler {
 
 				if (!base) {
 					if (choice === "automerge") {
-						logger.warn(
-							`DuplicateHandler: Auto-merge skipped for ${file.path}: No snapshot available for a safe 3-way merge.`,
+						this.loggingService.warn(
+							this.SCOPE,
+							`Auto-merge skipped for ${file.path}: No snapshot available for a safe 3-way merge.`,
 						);
 						return { status: "skipped", file: null };
 					}
@@ -457,8 +473,9 @@ export class DuplicateHandler {
 					).openAndConfirm();
 
 					if (!confirmed) return { status: "skipped", file: null };
-					logger.warn(
-						`DuplicateHandler: User confirmed 2-way merge for ${file.path} despite missing snapshot.`,
+					this.loggingService.warn(
+						this.SCOPE,
+						`User confirmed 2-way merge for ${file.path} despite missing snapshot.`,
 					);
 					return this.execute2WayMerge(file, luaMetadata);
 				}
@@ -490,7 +507,7 @@ export class DuplicateHandler {
 	): Promise<{ status: "merged"; file: TFile }> {
 		await this.snapshotManager.createBackup(file);
 		const { frontmatter: existingFm, body: existingBody } =
-			await getFrontmatterAndBody(this.app, file);
+			await getFrontmatterAndBody(this.app, file, this.loggingService);
 		const existingAnnotations = extractHighlights(
 			existingBody,
 			this.plugin.settings.commentStyle,
@@ -554,7 +571,7 @@ export class DuplicateHandler {
 
 		const parse = async (source: TFile | string) => {
 			const content = typeof source === "string" ? { content: source } : source;
-			return getFrontmatterAndBody(this.app, content);
+			return getFrontmatterAndBody(this.app, content, this.loggingService);
 		};
 
 		const base = await parse(baseContent);
@@ -616,12 +633,14 @@ export class DuplicateHandler {
 		const finalContent = `${finalFm}\n\n${mergedBody}`;
 
 		if (hasConflict) {
-			logger.warn(
-				`DuplicateHandler: Merge conflict detected in ${file.path}. Adding conflict callouts.`,
+			this.loggingService.warn(
+				this.SCOPE,
+				`Merge conflict detected in ${file.path}. Adding conflict callouts.`,
 			);
 		} else {
-			logger.info(
-				`DuplicateHandler: Successfully merged content for ${file.path} without conflicts.`,
+			this.loggingService.info(
+				this.SCOPE,
+				`Successfully merged content for ${file.path} without conflicts.`,
 			);
 		}
 

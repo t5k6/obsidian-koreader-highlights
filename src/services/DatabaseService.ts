@@ -1,5 +1,4 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
-import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { normalizePath } from "obsidian";
 import initSqlJs, { type SqlJsStatic } from "sql.js";
@@ -11,7 +10,6 @@ import {
 	levenshteinDistance,
 	normalizeFileNamePiece,
 } from "src/utils/formatUtils";
-import { logger } from "src/utils/logging";
 import type {
 	BookStatistics,
 	Disposable,
@@ -23,6 +21,7 @@ import type {
 	SettingsObserver,
 } from "../types";
 import type { FileSystemService } from "./FileSystemService";
+import type { LoggingService } from "./LoggingService";
 
 /* ------------------------------------------------------------------ */
 /*                      SHARED HELPER CLASSES                         */
@@ -55,6 +54,7 @@ CREATE INDEX IF NOT EXISTS idx_book_path ON book(vault_path);
 /* ------------------------------------------------------------------ */
 
 export class DatabaseService implements Disposable, SettingsObserver {
+	private readonly SCOPE = "DatabaseService";
 	/* ---------------- sql.js instance (static) -------------------- */
 	private static sqlJsInstance: SqlJsStatic | null = null;
 	private static sqlJsInit: Promise<SqlJsStatic> | null = null;
@@ -93,6 +93,7 @@ export class DatabaseService implements Disposable, SettingsObserver {
 	constructor(
 		private plugin: KoreaderImporterPlugin,
 		private fs: FileSystemService,
+		private loggingService: LoggingService,
 	) {
 		this.currentMountPoint = plugin.settings.koreaderMountPoint;
 		this.idxPath = normalizePath(
@@ -114,8 +115,9 @@ export class DatabaseService implements Disposable, SettingsObserver {
 			this.db?.close(); // will be reopened lazily
 			this.db = null;
 			this.currentMountPoint = newSettings.koreaderMountPoint;
-			logger.info(
-				"DatabaseService: Mount point changed, connection will be re-established on next use.",
+			this.loggingService.info(
+				this.SCOPE,
+				"Mount point changed, connection will be re-established on next use.",
 			);
 		}
 	}
@@ -187,8 +189,9 @@ export class DatabaseService implements Disposable, SettingsObserver {
 	): Promise<LuaMetadata["statistics"] | null> {
 		const mountPoint = this.plugin.settings.koreaderMountPoint;
 		if (!mountPoint) {
-			logger.warn(
-				"DatabaseService: KOReader mount point not configured – skipping stats.",
+			this.loggingService.warn(
+				this.SCOPE,
+				"KOReader mount point not configured – skipping stats.",
 			);
 			return null;
 		}
@@ -205,8 +208,9 @@ export class DatabaseService implements Disposable, SettingsObserver {
 			);
 
 			if (!(await this.fs.nodeFileExists(dbPath))) {
-				logger.info(
-					`DeviceStatisticsService: Statistics DB not found at ${dbPath} (normal on some sync setups).`,
+				this.loggingService.info(
+					this.SCOPE,
+					`Statistics DB not found at ${dbPath} (normal on some sync setups).`,
 				);
 				return null;
 			}
@@ -272,8 +276,9 @@ export class DatabaseService implements Disposable, SettingsObserver {
 				derived: this.calculateDerivedStatistics(bookRow, sessions),
 			};
 		} catch (error: any) {
-			logger.error(
-				`DatabaseService: Failed to get book statistics for "${title}"`,
+			this.loggingService.error(
+				this.SCOPE,
+				`Failed to get book statistics for "${title}"`,
 				error,
 			);
 			return null;
@@ -430,11 +435,14 @@ export class DatabaseService implements Disposable, SettingsObserver {
 
 		try {
 			bytes = await this.fs.readNodeFile(this.idxPath, true);
-			logger.info(`DatabaseService: Opening index DB: ${this.idxPath}`);
+			this.loggingService.info(this.SCOPE, `Opening index DB: ${this.idxPath}`);
 			this.idxDb = new SQL.Database(bytes);
 		} catch (e: any) {
 			if (!this.fs.isNotFoundError(e)) throw e;
-			logger.info("DatabaseService: No index DB yet, creating fresh one");
+			this.loggingService.info(
+				this.SCOPE,
+				"No index DB yet, creating fresh one",
+			);
 			this.idxDb = new SQL.Database();
 			this.idxDb.run(INDEX_DB_SCHEMA);
 			await this.persistIndex(); // initial disk write
@@ -457,13 +465,23 @@ export class DatabaseService implements Disposable, SettingsObserver {
 	 */
 	private async persistIndex() {
 		if (!this.idxDb) return;
-		logger.info("DatabaseService: Persisting index database to disk...");
+		this.loggingService.info(
+			this.SCOPE,
+			"Persisting index database to disk...",
+		);
 		try {
 			const data = this.idxDb.export();
 			await this.fs.writeNodeFile(this.idxPath, data);
-			logger.info("DatabaseService: Index database persisted successfully.");
+			this.loggingService.info(
+				this.SCOPE,
+				"Index database persisted successfully.",
+			);
 		} catch (error) {
-			logger.error("DatabaseService: Failed to persist index database.", error);
+			this.loggingService.error(
+				this.SCOPE,
+				"Failed to persist index database.",
+				error,
+			);
 		}
 	}
 
@@ -487,7 +505,11 @@ export class DatabaseService implements Disposable, SettingsObserver {
 				const data = this.idxDb.export();
 				await this.fs.writeNodeFile(this.idxPath, data);
 			} catch (e) {
-				logger.error("DatabaseService: Unable to write index DB on dispose", e);
+				this.loggingService.error(
+					this.SCOPE,
+					"Unable to write index DB on dispose",
+					e,
+				);
 			}
 			this.idxDb.close();
 			this.idxDb = null;

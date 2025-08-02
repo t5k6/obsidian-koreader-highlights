@@ -80,7 +80,11 @@ export function registerServices(
 		FileSystemService,
 		LOGGING_SERVICE_TOKEN,
 	]);
-	container.register(MountPointService, [SDRFinder, LOGGING_SERVICE_TOKEN]);
+	container.register(MountPointService, [
+		PLUGIN_TOKEN,
+		SDRFinder,
+		LOGGING_SERVICE_TOKEN,
+	]);
 
 	// --- Level 2: Depends on Level 1 ---
 	container.register(ContentGenerator, [TemplateManager, PLUGIN_TOKEN]);

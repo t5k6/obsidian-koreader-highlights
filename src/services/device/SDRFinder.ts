@@ -1,6 +1,5 @@
 import { platform } from "node:os";
 import path, { join as joinPath } from "node:path";
-import { Notice } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import type {
 	KoreaderHighlightImporterSettings,
@@ -134,7 +133,8 @@ export class SDRFinder implements SettingsObserver {
 	 */
 	private async scan(cacheKey: string): Promise<string[]> {
 		if (this.cacheKey !== cacheKey) return []; // Stale call check
-		if (!(await this.checkMountPoint())) return [];
+		const { isReady } = await this.checkMountPoint();
+		if (!isReady) return [];
 
 		const { koreaderMountPoint, excludedFolders } = this.plugin.settings;
 		if (koreaderMountPoint === null) {
@@ -222,10 +222,14 @@ export class SDRFinder implements SettingsObserver {
 	 * Updates plugin settings with auto-detected path.
 	 * @returns True if a usable mount point is available
 	 */
-	async checkMountPoint(): Promise<boolean> {
+	async checkMountPoint(): Promise<{
+		isReady: boolean;
+		autoDetectedPath?: string;
+	}> {
 		const { koreaderMountPoint } = this.plugin.settings;
-		if (koreaderMountPoint && (await this.isUsableDir(koreaderMountPoint)))
-			return true;
+		if (koreaderMountPoint && (await this.isUsableDir(koreaderMountPoint))) {
+			return { isReady: true };
+		}
 
 		this.loggingService.warn(
 			this.SCOPE,
@@ -234,22 +238,20 @@ export class SDRFinder implements SettingsObserver {
 
 		for (const candidate of await this.detectCandidates()) {
 			if (await this.isUsableDir(candidate)) {
-				this.plugin.settings.koreaderMountPoint = candidate;
-				new Notice(`KOReader: auto-detected device at "${candidate}"`, 5_000);
 				this.loggingService.info(
 					this.SCOPE,
-					"Using auto-detected mount point:",
+					"Successfully auto-detected mount point:",
 					candidate,
 				);
-				this.updateCacheKey(this.plugin.settings);
-				return true;
+				return { isReady: true, autoDetectedPath: candidate };
 			}
 		}
+
 		this.loggingService.warn(
 			this.SCOPE,
 			"Failed to find or access any KOReader mount point.",
 		);
-		return false;
+		return { isReady: false };
 	}
 
 	/**

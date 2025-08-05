@@ -139,9 +139,30 @@ class FileSink {
 		}
 	}
 
-	/**
-	 * Appends a closing code fence to the current log file, if one exists.
-	 */
+	private async rotate() {
+		const fileToArchive = this.curFile;
+
+		try {
+			await this.closeCurrentFile(); // Finalizes the file that is about to be archived.
+			await mkdirp(this.vault, this.dir);
+
+			const date = datestamp();
+			this.curDate = date;
+			const path = normalizePath(`${this.dir}/log_${timestamp()}.md`);
+			this.curFile = await this.vault.create(path, `# ${path}\n\n` + "```\n");
+			this.curSize = 0;
+		} catch (e) {
+			console.error("KOReader Logger: Failed to rotate to a new log file.", e);
+			this.curFile = null; // Stop logging to file if rotation fails
+		}
+
+		// Now, safely archive the *previous* log file and clean up old archives.
+		if (fileToArchive) {
+			await this.compressLogFile(fileToArchive);
+		}
+		await this.enforceRetentionPolicy();
+	}
+
 	private async closeCurrentFile(): Promise<void> {
 		if (this.curFile) {
 			try {
@@ -153,63 +174,55 @@ class FileSink {
 		}
 	}
 
-	private async rotate() {
+	/**
+	 * Compresses a single log file to a .gz archive and removes the original.
+	 * This is now called for one file at a time during rotation.
+	 * @param file The TFile object of the markdown log to compress.
+	 */
+	private async compressLogFile(file: TFile): Promise<void> {
 		try {
-			await this.closeCurrentFile();
-			await mkdirp(this.vault, this.dir);
+			const content = await this.vault.adapter.read(file.path);
+			// The file should already be closed correctly, but as a safeguard:
+			const closedContent = content.endsWith("```\n")
+				? content
+				: `${content}\n\`\`\`\n`;
 
-			const date = datestamp();
-			this.curDate = date;
-			const path = normalizePath(`${this.dir}/log_${timestamp()}.md`);
-			this.curFile = await this.vault.create(path, `# ${path}\n\n` + "```\n");
-			this.curSize = 0;
+			const gz = pako.gzip(closedContent);
+			// pako returns a view; we need to slice it to create a new, owned ArrayBuffer for writing.
+			const buffer = gz.buffer.slice(gz.byteOffset, gz.byteOffset + gz.length);
+
+			await this.vault.adapter.writeBinary(`${file.path}.gz`, buffer);
+			await this.vault.adapter.remove(file.path);
 		} catch (e) {
-			console.error("KOReader Logger: rotate failed", e);
-			this.curFile = null;
+			console.error(
+				`KOReader Logger: Failed to compress log file ${file.path}`,
+				e,
+			);
 		}
-		await this.cleanup();
 	}
 
-	private async cleanup() {
+	/**
+	 * Enforces the log file retention policy by deleting the oldest .gz archives.
+	 */
+	private async enforceRetentionPolicy() {
 		const folder = this.vault.getAbstractFileByPath(this.dir);
 		if (!(folder instanceof TFolder)) return;
 
-		for (const child of [...folder.children]) {
-			if (
-				child instanceof TFile &&
-				child.extension === "md" &&
-				child.path !== this.curFile?.path
-			) {
-				try {
-					// We must close the fence for any lingering md files before gzipping
-					const content = await this.vault.adapter.read(child.path);
-					const closedContent = content.endsWith("```\n")
-						? content
-						: `${content}\n\`\`\`\n`;
-
-					const gz = pako.gzip(closedContent);
-					await this.vault.adapter.writeBinary(
-						`${child.path}.gz`,
-						new Uint8Array(gz.buffer, gz.byteOffset, gz.byteLength).slice()
-							.buffer,
-					);
-					await this.vault.adapter.remove(child.path);
-				} catch (e) {
-					console.error("KOReader Logger: gzip error", e);
-				}
-			}
-		}
-
+		// Get all .gz files, sort them from oldest to newest.
 		const files = folder.children
 			.filter((f): f is TFile => f instanceof TFile && f.extension === "gz")
 			.sort((a, b) => a.stat.mtime - b.stat.mtime);
 
+		// If we have more than the max allowed, delete the oldest ones.
 		while (files.length > this.MAX_LOG_FILES) {
-			const f = files.shift()!;
+			const fileToDelete = files.shift()!;
 			try {
-				await this.vault.adapter.remove(f.path);
+				await this.vault.adapter.remove(fileToDelete.path);
 			} catch (e) {
-				console.error("KOReader Logger: delete old log failed", e);
+				console.error(
+					`KOReader Logger: Failed to delete old log file ${fileToDelete.path}`,
+					e,
+				);
 			}
 		}
 	}

@@ -38,7 +38,15 @@ export class PromptModal extends Modal {
 
 			text.inputEl.focus();
 			text.inputEl.select();
-			text.inputEl.addEventListener("keydown", this.handleKeydown);
+		});
+
+		this.scope.register([], "Enter", (e: KeyboardEvent) => {
+			e.preventDefault();
+			this.handleSubmit();
+		});
+
+		this.scope.register([], "Escape", () => {
+			this.close();
 		});
 
 		new Setting(this.contentEl)
@@ -56,21 +64,8 @@ export class PromptModal extends Modal {
 		if (!this.didSubmit) {
 			this.resolvePromise(null);
 		}
-		if (this.inputComponent) {
-			this.inputComponent.inputEl.removeEventListener(
-				"keydown",
-				this.handleKeydown,
-			);
-		}
 		this.contentEl.empty();
 	}
-
-	private handleKeydown = (e: KeyboardEvent): void => {
-		if (e.key === "Enter") {
-			e.preventDefault();
-			this.handleSubmit();
-		}
-	};
 
 	private handleSubmit = (): void => {
 		const trimmedValue = this.value.trim();

@@ -12,21 +12,24 @@ export function ensureNumber(value: unknown, defaultValue: number): number {
 		: defaultValue;
 }
 
-export function ensureNumberInRange(
+export function ensureNumberInRange<T extends number | undefined>(
 	value: unknown,
 	defaultValue: number,
-	range: (number | undefined)[],
+	range: readonly T[],
 ): number {
 	const num = ensureNumber(value, defaultValue);
-	return range.includes(num) ? num : defaultValue;
+	return (range as readonly number[]).includes(num) ? num : defaultValue;
 }
 
 export function ensureStringArray(
 	value: unknown,
-	defaultValue: string[],
+	defaultValue: readonly string[],
 ): string[] {
-	if (Array.isArray(value) && value.every((item) => typeof item === "string")) {
-		return value.map((s) => s.trim()).filter(Boolean);
+	if (
+		Array.isArray(value) &&
+		value.every((item): item is string => typeof item === "string")
+	) {
+		return value.map((s) => s.trim()).filter((s) => s.length > 0);
 	}
-	return defaultValue;
+	return [...defaultValue];
 }

@@ -49,8 +49,8 @@ const metaFieldFormatters: Partial<Record<ProgKey, (v: unknown) => unknown>> = {
 	readingStatus: (v) => String(v ?? ""),
 	description: (v) => String(v ?? "").replace(/<[^>]+>/g, ""), // strip html
 	authors: (v) => {
-		if (Array.isArray(v)) return v; // Already formatted as a list
-		if (typeof v === "string" && v.startsWith("[[")) return v; // Already a single link
+		if (Array.isArray(v)) return v;
+		if (typeof v === "string" && v.startsWith("[[")) return v;
 		const arr = splitAndTrim(String(v), /\s*[,;&\n]\s*/);
 		const links = arr.map((a) => `[[${a}]]`);
 		return links.length === 1 ? links[0] : links;
@@ -77,20 +77,19 @@ export class FrontmatterService {
 	public async parseFile(
 		file: TFile,
 	): Promise<{ frontmatter: FrontMatterCache; body: string }> {
-		const content = await this.app.vault.read(file);
 		const cache = this.app.metadataCache.getFileCache(file);
-		const frontmatter = cache?.frontmatter ?? {};
-		let body: string;
 
+		// Fast path via cache
 		if (cache?.frontmatterPosition) {
-			body = content.slice(cache.frontmatterPosition.end.offset);
-		} else {
-			body = content
-				.replace(FrontmatterService.FRONTMATTER_REGEX, "")
-				.trimStart();
+			const content = await this.app.vault.read(file);
+			const body = content.slice(cache.frontmatterPosition.end.offset);
+			// Avoid a second YAML parse; rely on cache.frontmatter here
+			return { frontmatter: cache.frontmatter ?? {}, body: body.trimStart() };
 		}
 
-		return { frontmatter, body };
+		// Fallback: parse content ourselves
+		const content = await this.app.vault.read(file);
+		return this.parseContent(content);
 	}
 
 	/**
@@ -102,26 +101,21 @@ export class FrontmatterService {
 		frontmatter: FrontMatterCache;
 		body: string;
 	} {
-		const match = content.match(FrontmatterService.FRONTMATTER_REGEX);
+		const { yaml, body } = this.splitFrontmatter(content);
 		let frontmatter: FrontMatterCache = {};
-		let body = content;
-
-		if (match) {
-			const yamlBlock = match[1];
-			body = content.slice(match[0].length);
+		if (yaml) {
 			try {
-				frontmatter = parseYaml(yamlBlock) ?? {};
+				frontmatter = parseYaml(yaml) ?? {};
 			} catch (e) {
 				this.loggingService.error(
 					this.SCOPE,
 					"FrontmatterService: Failed to parse YAML block:",
 					e,
-					yamlBlock,
+					yaml,
 				);
 			}
 		}
-
-		return { frontmatter, body };
+		return { frontmatter, body: body.trimStart() };
 	}
 
 	/**
@@ -198,5 +192,14 @@ export class FrontmatterService {
 		}
 
 		return `---\n${yamlString}---\n\n${body.trim()}`;
+	}
+
+	private splitFrontmatter(content: string): {
+		yaml: string | null;
+		body: string;
+	} {
+		const match = content.match(FrontmatterService.FRONTMATTER_REGEX);
+		if (!match) return { yaml: null, body: content };
+		return { yaml: match[1] ?? null, body: content.slice(match[0].length) };
 	}
 }

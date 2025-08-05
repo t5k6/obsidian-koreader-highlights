@@ -1,12 +1,12 @@
 import { type App, Notice, TFile, type TFolder } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
-import { ProgressModal } from "src/ui/ProgressModal";
 import { asyncPool } from "src/utils/concurrency";
 import { getFileNameWithoutExt } from "src/utils/formatUtils";
 import {
 	convertCommentStyle,
 	extractHighlightsWithStyle,
 } from "src/utils/highlightExtractor";
+import { withProgress } from "src/utils/progress";
 import {
 	addSummary,
 	blankSummary,
@@ -69,16 +69,6 @@ export class ImportManager {
 			return;
 		}
 
-		const poolSize = Math.min(
-			6,
-			Math.max(2, navigator.hardwareConcurrency || 4),
-		);
-		this.loggingService.info(this.SCOPE, `Import concurrency = ${poolSize}`);
-
-		const modal = new ProgressModal(this.app);
-		modal.open();
-		modal.setTotal(sdrPaths.length);
-
 		const session: DuplicateHandlingSession = {
 			applyToAll: false,
 			choice: null,
@@ -87,37 +77,31 @@ export class ImportManager {
 
 		let summary = blankSummary();
 
-		let doneCounter = 0;
-		const progressTicker = setInterval(() => {
-			modal.updateProgress(
-				doneCounter,
-				`${doneCounter}/${sdrPaths.length} processed`,
-			);
-		}, 200);
-
 		try {
-			const perFileSummaries = await asyncPool(
-				poolSize,
-				sdrPaths,
-				async (sdrPath, idx) => {
-					if (modal.abortSignal.aborted)
-						throw new DOMException("Aborted by user", "AbortError");
+			await withProgress(this.app, sdrPaths.length, async (tick, signal) => {
+				const poolSize = Math.min(
+					6,
+					Math.max(2, navigator.hardwareConcurrency || 4),
+				);
 
-					const res = await this.processSdr(sdrPath, session);
-					doneCounter = idx + 1;
-					return res;
-				},
-				modal.abortSignal,
-			);
+				const perFileSummaries = await asyncPool(
+					poolSize,
+					sdrPaths,
+					async (sdrPath) => {
+						if (signal.aborted)
+							throw new DOMException("Aborted by user", "AbortError");
+						const res = await this.processSdr(sdrPath, session);
+						tick();
+						return res;
+					},
+					signal,
+				);
 
-			for (const s of perFileSummaries) summary = addSummary(summary, s);
+				for (const s of perFileSummaries) summary = addSummary(summary, s);
+			});
 
 			new Notice(
-				`KOReader Import finished\n${summary.created} new • ${
-					summary.merged
-				} merged • ${summary.automerged} auto-merged • ${
-					summary.skipped
-				} skipped • ${summary.errors} error(s)`,
+				`KOReader Import finished\n${summary.created} new • ${summary.merged} merged • ${summary.automerged} auto-merged • ${summary.skipped} skipped • ${summary.errors} error(s)`,
 				10_000,
 			);
 			this.loggingService.info(this.SCOPE, "Import process finished", summary);
@@ -133,11 +117,8 @@ export class ImportManager {
 				new Notice("KOReader Importer: critical error. Check console.");
 			}
 		} finally {
-			clearInterval(progressTicker);
-
 			this.loggingService.info(this.SCOPE, "Flushing database index …");
 			await this.localIndexService.flushIndex();
-
 			try {
 				await this.snapshotManager.cleanupOldBackups(
 					this.plugin.settings.backupRetentionDays,
@@ -149,8 +130,6 @@ export class ImportManager {
 					cleanupError,
 				);
 			}
-
-			modal.close();
 		}
 	}
 
@@ -281,6 +260,27 @@ export class ImportManager {
 			await this.snapshotManager.createSnapshot(result.file);
 		}
 
+		const lastTs = this.plugin.settings.lastDeviceTimestamp;
+		if (lastTs) {
+			// Filter out annotations that are older than the last known import
+			luaMetadata.annotations = luaMetadata.annotations.filter(
+				(ann) => ann.datetime > lastTs,
+			);
+		}
+
+		// After a successful import of a file
+		const latestAnnotation = luaMetadata.annotations.sort((a, b) =>
+			b.datetime.localeCompare(a.datetime),
+		)[0];
+		if (latestAnnotation) {
+			const currentLastTs = this.plugin.settings.lastDeviceTimestamp ?? "";
+			if (latestAnnotation.datetime > currentLastTs) {
+				this.plugin.settings.lastDeviceTimestamp = latestAnnotation.datetime;
+				// Debounce or collect these saves to avoid thrashing data.json
+				await this.plugin.saveSettings();
+			}
+		}
+
 		return summary;
 	}
 
@@ -336,48 +336,32 @@ export class ImportManager {
 		);
 
 		const targetStyle = this.plugin.settings.commentStyle;
-
-		// Check if converting from "none" style and warn user
 		await this.checkIfConvertingFromNone(targetStyle);
 
-		// Get files to convert
 		const files = await this.getHighlightFilesToConvert();
 		if (!files) return;
 
-		// Setup progress tracking
-		const modal = new ProgressModal(this.app);
-		modal.open();
-		modal.setTotal(files.length);
-
 		const counts = { converted: 0, skipped: 0 };
-		let doneCounter = 0;
-
-		const progressTicker = setInterval(() => {
-			modal.updateProgress(
-				doneCounter,
-				`${doneCounter}/${files.length} files processed`,
-			);
-		}, 200);
 
 		try {
-			const poolSize = Math.min(
-				4,
-				Math.max(2, navigator.hardwareConcurrency || 4),
-			);
+			await withProgress(this.app, files.length, async (tick, signal) => {
+				const poolSize = Math.min(
+					4,
+					Math.max(2, navigator.hardwareConcurrency || 4),
+				);
 
-			await asyncPool(
-				poolSize,
-				files,
-				async (file, idx) => {
-					if (modal.abortSignal.aborted) {
-						throw new DOMException("Aborted by user", "AbortError");
-					}
-
-					await this.convertSingleFile(file, targetStyle, counts);
-					doneCounter = idx + 1;
-				},
-				modal.abortSignal,
-			);
+				await asyncPool(
+					poolSize,
+					files,
+					async (file) => {
+						if (signal.aborted)
+							throw new DOMException("Aborted by user", "AbortError");
+						await this.convertSingleFile(file, targetStyle, counts);
+						tick();
+					},
+					signal,
+				);
+			});
 
 			new Notice(
 				`Comment style conversion complete: ${counts.converted} files converted, ${counts.skipped} files skipped.`,
@@ -400,9 +384,6 @@ export class ImportManager {
 					"Error during comment style conversion. Check console for details.",
 				);
 			}
-		} finally {
-			clearInterval(progressTicker);
-			modal.close();
 		}
 	}
 

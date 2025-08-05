@@ -1,4 +1,5 @@
-import { TFile, type Vault } from "obsidian";
+import { Notice, TFile, TFolder, type Vault } from "obsidian";
+import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
 import type { CacheManager } from "src/utils/cache/CacheManager";
 import { getHighlightKey } from "src/utils/formatUtils";
@@ -16,9 +17,15 @@ import type { SnapshotManager } from "./SnapshotManager";
 export class DuplicateFinder {
 	private readonly SCOPE = "DuplicateFinder";
 	private potentialDuplicatesCache: Map<string, TFile[]>;
+	// Cache frontmatter during a session to avoid reparsing on fallback scans
+	private fmCache = new Map<
+		string,
+		{ mtime: number; title?: string; authors?: string }
+	>();
 
 	constructor(
 		private vault: Vault,
+		private plugin: KoreaderImporterPlugin,
 		private LocalIndexService: LocalIndexService,
 		private fmService: FrontmatterService,
 		private snapshotManager: SnapshotManager,
@@ -68,17 +75,73 @@ export class DuplicateFinder {
 			return cached;
 		}
 
+		// If the index is persistent, use the fast path (existing behavior).
+		if (this.LocalIndexService.isIndexPersistent()) {
+			this.loggingService.info(
+				this.SCOPE,
+				`Querying index for existing files with book key: ${bookKey}`,
+			);
+			const paths = await this.LocalIndexService.findExistingBookFiles(bookKey);
+			const files = paths
+				.map((p) => this.vault.getAbstractFileByPath(p))
+				.filter((f): f is TFile => f instanceof TFile);
+
+			this.potentialDuplicatesCache.set(bookKey, files);
+			return files;
+		}
+
+		// Degraded mode: no persistent index. Fallback to scanning highlights folder recursively and parsing frontmatter.
 		this.loggingService.info(
 			this.SCOPE,
-			`Querying index for existing files with book key: ${bookKey}`,
+			`Degraded mode: scanning vault for potential duplicates of key: ${bookKey}`,
 		);
-		const paths = await this.LocalIndexService.findExistingBookFiles(bookKey);
-		const files = paths
-			.map((p) => this.vault.getAbstractFileByPath(p))
-			.filter((f): f is TFile => f instanceof TFile);
 
-		this.potentialDuplicatesCache.set(bookKey, files);
-		return files;
+		const settingsFolder = this.plugin.settings.highlightsFolder ?? "";
+		const root = this.vault.getAbstractFileByPath(settingsFolder);
+		if (!(root instanceof TFolder)) {
+			this.loggingService.warn(
+				this.SCOPE,
+				`Highlights folder not found or not a directory: '${settingsFolder}'`,
+			);
+			return [];
+		}
+
+		const results: TFile[] = [];
+		const startTime = Date.now();
+		const SCAN_TIMEOUT_MS = 8000; // 8 seconds
+
+		for (const file of this.walkMarkdownFiles(root)) {
+			if (Date.now() - startTime > SCAN_TIMEOUT_MS) {
+				this.loggingService.warn(
+					this.SCOPE,
+					`Degraded duplicate scan timed out after ${SCAN_TIMEOUT_MS}ms.`,
+				);
+				new Notice(
+					"Duplicate scan took too long and was stopped. Results may be incomplete.",
+					7000,
+				);
+				break; // Stop scanning
+			}
+			try {
+				const cache = await this.getFmCached(file);
+				const fileKey = this.LocalIndexService.bookKeyFromDocProps({
+					title: cache.title ?? "",
+					authors: cache.authors ?? "",
+				});
+				if (fileKey === bookKey) {
+					results.push(file);
+				}
+			} catch (e) {
+				this.loggingService.warn(
+					this.SCOPE,
+					`Frontmatter parse failed for ${file.path} during duplicate scan.`,
+					e,
+				);
+			}
+		}
+
+		this.potentialDuplicatesCache.set(bookKey, results);
+		return results;
 	}
 
 	/**
@@ -164,5 +227,40 @@ export class DuplicateFinder {
 
 	public clearCache(): void {
 		this.potentialDuplicatesCache.clear();
+		this.fmCache.clear();
+	}
+
+	// Recursively walk folders yielding markdown files
+	private *walkMarkdownFiles(entry: any): Generator<TFile> {
+		if (entry instanceof TFile) {
+			if (entry.extension === "md") yield entry;
+			return;
+		}
+		// entry may be a TFolder or other; guard for children
+		const children = (entry as any)?.children as any[] | undefined;
+		if (!children) return;
+		for (const child of children) {
+			if (child instanceof TFile) {
+				if (child.extension === "md") yield child;
+			} else {
+				yield* this.walkMarkdownFiles(child);
+			}
+		}
+	}
+
+	private async getFmCached(
+		file: TFile,
+	): Promise<{ mtime: number; title?: string; authors?: string }> {
+		const prev = this.fmCache.get(file.path);
+		const mtime = file.stat.mtime;
+		if (prev && prev.mtime === mtime) return prev;
+		const { frontmatter } = await this.fmService.parseFile(file);
+		const curr = {
+			mtime,
+			title: String(frontmatter?.title ?? ""),
+			authors: String(frontmatter?.authors ?? ""),
+		};
+		this.fmCache.set(file.path, curr);
+		return curr;
 	}
 }

@@ -1,8 +1,5 @@
 import { type App, type EventRef, MarkdownRenderer, Modal } from "obsidian";
-import type {
-	CompiledTemplate,
-	TemplateManager,
-} from "src/services/parsing/TemplateManager";
+import type { TemplateManager } from "src/services/parsing/TemplateManager";
 import type { Annotation, TemplateDefinition } from "../types";
 
 const EXAMPLE_ANNOTATION_GROUP: Annotation[] = [
@@ -24,7 +21,6 @@ const EXAMPLE_RENDER_CONTEXT = {
 
 export class TemplatePreviewModal extends Modal {
 	private unregisterThemeHandler: EventRef | null = null;
-	private compiledTemplateFn: CompiledTemplate;
 
 	constructor(
 		app: App,
@@ -32,10 +28,6 @@ export class TemplatePreviewModal extends Modal {
 		private template: Omit<TemplateDefinition, "id">,
 	) {
 		super(app);
-		// Pre-compile the template string for rendering
-		this.compiledTemplateFn = (this.templateManager as any).compile(
-			this.template.content,
-		);
 	}
 
 	async onOpen() {
@@ -95,8 +87,13 @@ export class TemplatePreviewModal extends Modal {
 		// Give the UI a moment to update before we do the work
 		await new Promise((resolve) => setTimeout(resolve, 10));
 
+		// Re-compile the template on every refresh
+		const compiledTemplateFn = this.templateManager.compile(
+			this.template.content,
+		);
+
 		const renderedOutput = this.templateManager.renderGroup(
-			this.compiledTemplateFn,
+			compiledTemplateFn,
 			EXAMPLE_ANNOTATION_GROUP,
 			EXAMPLE_RENDER_CONTEXT,
 		);

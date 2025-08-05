@@ -1,9 +1,13 @@
 import type { Annotation, CommentStyle, PositionObject } from "../types";
 import { computeAnnotationId } from "./formatUtils";
 
-// Regular expressions for both comment styles
-const HTML_KOHL_REGEX = /<!--\s*KOHL\s*({.*?})\s*-->/g;
-const MD_KOHL_REGEX = /%%\s*KOHL\s*({.*?})\s*%%/g;
+// Regex pattern sources (no flags). Build instances with explicit flags where needed.
+const HTML_KOHL_PATTERN_SRC = "<!--\\s*KOHL\\s*({.*?})\\s*-->";
+const MD_KOHL_PATTERN_SRC = "%%\\s*KOHL\\s*({.*?})\\s*%%";
+
+// Non-global testers for safe one-off .test() calls
+const HTML_KOHL_PATTERN = new RegExp(HTML_KOHL_PATTERN_SRC);
+const MD_KOHL_PATTERN = new RegExp(MD_KOHL_PATTERN_SRC);
 
 interface KohlMetadata {
 	v: number; // Version number
@@ -79,9 +83,9 @@ export function extractHighlightsWithStyle(
 
 	// Try preferred style first
 	const preferredRegex =
-		preferredStyle === "html" ? HTML_KOHL_REGEX : MD_KOHL_REGEX;
+		preferredStyle === "html" ? HTML_KOHL_PATTERN : MD_KOHL_PATTERN;
 	const fallbackRegex =
-		preferredStyle === "html" ? MD_KOHL_REGEX : HTML_KOHL_REGEX;
+		preferredStyle === "html" ? MD_KOHL_PATTERN : HTML_KOHL_PATTERN;
 	const fallbackStyle: CommentStyle = preferredStyle === "html" ? "md" : "html";
 
 	let annotations = extractWithRegex(content, preferredRegex);
@@ -142,12 +146,9 @@ export function createKohlMarker(
  * @returns Detected comment style or null if none found
  */
 export function detectCommentStyle(content: string): CommentStyle | null {
-	const hasHtml = HTML_KOHL_REGEX.test(content);
-	const hasMd = MD_KOHL_REGEX.test(content);
-
-	// Reset regex state
-	HTML_KOHL_REGEX.lastIndex = 0;
-	MD_KOHL_REGEX.lastIndex = 0;
+	// Stateless tests using non-global patterns
+	const hasHtml = HTML_KOHL_PATTERN.test(content);
+	const hasMd = MD_KOHL_PATTERN.test(content);
 
 	if (hasHtml && !hasMd) return "html";
 	if (hasMd && !hasHtml) return "md";
@@ -164,7 +165,10 @@ export function detectCommentStyle(content: string): CommentStyle | null {
  * @param regex - Regular expression to use for extraction
  * @returns Array of parsed annotations
  */
-function extractWithRegex(content: string, regex: RegExp): Annotation[] {
+function extractWithRegex(content: string, pattern: RegExp): Annotation[] {
+	// Create a fresh, local global regex from the source to avoid shared state.
+	// Use "g" only; if JSON may span lines, swap to "gs".
+	const regex = new RegExp(pattern.source, "g");
 	const annotations: Annotation[] = [];
 	const matches = Array.from(content.matchAll(regex));
 
@@ -201,11 +205,12 @@ function extractWithRegex(content: string, regex: RegExp): Annotation[] {
  * @returns Content with all KOHL markers removed
  */
 export function removeKohlComments(content: string): string {
-	let cleaned = content.replace(HTML_KOHL_REGEX, "");
-	cleaned = cleaned.replace(MD_KOHL_REGEX, "");
+	// Use local, stateful regex instances built from sources
+	let cleaned = content.replace(new RegExp(HTML_KOHL_PATTERN_SRC, "g"), "");
+	cleaned = cleaned.replace(new RegExp(MD_KOHL_PATTERN_SRC, "g"), "");
 
-	// Clean up any leftover empty lines where comments were
-	cleaned = cleaned.replace(/\n\s*\n\s*\n/g, "\n\n");
+	// Collapse 3+ blank lines down to 2
+	cleaned = cleaned.replace(/\n\s*\n(\s*\n)+/g, "\n\n");
 
 	return cleaned;
 }
@@ -232,7 +237,9 @@ export function convertCommentStyle(
 		return content; // No comments to convert from
 	}
 
-	const fromRegex = fromStyle === "html" ? HTML_KOHL_REGEX : MD_KOHL_REGEX;
+	const fromPattern =
+		fromStyle === "html" ? HTML_KOHL_PATTERN_SRC : MD_KOHL_PATTERN_SRC;
+	const fromRegex = new RegExp(fromPattern, "g");
 
 	return content.replace(fromRegex, (match, jsonMeta) => {
 		const meta = safeParseJson(jsonMeta);

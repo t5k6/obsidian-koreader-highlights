@@ -75,13 +75,16 @@ export class FrontmatterFieldModal extends Modal {
 			fieldsContainer.empty();
 
 			this.currentSettings.customFields.forEach((field, index) => {
-				new Setting(fieldsContainer).setName(field).addButton((button) =>
+				// Keep a reference to the created Setting so we can remove its element directly
+				const setting = new Setting(fieldsContainer).setName(field);
+				setting.addButton((button) =>
 					button
 						.setIcon("trash")
 						.setTooltip("Remove field")
 						.onClick(() => {
 							this.currentSettings.customFields.splice(index, 1);
-							renderCustomFields();
+							// Remove the parent Setting element directly from the DOM
+							setting.settingEl.remove();
 						}),
 				);
 			});

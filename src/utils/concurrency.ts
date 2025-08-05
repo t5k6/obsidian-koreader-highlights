@@ -70,3 +70,47 @@ export async function asyncPool<T, R>(
 	await Promise.all(executing);
 	return results;
 }
+
+/**
+ * A minimal mutex that serializes async functions.
+ * Guarantees release even if the callback throws/rejects.
+ */
+export class Mutex {
+	private chain: Promise<void> = Promise.resolve();
+	private locked = false;
+
+	/** Acquires the lock, runs `fn`, then releases. */
+	async lock<T>(fn: () => Promise<T>): Promise<T> {
+		// Create a gate that resolves when previous lock completes.
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+
+		// Chain the gate after the current chain.
+		const prev = this.chain;
+		this.chain = prev.then(() => gate).catch(() => gate); // ensure chain continues after errors
+
+		// Wait for previous to complete, then mark locked.
+		await prev;
+		this.locked = true;
+
+		try {
+			return await fn();
+		} finally {
+			this.locked = false;
+			release(); // let the next waiter proceed
+		}
+	}
+
+	/** Attempts to run `fn` only if mutex is free; returns null if busy. */
+	async tryLock<T>(fn: () => Promise<T>): Promise<T | null> {
+		if (this.locked) return null;
+		return this.lock(fn);
+	}
+
+	/** Whether the mutex is currently held. */
+	isLocked(): boolean {
+		return this.locked;
+	}
+}

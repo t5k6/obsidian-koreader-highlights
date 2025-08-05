@@ -45,12 +45,14 @@ export function registerServices(
 			new DuplicateHandlingModal(app, match, message),
 	);
 
-	// --- Level 0: Foundational ---
+	// --- Level 0: Foundational (No internal dependencies) ---
+	container.register(LoggingService, [VAULT_TOKEN]);
+	container.register(FrontmatterGenerator, []);
+
+	// --- Level 0.5: Depends on LoggingService ---
 	container.register(CacheManager, [LoggingService]);
 	container.register(FileNameGenerator, [LoggingService]);
-	container.register(FrontmatterGenerator, []);
-	container.register(SqlJsManager, []);
-	container.register(FrontmatterService, [LoggingService]);
+	container.register(FrontmatterService, [APP_TOKEN, LoggingService]);
 
 	// --- Level 1: Depends on Level 0 or Tokens ---
 	container.register(FileSystemService, [
@@ -58,6 +60,7 @@ export function registerServices(
 		PLUGIN_TOKEN,
 		CacheManager,
 	]);
+	container.register(SqlJsManager, [LoggingService, FileSystemService]);
 	container.register(SDRFinder, [
 		PLUGIN_TOKEN,
 		CacheManager,
@@ -119,6 +122,7 @@ export function registerServices(
 	// --- Level 2.5: Duplicate Finding
 	container.register(DuplicateFinder, [
 		VAULT_TOKEN,
+		PLUGIN_TOKEN,
 		LocalIndexService,
 		FrontmatterService,
 		SnapshotManager,

@@ -1,8 +1,6 @@
 import path from "node:path";
 import type { Database, SqlValue } from "sql.js";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
-import type { CacheManager } from "src/utils/cache/CacheManager";
-import type { LruCache } from "src/utils/cache/LruCache";
 import type {
 	BookStatistics,
 	Disposable,
@@ -11,7 +9,9 @@ import type {
 	ReadingProgress,
 	ReadingStatus,
 	SettingsObserver,
-} from "../../types";
+} from "src/types";
+import type { CacheManager } from "src/utils/cache/CacheManager";
+import type { LruCache } from "src/utils/cache/LruCache";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 import type { SqlJsManager } from "../SqlJsManager";
@@ -42,8 +42,7 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 	private db: Database | null = null;
 	private dbInit: Promise<void> | null = null;
 	private dbFilePath: string | null = null;
-	private dbFileMTimeMs = 0;
-	private dbFileSize = 0;
+
 	private statsCache: LruCache<string, BookStatisticsBundle | null>;
 	private deviceRootCache = new Map<string, string | null>();
 
@@ -61,24 +60,6 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 		>("stats.derived", 100);
 	}
 
-	public warmUp(): void {
-		this.ensureDbOpen().catch((error) => {
-			this.loggingService.warn(
-				this.SCOPE,
-				"Pre-warming statistics DB failed (this is non-critical).",
-				error,
-			);
-		});
-	}
-
-	/**
-	 * Retrieves reading statistics from KOReader's statistics database.
-	 * Attempts multiple lookup strategies: MD5+title, MD5 only, then author+title.
-	 * @param title - Book title
-	 * @param authors - Book authors
-	 * @param md5 - Optional MD5 hash of the book file
-	 * @returns Complete statistics including reading sessions, or null if not found
-	 */
 	public async findBookStatistics(
 		title: string,
 		authors: string,
@@ -90,9 +71,9 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 		const bookRow = await this.findBook(this.db, title, authors, md5);
 		if (!bookRow) return null;
 
-		const cacheKey = `${bookRow.id}:${this.dbFileMTimeMs}:${this.dbFileSize}`;
+		const cacheKey = `${bookRow.id}`;
 		const cachedStats = this.statsCache.get(cacheKey);
-		if (cachedStats !== undefined) {
+		if (cachedStats) {
 			this.loggingService.info(
 				this.SCOPE,
 				`[CACHE HIT] Statistics for: "${title}"`,
@@ -101,13 +82,11 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 		}
 
 		this.loggingService.info(this.SCOPE, `Querying statistics for: "${title}"`);
-
 		const sessions = this.queryAllRows<PageStatData>(
 			this.db,
 			SQL_GET_SESSIONS,
 			[bookRow.id],
 		);
-
 		const result: BookStatisticsBundle = {
 			book: bookRow,
 			readingSessions: sessions,
@@ -117,6 +96,7 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 		this.statsCache.set(cacheKey, result);
 		return result;
 	}
+
 	private async findBook(
 		db: Database,
 		title: string,
@@ -139,33 +119,17 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 		}
 		return row ?? null;
 	}
-	private async isCurrent(): Promise<boolean> {
-		if (!this.db || !this.dbFilePath) return false;
-		try {
-			const stats = await this.fsService.getNodeStats(this.dbFilePath);
-			return stats
-				? stats.mtimeMs === this.dbFileMTimeMs && stats.size === this.dbFileSize
-				: false;
-		} catch {
-			return false;
-		}
-	}
 
 	private async ensureDbOpen(): Promise<void> {
-		if (this.db && (await this.isCurrent())) {
+		if (this.db) {
 			return;
 		}
-
 		if (this.dbInit) {
 			return this.dbInit;
 		}
 
 		this.dbInit = (async () => {
 			try {
-				if (this.db) {
-					this.dispose();
-				}
-
 				const mountPoint = this.settings.koreaderMountPoint;
 				if (!mountPoint) {
 					this.loggingService.warn(
@@ -188,24 +152,20 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 					deviceRoot,
 					".adds/koreader/settings/statistics.sqlite3",
 				);
-				const SQL = await this.sqlJsManager.getSqlJs();
-				const fileBuf = await this.fsService.readNodeFile(filePath, true);
 
-				const db = new SQL.Database(fileBuf);
-				this.upgradeSchema(db);
-
-				const stats = await this.fsService.getNodeStats(filePath);
-				if (!stats) {
-					db.close();
-					throw new Error(
-						`Critical error: Could not get file stats for DB file that was just read: ${filePath}`,
+				if (!(await this.fsService.nodeFileExists(filePath))) {
+					this.loggingService.warn(
+						this.SCOPE,
+						`Statistics DB not found or not accessible at ${filePath}. This is expected in a sandboxed environment. Continuing without device statistics.`,
 					);
+					return; // Gracefully exit, allowing the rest of the import to proceed.
 				}
+
+				const db = await this.sqlJsManager.openDatabase(filePath);
+				this.upgradeSchema(db);
 
 				this.db = db;
 				this.dbFilePath = filePath;
-				this.dbFileMTimeMs = stats.mtimeMs;
-				this.dbFileSize = stats.size;
 
 				this.loggingService.info(this.SCOPE, `Opened stats DB: ${filePath}`);
 			} catch (error) {
@@ -214,13 +174,11 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 					"Failed to open/process statistics DB",
 					error,
 				);
-				this.dispose();
-				throw error;
+				this.dispose(); // Ensure cleanup on failure
 			} finally {
 				this.dbInit = null;
 			}
 		})();
-
 		return this.dbInit;
 	}
 
@@ -251,16 +209,12 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 		this.settings = newSettings;
 	}
 
-	/**
-	 * Cleans up database connections and saves pending changes.
-	 * Called when plugin is disabled or unloaded.
-	 */
 	dispose(): void {
-		this.db?.close();
+		if (this.dbFilePath) {
+			this.sqlJsManager.closeDatabase(this.dbFilePath);
+		}
 		this.db = null;
 		this.dbFilePath = null;
-		this.dbFileMTimeMs = 0;
-		this.dbFileSize = 0;
 		this.statsCache.clear();
 	}
 

@@ -268,20 +268,18 @@ export class SDRFinder implements SettingsObserver {
 	 */
 	private async detectCandidates(): Promise<string[]> {
 		const out: string[] = [];
-		if (platform() === "darwin") {
-			for await (const e of this.fs.iterateNodeDirectory("/Volumes")) {
-				if (e.isDirectory() && e.name.toLowerCase().includes("kobo")) {
-					out.push(joinPath("/Volumes", e.name));
-				}
+		const os = platform();
+
+		if (os === "darwin") {
+			for (const p of await this.listDirs("/Volumes")) {
+				if (path.basename(p).toLowerCase().includes("kobo")) out.push(p);
 			}
-		} else if (platform() === "linux") {
+		} else if (os === "linux") {
 			for (const root of ["/media", "/run/media"]) {
-				for await (const user of this.fs.iterateNodeDirectory(root)) {
-					if (!user.isDirectory()) continue;
-					const userPath = joinPath(root, user.name);
-					for await (const dev of this.fs.iterateNodeDirectory(userPath)) {
-						if (dev.isDirectory() && dev.name.toLowerCase().includes("kobo")) {
-							out.push(joinPath(userPath, dev.name));
+				for (const userDir of await this.listDirs(root)) {
+					for (const deviceDir of await this.listDirs(userDir)) {
+						if (path.basename(deviceDir).toLowerCase().includes("kobo")) {
+							out.push(deviceDir);
 						}
 					}
 				}
@@ -297,5 +295,17 @@ export class SDRFinder implements SettingsObserver {
 			}
 		}
 		return out;
+	}
+
+	private async listDirs(parentPath: string): Promise<string[]> {
+		const subdirs: string[] = [];
+		try {
+			for await (const entry of this.fs.iterateNodeDirectory(parentPath)) {
+				if (entry.isDirectory()) subdirs.push(joinPath(parentPath, entry.name));
+			}
+		} catch {
+			// iterateNodeDirectory already logs/filters common errors
+		}
+		return subdirs;
 	}
 }

@@ -29,6 +29,8 @@ const NOTE_LINE_REGEX = /^\s*>\s*/;
 const CONDITIONAL_BLOCK_REGEX = /{{#(\w+)}}(.*?)({{\/\1}})/gs;
 const SIMPLE_VAR_REGEX = /\{\{((?!#|\/)[\w]+)\}\}/g;
 const TEMPLATE_FRONTMATTER_REGEX = /^---.*?---\s*/s;
+/** Injected by esbuild.define (see esbuild.config.js) */
+declare const KOREADER_BUILTIN_TEMPLATES: string;
 
 export type CompiledTemplate = (data: TemplateData) => string;
 
@@ -131,7 +133,7 @@ export class TemplateManager implements SettingsObserver {
 	 * @param templateString - The raw template string
 	 * @returns Compiled template function that accepts TemplateData
 	 */
-	private compile(templateString: string): CompiledTemplate {
+	public compile(templateString: string): CompiledTemplate {
 		const noteLineHasQuote = /^[ \t]*>[^\n]*\{\{note\}\}/m.test(templateString);
 		const noteLines = templateString
 			.split(/\r?\n/)
@@ -148,9 +150,12 @@ export class TemplateManager implements SettingsObserver {
 			noteReplacementLogic = `d.note ?? ''`;
 		}
 
+		// escape native template-literal injections
+		const ESCAPE_DOLLAR_CURLY = /\$\{/g;
 		const code = templateString
 			.replace(/\\/g, "\\\\")
 			.replace(/`/g, "\\`")
+			.replace(ESCAPE_DOLLAR_CURLY, "\\${")
 			.replace(
 				CONDITIONAL_BLOCK_REGEX,
 				(_, key, body) => `\${(d.${key}) ? \`${body}\` : ''}`,
@@ -267,6 +272,7 @@ export class TemplateManager implements SettingsObserver {
 	 * @returns Promise resolving to the template string content
 	 */
 	async loadTemplate(): Promise<string> {
+		await this.loadBuiltInTemplates();
 		const { useCustomTemplate, selectedTemplate } =
 			this.plugin.settings.template;
 		const templateId = selectedTemplate || FALLBACK_TEMPLATE_ID;
@@ -403,7 +409,7 @@ export class TemplateManager implements SettingsObserver {
 				const filePath = normalizePath(`${templateDir}/${template.id}.md`);
 
 				// Check if the file already exists to avoid unnecessary writes.
-				if (!(await this.fs.vaultFileExists(filePath))) {
+				if (!(await this.fs.vaultExists(filePath))) {
 					this.loggingService.info(
 						this.SCOPE,
 						`Creating built-in template file: ${filePath}`,

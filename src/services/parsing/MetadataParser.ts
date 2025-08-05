@@ -242,12 +242,22 @@ export class MetadataParser {
 				`Parsed ${result.annotations.length} valid annotation(s).`,
 			);
 			return result;
-		} catch (error) {
-			if (error instanceof Error && "line" in error && "column" in error) {
+		} catch (error: unknown) {
+			const e = error as Partial<Error> & {
+				line?: number;
+				column?: number;
+				stack?: string;
+			};
+			if (
+				e &&
+				typeof e.line === "number" &&
+				typeof e.column === "number" &&
+				e.message
+			) {
 				this.loggingService.error(
 					this.SCOPE,
-					`Lua parsing error at Line ${(error as any).line}, Column ${(error as any).column}: ${error.message}`,
-					error.stack,
+					`Lua parsing error at Line ${e.line}, Column ${e.column}: ${e.message}`,
+					e.stack,
 				);
 			} else {
 				this.loggingService.error(
@@ -256,7 +266,7 @@ export class MetadataParser {
 					error,
 				);
 			}
-			throw error; // Re-throw the error for parseFile to catch and return null
+			throw error as unknown; // rethrow for caller
 		}
 	}
 
@@ -332,6 +342,15 @@ export class MetadataParser {
 			pos1: "pos1",
 		};
 
+		const set = <K extends keyof Annotation>(
+			k: K,
+			v: Annotation[K] | undefined,
+		) => {
+			if (v !== undefined) {
+				annotation[k] = v;
+			}
+		};
+
 		for (const field of fields) {
 			if (field.type !== "TableKey") continue;
 			const key = this.extractKeyAsString(field.key);
@@ -342,7 +361,8 @@ export class MetadataParser {
 			switch (targetField) {
 				case "page": {
 					const pageNumVal = this.extractNumericValue(valueNode);
-					if (pageNumVal !== null) annotation.page = pageNumVal;
+					if (pageNumVal !== null)
+						(annotation as { page?: number }).page = pageNumVal;
 					break;
 				}
 				case "drawer": {
@@ -351,7 +371,7 @@ export class MetadataParser {
 						drawerVal &&
 						(DRAWER_TYPES as readonly string[]).includes(drawerVal)
 					) {
-						annotation.drawer = drawerVal as any;
+						set("drawer", drawerVal as (typeof DRAWER_TYPES)[number]);
 					} else if (drawerVal) {
 						this.loggingService.warn(
 							this.SCOPE,
@@ -361,19 +381,22 @@ export class MetadataParser {
 					break;
 				}
 				case "text":
-				case "note":
-					annotation[targetField] = this.extractStringValue(valueNode) ?? "";
+				case "note": {
+					const s = this.extractStringValue(valueNode);
+					set(targetField, (s ?? "") as any);
 					break;
-				default:
-					(annotation as any)[targetField] =
-						this.extractStringValue(valueNode) ?? undefined;
+				}
+				default: {
+					const s = this.extractStringValue(valueNode) ?? undefined;
+					set(targetField as keyof Annotation, s as any);
 					break;
+				}
 			}
 		}
 
-		if (annotation.page !== undefined) {
-			annotation.pageno = annotation.page;
-			delete annotation.page;
+		if ((annotation as { page?: number }).page !== undefined) {
+			annotation.pageno = (annotation as { page?: number }).page;
+			delete (annotation as { page?: number }).page;
 		} else {
 			annotation.pageno = 0;
 		}
@@ -389,10 +412,7 @@ export class MetadataParser {
 		if (!annotation.pos0 || !annotation.pos1) {
 			this.loggingService.info(
 				this.SCOPE,
-				`Annotation for text "${annotation.text.slice(
-					0,
-					20,
-				)}..." missing pos0/pos1.`,
+				`Annotation for text "${annotation.text.slice(0, 20)}..." missing pos0/pos1.`,
 			);
 		}
 		return annotation as Annotation;
@@ -405,25 +425,25 @@ export class MetadataParser {
 	 * @returns String value or null if extraction fails
 	 */
 	private extractKeyAsString(keyNode: Expression): string | null {
-		if (keyNode.type === "StringLiteral") {
-			return keyNode.raw.slice(1, -1); // Remove quotes
+		switch (keyNode.type) {
+			case "StringLiteral":
+				return keyNode.raw.slice(1, -1);
+			case "NumericLiteral":
+				return keyNode.value.toString();
+			case "Identifier":
+				return keyNode.name;
+			default:
+				this.loggingService.warn(
+					this.SCOPE,
+					`Cannot extract string key from node type: ${keyNode.type}`,
+				);
+				return null;
 		}
-		if (keyNode.type === "NumericLiteral") {
-			return keyNode.value.toString();
-		}
-		if (keyNode.type === "Identifier") {
-			return keyNode.name;
-		}
-		this.loggingService.warn(
-			this.SCOPE,
-			`Cannot extract string key from node type: ${keyNode.type}`,
-		);
-		return null;
 	}
 
 	/**
 	 * Sanitizes and unescapes string values from Lua.
-	 * Handles quote removal, escape sequences, and character corrections.
+	 * Handles quote removal and escape sequences.
 	 * Uses caching for performance.
 	 * @param rawValue - Raw string from Lua parser
 	 * @returns Cleaned and unescaped string
@@ -439,7 +459,6 @@ export class MetadataParser {
 		) {
 			cleaned = cleaned.slice(1, -1);
 		}
-		cleaned = cleaned.replace(/ΓÇö/g, "—");
 		cleaned = cleaned.replace(/\\(.)/g, (match, char) => {
 			const escapeMap: Record<string, string> = {
 				n: "\n",
@@ -462,18 +481,16 @@ export class MetadataParser {
 	 * @returns String value or null if extraction fails
 	 */
 	private extractStringValue(valueNode: Expression): string | null {
-		if (valueNode.type === "StringLiteral") {
-			const sanitized = this.sanitizeString(valueNode.raw);
-			return sanitized;
+		switch (valueNode.type) {
+			case "StringLiteral":
+				return this.sanitizeString(valueNode.raw);
+			case "NumericLiteral":
+				return valueNode.value.toString();
+			case "BooleanLiteral":
+				return valueNode.value.toString();
+			default:
+				return null;
 		}
-		// Handle numbers/booleans being represented as strings if necessary
-		if (valueNode.type === "NumericLiteral") {
-			return valueNode.value.toString();
-		}
-		if (valueNode.type === "BooleanLiteral") {
-			return valueNode.value.toString();
-		}
-		return null;
 	}
 
 	/**
@@ -482,13 +499,15 @@ export class MetadataParser {
 	 * @returns Numeric value or null if extraction fails
 	 */
 	private extractNumericValue(valueNode: Expression): number | null {
-		if (valueNode.type === "NumericLiteral") {
-			return valueNode.value;
+		switch (valueNode.type) {
+			case "NumericLiteral":
+				return valueNode.value;
+			case "StringLiteral": {
+				const num = Number.parseFloat(this.sanitizeString(valueNode.raw));
+				return Number.isNaN(num) ? null : num;
+			}
+			default:
+				return null;
 		}
-		if (valueNode.type === "StringLiteral") {
-			const num = Number.parseFloat(this.sanitizeString(valueNode.raw));
-			if (!Number.isNaN(num)) return num;
-		}
-		return null;
 	}
 }

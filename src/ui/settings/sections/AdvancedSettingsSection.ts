@@ -29,7 +29,7 @@ export class AdvancedSettingsSection extends SettingsSection {
 					10,
 				) as KoreaderHighlightImporterSettings["logLevel"];
 				this.plugin.settings.logLevel = level;
-				await this.plugin.saveSettings(); // This will trigger the observer in LoggingService
+				await this.plugin.saveSettings();
 			},
 		);
 
@@ -47,6 +47,7 @@ export class AdvancedSettingsSection extends SettingsSection {
 		if (this.plugin.settings.logToFile) {
 			folderSetting(
 				containerEl,
+				this,
 				"Log folder",
 				"Debug logs will be written to this folder.",
 				"Default: " + DEFAULT_LOGS_FOLDER,

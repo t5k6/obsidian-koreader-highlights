@@ -6,6 +6,7 @@ import type {
 	DuplicateMatch,
 	IDuplicateHandlingModal,
 } from "src/types";
+import { Mutex } from "src/utils/concurrency";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 import type { MergeService } from "./MergeService";
@@ -20,7 +21,7 @@ type ResolveStatus =
 
 export class DuplicateHandler {
 	private readonly SCOPE = "DuplicateHandler";
-	private modalLock: Promise<void> = Promise.resolve();
+	private readonly modalMutex = new Mutex();
 
 	constructor(
 		private app: App,
@@ -78,6 +79,20 @@ export class DuplicateHandler {
 				return { status: "merged", file: analysis.file };
 			}
 			case "merge": {
+				// Re-check capability right before the operation using the new public method.
+				const canWrite = await this.snapshotManager.isWritable();
+				if (!canWrite) {
+					new Notice(
+						"Merge failed: Cannot write backup/snapshot file. (Read-only vault or sandbox restriction)",
+						7000,
+					);
+					this.loggingService.warn(
+						this.SCOPE,
+						"Merge aborted because SnapshotManager reported it is not writable.",
+					);
+					return { status: "skipped", file: null };
+				}
+
 				const baseContent = await this.snapshotManager.getSnapshotContent(
 					analysis.file,
 				);
@@ -116,19 +131,8 @@ export class DuplicateHandler {
 		analysis: DuplicateMatch,
 		session: DuplicateHandlingSession,
 	): Promise<DuplicateChoice> {
-		let unlock: () => void;
-		const lock = new Promise<void>((resolve) => {
-			unlock = resolve;
-		});
-		const prev = this.modalLock;
-		this.modalLock = prev.then(() => lock);
-
-		try {
-			await prev;
-
-			if (session.applyToAll && session.choice) {
-				return session.choice;
-			}
+		return this.modalMutex.lock(async () => {
+			if (session.applyToAll && session.choice) return session.choice;
 
 			const modal = this.modalFactory(
 				this.app,
@@ -142,10 +146,7 @@ export class DuplicateHandler {
 				session.applyToAll = true;
 				session.choice = choice;
 			}
-
 			return choice;
-		} finally {
-			unlock!();
-		}
+		});
 	}
 }

@@ -13,7 +13,7 @@ export class TemplateSettingsSection extends SettingsSection {
 
 	constructor(
 		plugin: KoreaderImporterPlugin,
-		debouncedSave: () => void,
+		debouncedSave: (() => void) & { cancel: () => void },
 		title: string,
 		templateManager: TemplateManager,
 		startOpen = false,
@@ -98,6 +98,7 @@ export class TemplateSettingsSection extends SettingsSection {
 
 			folderSetting(
 				containerEl,
+				this,
 				"Template folder",
 				"Vault folder where your custom templates are stored.",
 				"Default: " + DEFAULT_TEMPLATES_FOLDER,

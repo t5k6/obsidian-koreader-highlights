@@ -1,25 +1,25 @@
+import { homedir, platform } from "node:os";
 import path from "node:path";
 import {
 	type App,
 	debounce,
 	Notice,
-	normalizePath,
 	type TAbstractFile,
 	TFile,
 	TFolder,
 } from "obsidian";
 import type { Database } from "sql.js";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
-import type { CacheManager } from "src/utils/cache/CacheManager";
-import type { LruCache } from "src/utils/cache/LruCache";
-import { normalizeFileNamePiece } from "src/utils/formatUtils";
 import type {
 	DebouncedFn,
 	Disposable,
 	DocProps,
 	KoreaderHighlightImporterSettings,
 	SettingsObserver,
-} from "../../types";
+} from "src/types";
+import type { CacheManager } from "src/utils/cache/CacheManager";
+import type { LruCache } from "src/utils/cache/LruCache";
+import { normalizeFileNamePiece } from "src/utils/formatUtils";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 import type { SqlJsManager } from "../SqlJsManager";
@@ -45,12 +45,22 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 	private readonly SCOPE = "LocalIndexService";
 	private idxDb: Database | null = null;
 	private idxInitializing: Promise<void> | null = null;
-	private isPersisting: Promise<void> | null = null;
-	private isDirty = false;
 
 	private idxPath: string;
 	private pathCache: LruCache<string, string[]>;
 	private persistIndexDebounced: DebouncedFn;
+
+	// Degraded-mode capability
+	private indexState: "persistent" | "in_memory" | "unavailable" =
+		"unavailable";
+
+	public getIndexState(): "persistent" | "in_memory" | "unavailable" {
+		return this.indexState;
+	}
+
+	public isIndexPersistent(): boolean {
+		return this.indexState === "persistent";
+	}
 
 	constructor(
 		private plugin: KoreaderImporterPlugin,
@@ -61,17 +71,22 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		private readonly loggingService: LoggingService,
 	) {
 		this.settings = plugin.settings;
-		this.idxPath = normalizePath(
-			path.join(
-				this.plugin.app.vault.configDir,
-				"plugins",
-				this.plugin.manifest.id,
-				"highlight_index.sqlite",
-			),
+
+		this.idxPath = path.join(
+			this.app.vault.configDir,
+			"plugins",
+			this.plugin.manifest.id, // Use manifest ID for correctness
+			"highlight_index.sqlite",
 		);
+
 		this.pathCache = this.cacheManager.createLru("db.path", 500);
 		this.persistIndexDebounced = debounce(
-			() => this.persistIndex(),
+			() => {
+				// The check for persistence is now simpler: idxPath is always set.
+				if (this.isIndexPersistent() && this.idxDb) {
+					this.sqlJsManager.persistDatabase(this.idxPath);
+				}
+			},
 			5000,
 			false,
 		) as DebouncedFn;
@@ -86,7 +101,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		this.registerVaultEvents();
 		this.loggingService.info(
 			this.SCOPE,
-			"Service initialized and vault event listeners registered.",
+			`Service initialized. Index path: ${this.idxPath}`,
 		);
 	}
 
@@ -112,8 +127,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		const cached = this.pathCache.get(bookKey);
 		if (cached) return cached;
 		await this.ensureIndexReady();
-		if (!this.idxDb) return [];
-		const stmt = this.idxDb.prepare(
+		const stmt = this.idxDb!.prepare(
 			"SELECT vault_path FROM book WHERE key = ? AND vault_path IS NOT NULL",
 		);
 		const paths: string[] = [];
@@ -152,7 +166,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 			[key, id, title, authors, vaultPath ?? null],
 		);
 		this.pathCache.delete(key);
-		this.isDirty = true;
+		this.sqlJsManager.setDirty(this.idxPath, true);
 		this.persistIndexDebounced();
 	}
 
@@ -165,131 +179,73 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 	private async ensureIndexReady(): Promise<void> {
 		if (this.idxDb) return;
 		if (this.idxInitializing) return this.idxInitializing;
+
 		this.idxInitializing = (async () => {
-			await this.openIndexDatabase();
-			this.idxInitializing = null;
+			// If idxPath is invalid (e.g., could not be determined), skip directly to in-memory mode.
+			if (!this.idxPath) {
+				// The check is now just for a valid path string.
+				this.loggingService.info(
+					this.SCOPE,
+					"Persistent index path not available. Initializing in-memory DB.",
+				);
+				await this.initializeInMemoryDb();
+				this.idxInitializing = null;
+				return;
+			}
+
+			try {
+				// No need to ensure vault folder, as writeNodeFile will do it.
+				this.idxDb = await this.sqlJsManager.openDatabase(this.idxPath, {
+					schemaSql: INDEX_DB_SCHEMA,
+					validate: true,
+				});
+				this.indexState = "persistent";
+			} catch (error) {
+				this.loggingService.warn(
+					this.SCOPE,
+					"Persistent index unavailable; falling back to in-memory...",
+					error,
+				);
+				new Notice(
+					"KOReader Importer: Index is in-memory. Duplicate detection will be slower this session.",
+					8000,
+				);
+				await this.initializeInMemoryDb();
+			} finally {
+				this.idxInitializing = null;
+			}
 		})();
 		return this.idxInitializing;
 	}
 
-	private async openIndexDatabase(): Promise<void> {
-		const SQL = await this.sqlJsManager.getSqlJs();
-		let dbContent: Uint8Array | null = null;
-		let needsRebuild = false;
-
+	// Helper to initialize in-memory DB with schema and state
+	private async initializeInMemoryDb(): Promise<void> {
 		try {
-			// Ask for the file. The service will now throw a standard error if it fails.
-			dbContent = await this.fsService.readNodeFile(this.idxPath, true);
-		} catch (error: any) {
-			if (error.code === "ENOENT") {
-				this.loggingService.info(
-					this.SCOPE,
-					"No index DB found, creating a fresh one.",
-				);
-				needsRebuild = true;
-			} else {
-				// Any other error during read is critical and should stop the process.
-				this.loggingService.error(
-					this.SCOPE,
-					`Could not read index DB file at ${this.idxPath}`,
-					error,
-				);
-				new Notice(
-					"KOReader Importer: Critical error reading plugin database. Check console.",
-				);
-				// Do not continue if we can't read the file for reasons other than it being missing.
-				return;
-			}
-		}
-
-		if (dbContent) {
-			try {
-				this.idxDb = new SQL.Database(dbContent);
-				this.idxDb.exec("PRAGMA quick_check;");
-			} catch (e: any) {
-				if (e.message?.includes("malformed")) {
-					this.loggingService.warn(
-						this.SCOPE,
-						`Index DB is corrupted. Deleting and rebuilding.`,
-						e,
-					);
-					new Notice(
-						"KOReader Importer: Database was corrupted. Rebuilding index.",
-					);
-					needsRebuild = true;
-				} else {
-					this.loggingService.error(
-						this.SCOPE,
-						`SQL error opening index DB.`,
-						e,
-					);
-					new Notice(
-						"KOReader Importer: Could not open plugin database. Check console.",
-					);
-					return;
-				}
-			}
-		}
-
-		if (needsRebuild) {
-			try {
-				if (await this.fsService.vaultExists(this.idxPath)) {
-					await this.app.vault.adapter.remove(this.idxPath);
-				}
-			} catch (deleteError) {
-				this.loggingService.error(
-					this.SCOPE,
-					`Failed to delete corrupted DB file.`,
-					deleteError,
-				);
-			}
-			this.idxDb = new SQL.Database();
-			this.idxDb.run(INDEX_DB_SCHEMA);
-			this.isDirty = true;
-			await this.persistIndex(); // Persist immediately after creation
+			const memDb = await this.sqlJsManager.createInMemoryDatabase();
+			this.idxDb = memDb;
+			this.sqlJsManager.applySchema(this.idxDb, INDEX_DB_SCHEMA);
+			this.indexState = "in_memory";
+		} catch (memErr) {
+			this.loggingService.error(
+				this.SCOPE,
+				"Failed to initialize in-memory index database.",
+				memErr,
+			);
+			this.idxDb = null;
+			this.indexState = "unavailable";
 		}
 	}
 
 	public async flushIndex(): Promise<void> {
 		this.persistIndexDebounced.cancel();
-		await this.persistIndex();
-	}
-
-	private async persistIndex() {
-		if (!this.idxDb || !this.isDirty || this.isPersisting) return;
-
-		this.isPersisting = (async () => {
-			this.loggingService.info(
-				this.SCOPE,
-				"Persisting index database to disk...",
-			);
-			try {
-				const data = this.idxDb!.export();
-				// Use the Obsidian vault adapter for writing internal data files.
-				// This is the correct API for paths inside the vault's .obsidian directory.
-				// this.idxPath is already a vault-relative path.
-				await this.app.vault.adapter.writeBinary(this.idxPath, data);
-				this.isDirty = false;
-				this.loggingService.info(
-					this.SCOPE,
-					"Index database persisted successfully.",
-				);
-			} catch (error) {
-				this.loggingService.error(
-					this.SCOPE,
-					"Failed to persist index database.",
-					error,
-				);
-			} finally {
-				this.isPersisting = null;
-			}
-		})();
-		await this.isPersisting;
+		if (this.isIndexPersistent() && this.idxDb) {
+			await this.sqlJsManager.persistDatabase(this.idxPath);
+		}
 	}
 
 	public async dispose(): Promise<void> {
 		await this.flushIndex();
-		this.idxDb?.close();
+		this.sqlJsManager.closeDatabase(this.idxPath);
 	}
 
 	private registerVaultEvents(): void {
@@ -321,10 +277,8 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 			]);
 		}
 
-		const changed = this.idxDb.getRowsModified();
-
-		if (changed > 0) {
-			this.isDirty = true;
+		if (this.idxDb.getRowsModified() > 0) {
+			this.sqlJsManager.setDirty(this.idxPath, true);
 			this.persistIndexDebounced();
 		}
 	}
@@ -346,11 +300,26 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 			]);
 		}
 
-		const changed = this.idxDb.getRowsModified();
-
-		if (changed > 0) {
-			this.isDirty = true;
+		if (this.idxDb.getRowsModified() > 0) {
+			this.sqlJsManager.setDirty(this.idxPath, true);
 			this.persistIndexDebounced();
 		}
 	}
+}
+
+function getGlobalObsidianAppDataPath(): string | null {
+	const p = platform();
+	let dataPath: string | undefined;
+
+	if (p === "win32") {
+		dataPath = process.env.APPDATA; // Roaming AppData
+	} else if (p === "darwin") {
+		dataPath = path.join(homedir(), "Library/Application Support");
+	} else {
+		// linux
+		dataPath = process.env.XDG_CONFIG_HOME ?? path.join(homedir(), ".config");
+	}
+
+	if (!dataPath) return null;
+	return path.join(dataPath, "obsidian");
 }

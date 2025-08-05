@@ -3,12 +3,6 @@ import { parse } from "node:path";
 import type { LoggingService } from "src/services/LoggingService";
 import type { Annotation } from "../types";
 
-const DEFAULT_AUTHOR = "Unknown Author";
-const DEFAULT_TITLE = "Untitled";
-const FILE_EXTENSION = ".md";
-const AUTHOR_SEPARATOR = " & ";
-const TITLE_SEPARATOR = " - ";
-
 interface PositionObject {
 	x: number;
 	y: number;
@@ -338,6 +332,11 @@ export function isWithinGap(
 	return a.pageno === b.pageno && distanceBetweenHighlights(a, b) <= maxGap;
 }
 
+function normalizeForHashing(text?: string): string {
+	if (!text) return "";
+	return text.trim().replace(/\s+/g, " ");
+}
+
 /**
  * Generates a unique ID for an annotation based on its content.
  * Uses SHA1 hash of position and text data.
@@ -345,8 +344,9 @@ export function isWithinGap(
  * @returns 16-character hex string ID
  */
 export function computeAnnotationId(annotation: Annotation): string {
-	const { pageno, pos0, pos1, text } = annotation;
-	const input = `${pageno}|${pos0}|${pos1}|${(text ?? "").trim()}`;
+	const { pageno, pos0, pos1, text, note } = annotation;
+	// Use the normalized text and note for the hash
+	const input = `${pageno}|${pos0}|${pos1}|${normalizeForHashing(text)}|${normalizeForHashing(note)}`;
 	return createHash("sha1").update(input).digest("hex").slice(0, 16);
 }
 

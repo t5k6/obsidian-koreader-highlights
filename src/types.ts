@@ -162,6 +162,7 @@ export interface KoreaderHighlightImporterSettings {
 	template: KoreaderTemplateSettings;
 	commentStyle: CommentStyle;
 	backupRetentionDays: number;
+	lastDeviceTimestamp?: string;
 }
 
 // --- UI / Modal Related Types ---
@@ -199,18 +200,30 @@ export interface RenderContext {
 	separators?: (" " | " [...] ")[];
 }
 
+/**
+ * TemplateData is a readonly, strictly keyed shape for template rendering.
+ * Keys are derived to enable keyof-based validation elsewhere.
+ */
 export interface TemplateData {
-	[key: string]: string | boolean | number | string[] | undefined;
-	highlight?: string;
-	chapter?: string;
-	pageno?: number;
-	isFirstInChapter?: boolean;
-	note?: string;
-	notes?: string[];
-	date?: string; // Stable "en-US" format
-	localeDate?: string; // system locale format
-	dailyNoteLink?: string; // daily note link format
+	readonly highlight?: string;
+	readonly chapter?: string;
+	readonly pageno?: number;
+	readonly isFirstInChapter?: boolean;
+	readonly note?: string;
+	readonly notes?: readonly string[];
+	readonly date?: string; // Stable "en-US" format
+	readonly localeDate?: string; // system locale format
+	readonly dailyNoteLink?: string; // daily note link format
 }
+/**
+ * Narrow set of allowed keys for variables/blocks in templates.
+ * Keep in sync with TemplateData keys.
+ */
+export type TemplateDataKey = keyof TemplateData;
+/**
+ * Readonly variant consumers should accept.
+ */
+export type ReadonlyTemplateData = Readonly<TemplateData>;
 
 export interface TemplateDefinition {
 	id: string;

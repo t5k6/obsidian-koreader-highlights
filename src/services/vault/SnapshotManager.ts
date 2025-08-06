@@ -52,6 +52,7 @@ export class SnapshotManager {
 				`Failed to write snapshot for ${targetFile.path}`,
 				error,
 			);
+			throw error;
 		}
 	}
 
@@ -87,6 +88,7 @@ export class SnapshotManager {
 				`Failed to create backup for ${targetFile.path}`,
 				error,
 			);
+			throw error;
 		}
 	}
 

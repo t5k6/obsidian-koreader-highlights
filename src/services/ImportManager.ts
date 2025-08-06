@@ -1,3 +1,4 @@
+import path from "node:path";
 import { type App, Notice, TFile, type TFolder } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import { asyncPool } from "src/utils/concurrency";
@@ -26,6 +27,7 @@ import type { ContentGenerator } from "./vault/ContentGenerator";
 import type { DuplicateFinder } from "./vault/DuplicateFinder";
 import type { DuplicateHandler } from "./vault/DuplicateHandler";
 import type { FileNameGenerator } from "./vault/FileNameGenerator";
+import type ImportIndexService from "./vault/ImportIndexService";
 import type { LocalIndexService } from "./vault/LocalIndexService";
 import type { SnapshotManager } from "./vault/SnapshotManager";
 
@@ -48,6 +50,7 @@ export class ImportManager {
 		private readonly loggingService: LoggingService,
 		private readonly fs: FileSystemService,
 		private readonly frontmatterService: FrontmatterService,
+		private readonly importIndexService: ImportIndexService,
 	) {}
 
 	/**
@@ -62,8 +65,12 @@ export class ImportManager {
 			"Starting KOReader highlight import process…",
 		);
 
-		const sdrPaths = await this.sdrFinder.findSdrDirectoriesWithMetadata();
-		if (!sdrPaths?.length) {
+		// Load the import index at the start of the import
+		await this.importIndexService.load();
+
+		const metadataFilePaths =
+			await this.sdrFinder.findSdrDirectoriesWithMetadata();
+		if (!metadataFilePaths?.length) {
 			new Notice("No KOReader highlight files found (.sdr with metadata.lua).");
 			this.loggingService.info(this.SCOPE, "No SDR files found to import.");
 			return;
@@ -76,29 +83,44 @@ export class ImportManager {
 		this.duplicateFinder.clearCache();
 
 		let summary = blankSummary();
+		// lastDeviceTimestamp is deprecated; keep variable for minimal churn but unused in logic
+		let latestTimestampThisSession =
+			this.plugin.settings.lastDeviceTimestamp ?? "";
 
 		try {
-			await withProgress(this.app, sdrPaths.length, async (tick, signal) => {
-				const poolSize = Math.min(
-					6,
-					Math.max(2, navigator.hardwareConcurrency || 4),
-				);
+			await withProgress(
+				this.app,
+				metadataFilePaths.length,
+				async (tick, signal) => {
+					const poolSize = Math.min(
+						6,
+						Math.max(2, navigator.hardwareConcurrency || 4),
+					);
 
-				const perFileSummaries = await asyncPool(
-					poolSize,
-					sdrPaths,
-					async (sdrPath) => {
-						if (signal.aborted)
-							throw new DOMException("Aborted by user", "AbortError");
-						const res = await this.processSdr(sdrPath, session);
-						tick();
-						return res;
-					},
-					signal,
-				);
+					const results = await asyncPool(
+						poolSize,
+						metadataFilePaths,
+						async (metadataPath) => {
+							if (signal.aborted)
+								throw new DOMException("Aborted by user", "AbortError");
+							const res = await this.processMetadataFile(metadataPath, session);
+							tick();
+							return res;
+						},
+						signal,
+					);
 
-				for (const s of perFileSummaries) summary = addSummary(summary, s);
-			});
+					for (const r of results) {
+						summary = addSummary(summary, r.fileSummary);
+						if (
+							r.latestTimestampInFile &&
+							r.latestTimestampInFile > latestTimestampThisSession
+						) {
+							latestTimestampThisSession = r.latestTimestampInFile;
+						}
+					}
+				},
+			);
 
 			new Notice(
 				`KOReader Import finished\n${summary.created} new • ${summary.merged} merged • ${summary.automerged} auto-merged • ${summary.skipped} skipped • ${summary.errors} error(s)`,
@@ -117,6 +139,8 @@ export class ImportManager {
 				new Notice("KOReader Importer: critical error. Check console.");
 			}
 		} finally {
+			// Always save the import index at the end
+			await this.importIndexService.save();
 			this.loggingService.info(this.SCOPE, "Flushing database index …");
 			await this.localIndexService.flushIndex();
 			try {
@@ -138,13 +162,44 @@ export class ImportManager {
 	 * @param sdrPath - Path to the SDR directory containing metadata.lua
 	 * @returns Summary object with counts of created, merged, skipped, and error items
 	 */
-	private async processSdr(
-		sdrPath: string,
+	private async processMetadataFile(
+		metadataPath: string,
 		session: DuplicateHandlingSession,
-	): Promise<Summary> {
+	): Promise<{ fileSummary: Summary; latestTimestampInFile: string | null }> {
 		const summary = blankSummary();
+		let latestTimestampInFile: string | null = null;
 
 		try {
+			// 1) Early exit using filesystem stats and index
+			const stats = await this.fs.getNodeStats(metadataPath);
+			if (!stats) {
+				this.loggingService.warn(
+					this.SCOPE,
+					`Could not get stats for ${metadataPath}, skipping.`,
+				);
+				summary.errors++;
+				return { fileSummary: summary, latestTimestampInFile: null };
+			}
+
+			const previous = this.importIndexService.getEntry(metadataPath);
+			if (
+				previous &&
+				previous.mtime === stats.mtime.getTime() &&
+				previous.size === stats.size
+			) {
+				this.loggingService.info(
+					this.SCOPE,
+					`Skipping unchanged file (via index): ${metadataPath}`,
+				);
+				summary.skipped++;
+				return {
+					fileSummary: summary,
+					latestTimestampInFile: previous.newestAnnotationTimestamp,
+				};
+			}
+
+			// 2) Parse and process
+			const sdrPath = path.dirname(metadataPath);
 			const luaMetadata = await this.metadataParser.parseFile(sdrPath);
 			if (!luaMetadata?.annotations?.length) {
 				this.loggingService.info(
@@ -152,7 +207,31 @@ export class ImportManager {
 					`Skipping – no annotations found in ${sdrPath}`,
 				);
 				summary.skipped++;
-				return summary;
+				return { fileSummary: summary, latestTimestampInFile: null };
+			}
+
+			const newestAnnotation = luaMetadata.annotations.reduce(
+				(newest, current) =>
+					!newest || current.datetime > newest.datetime ? current : newest,
+				null as any,
+			);
+			if (newestAnnotation) {
+				latestTimestampInFile = newestAnnotation.datetime;
+			}
+
+			// If previous exists and no newer annotations than last seen, skip
+			if (
+				previous &&
+				latestTimestampInFile !== null &&
+				previous.newestAnnotationTimestamp !== null &&
+				latestTimestampInFile <= previous.newestAnnotationTimestamp
+			) {
+				this.loggingService.info(
+					this.SCOPE,
+					`Skipping file with no new annotations: ${metadataPath}`,
+				);
+				summary.skipped++;
+				return { fileSummary: summary, latestTimestampInFile };
 			}
 
 			await this.enrichWithStatistics(luaMetadata);
@@ -166,11 +245,25 @@ export class ImportManager {
 			}
 
 			const fileSummary = await this.saveHighlightsToFile(luaMetadata, session);
-			return fileSummary;
+
+			// 3) Update index if created/merged/automerged
+			if (latestTimestampInFile) {
+				this.importIndexService.updateEntry(metadataPath, {
+					mtime: stats.mtime.getTime(),
+					size: stats.size,
+					newestAnnotationTimestamp: latestTimestampInFile,
+				});
+			}
+
+			return { fileSummary, latestTimestampInFile };
 		} catch (err) {
-			this.loggingService.error(this.SCOPE, `Error processing ${sdrPath}`, err);
+			this.loggingService.error(
+				this.SCOPE,
+				`Error processing ${metadataPath}`,
+				err as Error,
+			);
 			summary.errors++;
-			return summary;
+			return { fileSummary: summary, latestTimestampInFile };
 		}
 	}
 
@@ -220,14 +313,41 @@ export class ImportManager {
 		// Create a lazy provider for the file content
 		const contentProvider = () => this.generateFileContent(luaMetadata);
 
-		const bestMatch = await this.duplicateFinder.findBestMatch(luaMetadata);
+		const { match: bestMatch, timedOut } =
+			await this.duplicateFinder.findBestMatch(luaMetadata);
 
 		let result: { status: string; file: TFile | null };
 
 		if (!bestMatch) {
-			const newFile = await this.createNewFile(luaMetadata, contentProvider);
-			result = { status: "created", file: newFile };
+			// No match found
+			if (timedOut) {
+				// Incomplete scan – do NOT silently create a new file.
+				const userChoice = await this.promptUserOnTimeout(
+					luaMetadata.docProps.title || "Unknown title",
+				);
+				if (userChoice === "skip") {
+					result = { status: "skipped", file: null };
+				} else {
+					// import-anyway: create with warning
+					const newFile = await this.createNewFile(
+						luaMetadata,
+						contentProvider,
+						{ withTimeoutWarning: true },
+					);
+					result = { status: "created", file: newFile };
+				}
+			} else {
+				const newFile = await this.createNewFile(luaMetadata, contentProvider);
+				result = { status: "created", file: newFile };
+			}
 		} else {
+			// We have a match; handle normally. We can optionally log timeout occurrence.
+			if (timedOut) {
+				this.loggingService.warn(
+					this.SCOPE,
+					`Duplicate scan timed out for "${luaMetadata.docProps.title}" but a likely match was found.`,
+				);
+			}
 			result = await this.duplicateHandler.handleDuplicate(
 				bestMatch,
 				contentProvider,
@@ -260,35 +380,76 @@ export class ImportManager {
 			await this.snapshotManager.createSnapshot(result.file);
 		}
 
-		const lastTs = this.plugin.settings.lastDeviceTimestamp;
-		if (lastTs) {
-			// Filter out annotations that are older than the last known import
-			luaMetadata.annotations = luaMetadata.annotations.filter(
-				(ann) => ann.datetime > lastTs,
-			);
-		}
-
-		// After a successful import of a file
-		const latestAnnotation = luaMetadata.annotations.sort((a, b) =>
-			b.datetime.localeCompare(a.datetime),
-		)[0];
-		if (latestAnnotation) {
-			const currentLastTs = this.plugin.settings.lastDeviceTimestamp ?? "";
-			if (latestAnnotation.datetime > currentLastTs) {
-				this.plugin.settings.lastDeviceTimestamp = latestAnnotation.datetime;
-				// Debounce or collect these saves to avoid thrashing data.json
-				await this.plugin.saveSettings();
-			}
-		}
-
+		// Timestamp filtering and settings writes removed from here.
 		return summary;
+	}
+
+	/**
+	 * Prompt user when duplicate scan timed out without finding a match.
+	 * Returns 'skip' or 'import-anyway'.
+	 */
+	private async promptUserOnTimeout(
+		title: string,
+	): Promise<"skip" | "import-anyway"> {
+		// Reuse PromptModal for a simple two-option decision.
+		const { PromptModal } = await import("../ui/PromptModal");
+		return await new Promise<"skip" | "import-anyway">((resolve) => {
+			const modal = new (PromptModal as any)(
+				this.app,
+				"Duplicate scan timed out",
+				[
+					{
+						label: "Skip this book",
+						callback: () => resolve("skip"),
+					},
+					{
+						label: "Import anyway (add warning)",
+						isCta: true,
+						callback: () => resolve("import-anyway"),
+					},
+				],
+				`The duplicate scan for “${title}” did not complete within the configured timeout.\nTo avoid accidental duplicates:\n• Choose “Skip this book” to review and retry later.\n• Or “Import anyway” to create the note with a warning and needs-review flag.`,
+			);
+			modal.open();
+		});
 	}
 
 	private async createNewFile(
 		luaMetadata: LuaMetadata,
 		contentProvider: () => Promise<string>,
+		options?: { withTimeoutWarning?: boolean },
 	): Promise<TFile> {
-		const content = await contentProvider();
+		let content = await contentProvider();
+
+		// If requested, inject a prominent warning and a needs-review flag
+		if (options?.withTimeoutWarning) {
+			try {
+				const parsed = this.frontmatterService.parseContent(content);
+				// Mutate/add the needs-review flag
+				const fm = parsed.frontmatter || {};
+				fm["needs-review"] = "duplicate-timeout";
+
+				// Prepend a warning callout
+				const warningBlock =
+					"> [!warning] Duplicate scan did not complete\n" +
+					"> The scan timed out before searching the entire vault. Review this note to avoid duplicates.\n\n";
+
+				const newBody = warningBlock + parsed.body;
+				content = this.frontmatterService.reconstructFileContent(fm, newBody);
+			} catch (e) {
+				// Fallback: if parsing fails for any reason, still prepend a warning block
+				const warningBlock =
+					"---\nneeds-review: duplicate-timeout\n---\n\n" +
+					"> [!warning] Duplicate scan did not complete\n" +
+					"> The scan timed out before searching the entire vault. Review this note to avoid duplicates.\n\n";
+				content = warningBlock + content;
+				this.loggingService.warn(
+					this.SCOPE,
+					"Failed to inject timeout warning via structured frontmatter; used fallback prepend.",
+					e,
+				);
+			}
+		}
 		const fileNameWithExt = this.fileNameGenerator.generate(
 			{
 				useCustomTemplate: this.plugin.settings.useCustomFileNameTemplate,

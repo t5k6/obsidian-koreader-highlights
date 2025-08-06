@@ -1,5 +1,5 @@
+import path from "node:path";
 import { type App, Notice } from "obsidian";
-import path from "path";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import { ProgressModal } from "src/ui/ProgressModal";
 import type { FileSystemService } from "../FileSystemService";
@@ -52,7 +52,7 @@ export class ScanManager {
 
 			this.loggingService.info(
 				this.SCOPE,
-				`Scan found ${sdrFilePaths.length} SDR directories.`,
+				`Scan found ${sdrFilePaths.length} metadata files.`,
 			);
 			modal.statusEl.setText(
 				`Found ${sdrFilePaths.length} files. Generating report...`,
@@ -83,7 +83,7 @@ export class ScanManager {
 
 	/**
 	 * Creates or updates the scan report file in the vault.
-	 * @param sdrFilePaths - Array of SDR directory paths found
+	 * @param sdrFilePaths - Array of metadata file paths found
 	 */
 	private async createOrUpdateScanNote(sdrFilePaths: string[]): Promise<void> {
 		const reportFilename = ScanManager.SCAN_REPORT_FILENAME;
@@ -121,15 +121,15 @@ export class ScanManager {
 
 		if (sdrFilePaths.length === 0) {
 			content +=
-				"No `.sdr` directories containing `metadata.*.lua` files were found matching the current settings.\n";
+				"No `.sdr` metadata files (`metadata.*.lua`) were found matching the current settings.\n";
 		} else {
-			content += `Found ${sdrFilePaths.length} ".sdr" directories with metadata:\n\n`;
+			content += `Found ${sdrFilePaths.length} metadata files:\n\n`;
 			content += sdrFilePaths
-				.map((filePath) => {
+				.map((metadataFilePath) => {
 					const mountPoint = this.plugin.settings.koreaderMountPoint;
 					// Generate a relative path and ensure it uses forward slashes
 					const relativePath = path
-						.relative(mountPoint, filePath)
+						.relative(mountPoint, metadataFilePath)
 						.replace(/\\/g, "/");
 					return `- \`${relativePath}\``;
 				})

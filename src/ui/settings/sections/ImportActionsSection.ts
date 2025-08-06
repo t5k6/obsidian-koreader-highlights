@@ -1,12 +1,13 @@
 import { Setting } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import type { DebouncedFn } from "src/types";
 import { runPluginAction } from "src/utils/actionUtils";
 import { SettingsSection } from "../SettingsSection";
 
 export class ImportActionsSection extends SettingsSection {
 	constructor(
 		plugin: KoreaderImporterPlugin,
-		debouncedSave: () => void,
+		debouncedSave: DebouncedFn,
 		title: string,
 		startOpen = false,
 	) {
@@ -22,7 +23,6 @@ export class ImportActionsSection extends SettingsSection {
 						button: btn,
 						inProgressText: "Scanning…",
 						completedText: "Scan Now",
-						failureNotice: "Scan failed",
 					}),
 				),
 			)
@@ -35,7 +35,6 @@ export class ImportActionsSection extends SettingsSection {
 							button: btn,
 							inProgressText: "Importing…",
 							completedText: "Import Now",
-							failureNotice: "Import failed",
 						}),
 					),
 			);

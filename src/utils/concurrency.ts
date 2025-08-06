@@ -114,3 +114,41 @@ export class Mutex {
 		return this.locked;
 	}
 }
+
+/**
+ * Provides per-key serial execution of asynchronous tasks without retaining locks
+ * after the last job for a given key has completed. This is a lightweight,
+ * memory-safe alternative to maintaining a pool of mutexes.
+ */
+export class KeyedQueue {
+	private queues = new Map<string, Promise<unknown>>();
+
+	/**
+	 * Schedules a task to be run after all previously scheduled tasks for the
+	 * same key have completed.
+	 * @param key A unique identifier for the queue (e.g., a file path).
+	 * @param task The asynchronous function to execute.
+	 * @returns A promise that resolves with the result of the task.
+	 */
+	public run<T>(key: string, task: () => Promise<T> | T): Promise<T> {
+		const head = this.queues.get(key) ?? Promise.resolve();
+
+		const next = head
+			// Ensures the next task runs even if the previous one failed.
+			.catch(() => {})
+			.then(task);
+
+		this.queues.set(key, next);
+
+		// Once the task is settled (fulfilled or rejected), check if we can clean up.
+		next.finally(() => {
+			// If this 'next' promise is still the last one in the chain for this key,
+			// it's safe to remove the key from the map.
+			if (this.queues.get(key) === next) {
+				this.queues.delete(key);
+			}
+		});
+
+		return next as Promise<T>;
+	}
+}

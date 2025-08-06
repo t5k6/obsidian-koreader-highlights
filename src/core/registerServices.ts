@@ -15,6 +15,7 @@ import { ContentGenerator } from "src/services/vault/ContentGenerator";
 import { DuplicateFinder } from "src/services/vault/DuplicateFinder";
 import { DuplicateHandler } from "src/services/vault/DuplicateHandler";
 import { FileNameGenerator } from "src/services/vault/FileNameGenerator";
+import ImportIndexService from "src/services/vault/ImportIndexService";
 import { LocalIndexService } from "src/services/vault/LocalIndexService";
 import { MergeService } from "src/services/vault/MergeService";
 import { SnapshotManager } from "src/services/vault/SnapshotManager";
@@ -119,6 +120,14 @@ export function registerServices(
 		LoggingService,
 	]);
 
+	// Register ImportIndexService (low-level, before ImportManager)
+	container.register(ImportIndexService, [
+		PLUGIN_TOKEN,
+		APP_TOKEN,
+		FileSystemService,
+		LoggingService,
+	]);
+
 	// --- Level 2.5: Duplicate Finding
 	container.register(DuplicateFinder, [
 		VAULT_TOKEN,
@@ -147,6 +156,7 @@ export function registerServices(
 		LoggingService,
 		FileSystemService,
 		FrontmatterService,
+		ImportIndexService,
 	]);
 	container.register(CommandManager, [
 		PLUGIN_TOKEN,

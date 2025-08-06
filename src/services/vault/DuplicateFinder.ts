@@ -1,15 +1,15 @@
-import { Notice, TFile, TFolder, type Vault } from "obsidian";
+import { TFile, TFolder, type Vault } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
-import type { CacheManager } from "src/utils/cache/CacheManager";
-import { getHighlightKey } from "src/utils/formatUtils";
-import { extractHighlights } from "src/utils/highlightExtractor";
 import type {
 	Annotation,
 	DocProps,
 	DuplicateMatch,
 	LuaMetadata,
-} from "../../types";
+} from "src/types";
+import type { CacheManager } from "src/utils/cache/CacheManager";
+import { getHighlightKey } from "src/utils/formatUtils";
+import { extractHighlights } from "src/utils/highlightExtractor";
 import type { LoggingService } from "../LoggingService";
 import type { LocalIndexService } from "./LocalIndexService";
 import type { SnapshotManager } from "./SnapshotManager";
@@ -18,10 +18,10 @@ export class DuplicateFinder {
 	private readonly SCOPE = "DuplicateFinder";
 	private potentialDuplicatesCache: Map<string, TFile[]>;
 	// Cache frontmatter during a session to avoid reparsing on fallback scans
-	private fmCache = new Map<
+	private fmCache: import("src/utils/cache/LruCache").LruCache<
 		string,
 		{ mtime: number; title?: string; authors?: string }
-	>();
+	>;
 
 	constructor(
 		private vault: Vault,
@@ -35,16 +35,16 @@ export class DuplicateFinder {
 		this.potentialDuplicatesCache = this.cacheManager.createMap(
 			"duplicate.potential",
 		);
+		this.fmCache = this.cacheManager.createLru("duplicate.fm", 500);
 	}
 
 	public async findBestMatch(
 		luaMetadata: LuaMetadata,
-	): Promise<DuplicateMatch | null> {
-		const potentialDuplicates = await this.findPotentialDuplicates(
-			luaMetadata.docProps,
-		);
+	): Promise<{ match: DuplicateMatch | null; timedOut: boolean }> {
+		const { files: potentialDuplicates, timedOut } =
+			await this.findPotentialDuplicates(luaMetadata.docProps);
 		if (potentialDuplicates.length === 0) {
-			return null;
+			return { match: null, timedOut };
 		}
 
 		const analyses: DuplicateMatch[] = await Promise.all(
@@ -61,10 +61,12 @@ export class DuplicateFinder {
 				(b.newHighlights + b.modifiedHighlights),
 		);
 
-		return analyses[0];
+		return { match: analyses[0], timedOut };
 	}
 
-	private async findPotentialDuplicates(docProps: DocProps): Promise<TFile[]> {
+	private async findPotentialDuplicates(
+		docProps: DocProps,
+	): Promise<{ files: TFile[]; timedOut: boolean }> {
 		const bookKey = this.LocalIndexService.bookKeyFromDocProps(docProps);
 		const cached = this.potentialDuplicatesCache.get(bookKey);
 		if (cached) {
@@ -72,7 +74,7 @@ export class DuplicateFinder {
 				this.SCOPE,
 				`Cache hit for potential duplicates of key: ${bookKey}`,
 			);
-			return cached;
+			return { files: cached, timedOut: false };
 		}
 
 		// If the index is persistent, use the fast path (existing behavior).
@@ -87,7 +89,7 @@ export class DuplicateFinder {
 				.filter((f): f is TFile => f instanceof TFile);
 
 			this.potentialDuplicatesCache.set(bookKey, files);
-			return files;
+			return { files, timedOut: false };
 		}
 
 		// Degraded mode: no persistent index. Fallback to scanning highlights folder recursively and parsing frontmatter.
@@ -103,12 +105,14 @@ export class DuplicateFinder {
 				this.SCOPE,
 				`Highlights folder not found or not a directory: '${settingsFolder}'`,
 			);
-			return [];
+			return { files: [], timedOut: false };
 		}
 
 		const results: TFile[] = [];
 		const startTime = Date.now();
-		const SCAN_TIMEOUT_MS = 8000; // 8 seconds
+		const SCAN_TIMEOUT_MS =
+			(this.plugin.settings.scanTimeoutSeconds ?? 8) * 1000;
+		let timedOut = false;
 
 		for (const file of this.walkMarkdownFiles(root)) {
 			if (Date.now() - startTime > SCAN_TIMEOUT_MS) {
@@ -116,10 +120,8 @@ export class DuplicateFinder {
 					this.SCOPE,
 					`Degraded duplicate scan timed out after ${SCAN_TIMEOUT_MS}ms.`,
 				);
-				new Notice(
-					"Duplicate scan took too long and was stopped. Results may be incomplete.",
-					7000,
-				);
+				// No Notice here; propagate state upward for a centralized decision.
+				timedOut = true;
 				break; // Stop scanning
 			}
 			try {
@@ -141,7 +143,7 @@ export class DuplicateFinder {
 		}
 
 		this.potentialDuplicatesCache.set(bookKey, results);
-		return results;
+		return { files: results, timedOut };
 	}
 
 	/**

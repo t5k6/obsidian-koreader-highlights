@@ -10,6 +10,7 @@ import type {
 	ReadingStatus,
 	SettingsObserver,
 } from "src/types";
+import { ConcurrentDatabase } from "src/utils/ConcurrentDatabase";
 import type { CacheManager } from "src/utils/cache/CacheManager";
 import type { LruCache } from "src/utils/cache/LruCache";
 import type { FileSystemService } from "../FileSystemService";
@@ -42,6 +43,7 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 	private db: Database | null = null;
 	private dbInit: Promise<void> | null = null;
 	private dbFilePath: string | null = null;
+	private concurrentDb: ConcurrentDatabase | null = null;
 
 	private statsCache: LruCache<string, BookStatisticsBundle | null>;
 	private deviceRootCache = new Map<string, string | null>();
@@ -65,36 +67,41 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 		authors: string,
 		md5?: string,
 	): Promise<BookStatisticsBundle | null> {
-		await this.ensureDbOpen();
-		if (!this.db) return null;
+		const db = await this.getConcurrentDb();
+		if (!db) return null;
 
-		const bookRow = await this.findBook(this.db, title, authors, md5);
-		if (!bookRow) return null;
+		return db.execute(async (database) => {
+			const bookRow = await this.findBook(database, title, authors, md5);
+			if (!bookRow) return null;
 
-		const cacheKey = `${bookRow.id}`;
-		const cachedStats = this.statsCache.get(cacheKey);
-		if (cachedStats) {
+			const cacheKey = `${bookRow.id}`;
+			const cachedStats = this.statsCache.get(cacheKey);
+			if (cachedStats) {
+				this.loggingService.info(
+					this.SCOPE,
+					`[CACHE HIT] Statistics for: "${title}"`,
+				);
+				return cachedStats;
+			}
+
 			this.loggingService.info(
 				this.SCOPE,
-				`[CACHE HIT] Statistics for: "${title}"`,
+				`Querying statistics for: "${title}"`,
 			);
-			return cachedStats;
-		}
+			const sessions = this.queryAllRows<PageStatData>(
+				database,
+				SQL_GET_SESSIONS,
+				[bookRow.id],
+			);
+			const result: BookStatisticsBundle = {
+				book: bookRow,
+				readingSessions: sessions,
+				derived: this.calculateDerivedStatistics(bookRow, sessions),
+			};
 
-		this.loggingService.info(this.SCOPE, `Querying statistics for: "${title}"`);
-		const sessions = this.queryAllRows<PageStatData>(
-			this.db,
-			SQL_GET_SESSIONS,
-			[bookRow.id],
-		);
-		const result: BookStatisticsBundle = {
-			book: bookRow,
-			readingSessions: sessions,
-			derived: this.calculateDerivedStatistics(bookRow, sessions),
-		};
-
-		this.statsCache.set(cacheKey, result);
-		return result;
+			this.statsCache.set(cacheKey, result);
+			return result;
+		});
 	}
 
 	private async findBook(
@@ -121,65 +128,8 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 	}
 
 	private async ensureDbOpen(): Promise<void> {
-		if (this.db) {
-			return;
-		}
-		if (this.dbInit) {
-			return this.dbInit;
-		}
-
-		this.dbInit = (async () => {
-			try {
-				const mountPoint = this.settings.koreaderMountPoint;
-				if (!mountPoint) {
-					this.loggingService.warn(
-						this.SCOPE,
-						"Mount point not set, cannot open stats DB.",
-					);
-					return;
-				}
-
-				const deviceRoot = await this.findDeviceRoot(mountPoint);
-				if (!deviceRoot) {
-					this.loggingService.warn(
-						this.SCOPE,
-						`Could not find KOReader .adds in ${mountPoint}`,
-					);
-					return;
-				}
-
-				const filePath = path.join(
-					deviceRoot,
-					".adds/koreader/settings/statistics.sqlite3",
-				);
-
-				if (!(await this.fsService.nodeFileExists(filePath))) {
-					this.loggingService.warn(
-						this.SCOPE,
-						`Statistics DB not found or not accessible at ${filePath}. This is expected in a sandboxed environment. Continuing without device statistics.`,
-					);
-					return; // Gracefully exit, allowing the rest of the import to proceed.
-				}
-
-				const db = await this.sqlJsManager.openDatabase(filePath);
-				this.upgradeSchema(db);
-
-				this.db = db;
-				this.dbFilePath = filePath;
-
-				this.loggingService.info(this.SCOPE, `Opened stats DB: ${filePath}`);
-			} catch (error) {
-				this.loggingService.error(
-					this.SCOPE,
-					"Failed to open/process statistics DB",
-					error,
-				);
-				this.dispose(); // Ensure cleanup on failure
-			} finally {
-				this.dbInit = null;
-			}
-		})();
-		return this.dbInit;
+		// Retained for backward compatibility; now just ensures dbFilePath is memoized.
+		await this.getDbFilePath();
 	}
 
 	private upgradeSchema(db: Database): void {
@@ -215,6 +165,7 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 		}
 		this.db = null;
 		this.dbFilePath = null;
+		this.concurrentDb = null;
 		this.statsCache.clear();
 	}
 
@@ -253,6 +204,75 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 	 * @param params - Query parameters
 	 * @returns First row as object or null
 	 */
+	private async getDbFilePath(): Promise<string | null> {
+		if (this.dbFilePath) return this.dbFilePath;
+
+		try {
+			const mountPoint = this.settings.koreaderMountPoint;
+			if (!mountPoint) {
+				this.loggingService.warn(
+					this.SCOPE,
+					"Mount point not set, cannot open stats DB.",
+				);
+				return null;
+			}
+
+			const deviceRoot = await this.findDeviceRoot(mountPoint);
+			if (!deviceRoot) {
+				this.loggingService.warn(
+					this.SCOPE,
+					`Could not find KOReader .adds in ${mountPoint}`,
+				);
+				return null;
+			}
+
+			const filePath = path.join(
+				deviceRoot,
+				".adds/koreader/settings/statistics.sqlite3",
+			);
+
+			if (!(await this.fsService.nodeFileExists(filePath))) {
+				this.loggingService.warn(
+					this.SCOPE,
+					`Statistics DB not found or not accessible at ${filePath}. This is expected in a sandboxed environment. Continuing without device statistics.`,
+				);
+				return null;
+			}
+
+			// Open once to verify and apply any upgrades; cache path for locking
+			const db = await this.sqlJsManager.openDatabase(filePath);
+			this.upgradeSchema(db);
+			this.db = db;
+			this.dbFilePath = filePath;
+			// Create a read-focused concurrent DB (no markDirty)
+			this.concurrentDb = new ConcurrentDatabase(async () => {
+				// openDatabase returns cached DB
+				return await this.sqlJsManager.openDatabase(filePath);
+			});
+			this.loggingService.info(this.SCOPE, `Opened stats DB: ${filePath}`);
+			return this.dbFilePath;
+		} catch (error) {
+			this.loggingService.error(
+				this.SCOPE,
+				"Failed to open/process statistics DB",
+				error,
+			);
+			this.dispose(); // Ensure cleanup on failure
+			return null;
+		}
+	}
+
+	private async getConcurrentDb(): Promise<ConcurrentDatabase | null> {
+		const dbFilePath = await this.getDbFilePath();
+		if (!dbFilePath) return null;
+		if (this.concurrentDb) return this.concurrentDb;
+		// Fallback safety: create wrapper if missing
+		this.concurrentDb = new ConcurrentDatabase(async () => {
+			return await this.sqlJsManager.openDatabase(dbFilePath);
+		});
+		return this.concurrentDb;
+	}
+
 	private queryFirstRow<R extends object>(
 		db: Database,
 		sql: string,

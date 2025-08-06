@@ -2,15 +2,15 @@ import { promises as fsp } from "node:fs";
 import path, { posix as posixPath } from "node:path";
 import {
 	Notice,
-	TFile,
-	TFolder,
 	normalizePath,
 	type Plugin,
+	TFile,
+	TFolder,
 	type Vault,
 } from "obsidian";
 import type { Cache } from "src/types";
 import type { CacheManager } from "src/utils/cache/CacheManager";
-import { Mutex } from "src/utils/concurrency";
+import { KeyedQueue } from "src/utils/concurrency";
 
 /* ------------------------------------------------------------------ */
 /*                              TYPES                                 */
@@ -64,9 +64,7 @@ export class FileSystemService {
 		CacheEntry<import("node:fs").Stats | null>
 	>;
 	private readonly CACHE_TTL = 5000;
-	private readonly pathLocks = new Map<string, Mutex>();
-	private readonly lockLastUsed = new Map<string, number>();
-	private readonly LOCK_TTL = 60_000; // 1 minute idle TTL
+	private readonly keyedQueue = new KeyedQueue();
 	private readonly recentNotices = new Map<string, number>();
 
 	constructor(
@@ -209,7 +207,7 @@ export class FileSystemService {
 			return;
 		}
 
-		await this.getLock(`folder:${normalized}`).lock(async () => {
+		await this.keyedQueue.run(`folder:${normalized}`, async () => {
 			const cached = this.folderExistsCache.get(normalized);
 			if (cached && this.isCacheValid(cached)) return;
 
@@ -270,7 +268,7 @@ export class FileSystemService {
 	): Promise<TFile> {
 		const normalizedDir = FileSystemService.toVaultPath(baseDir);
 		const lockKey = `${normalizedDir}/${filenameStem}`;
-		return this.getLock(`file:${lockKey}`).lock(async () => {
+		return this.keyedQueue.run(`file:${lockKey}`, async () => {
 			await this.ensureVaultFolder(normalizedDir);
 			const { maxAttempts = 1000, useTimestampFallback = true } = options;
 
@@ -432,35 +430,8 @@ export class FileSystemService {
 	/*                        PRIVATE IMPLEMENTATION                      */
 	/* ------------------------------------------------------------------ */
 
-	private getLock(key: string): Mutex {
-		const now = Date.now();
-		let m = this.pathLocks.get(key);
-		if (!m) {
-			m = new Mutex();
-			this.pathLocks.set(key, m);
-		}
-		this.lockLastUsed.set(key, now);
-		// Opportunistic prune to prevent unbounded growth
-		this.pruneOldLocks(now);
-		return m;
-	}
-
 	private isCacheValid<T>(entry: CacheEntry<T>): boolean {
 		return Date.now() - entry.timestamp < this.CACHE_TTL;
-	}
-
-	private pruneOldLocks(now = Date.now()): void {
-		if (this.pathLocks.size <= 64) return; // avoid work for small maps
-		for (const [key, last] of this.lockLastUsed) {
-			if (now - last > this.LOCK_TTL) {
-				// Best-effort prune; only delete if not locked right now
-				const m = this.pathLocks.get(key);
-				if (m && !m.isLocked()) {
-					this.pathLocks.delete(key);
-					this.lockLastUsed.delete(key);
-				}
-			}
-		}
 	}
 
 	private showNoticeThrottled(message: string): void {
@@ -562,14 +533,37 @@ export class FileSystemService {
 	/* Recursively mkdir using the adapter so it also works for the hidden
 	 * .obsidian folder.  The vault API cannot do that.                     */
 	private async ensureAdapterFolder(vaultRelPath: string): Promise<void> {
-		const segments = FileSystemService.toVaultPath(vaultRelPath).split("/");
-		let current = "";
-		for (const seg of segments) {
-			current = current ? `${current}/${seg}` : seg;
-			if (!(await this.vault.adapter.exists(current))) {
-				// eslint-disable-next-line no-await-in-loop
-				await this.vault.adapter.mkdir(current); // **adapter**, not vault
+		const normalized = FileSystemService.toVaultPath(vaultRelPath);
+		if (!normalized) return;
+
+		// Use a lock to prevent race conditions on directory creation.
+		// The lock key is for the specific folder path to serialize its creation.
+		await this.keyedQueue.run(`folder-adapter:${normalized}`, async () => {
+			// Check existence *inside* the lock to ensure atomicity.
+			if (await this.vault.adapter.exists(normalized)) {
+				return;
 			}
-		}
+
+			const segments = normalized.split("/");
+			let current = "";
+			for (const seg of segments) {
+				current = current ? `${current}/${seg}` : seg;
+				try {
+					// Check existence of each segment before creating.
+					// eslint-disable-next-line no-await-in-loop
+					if (!(await this.vault.adapter.exists(current))) {
+						// eslint-disable-next-line no-await-in-loop
+						await this.vault.adapter.mkdir(current);
+					}
+				} catch (e: any) {
+					// Handle the case where another process creates the dir between our check and mkdir.
+					if (e?.message?.includes("already exists")) {
+						continue; // This is fine, we can continue to the next segment.
+					}
+					// If it's another error, re-throw it.
+					throw e;
+				}
+			}
+		});
 	}
 }

@@ -163,7 +163,21 @@ export interface KoreaderHighlightImporterSettings {
 	commentStyle: CommentStyle;
 	backupRetentionDays: number;
 	lastDeviceTimestamp?: string;
+	scanTimeoutSeconds: number;
 }
+
+/** Import Indexing **/
+
+export interface ImportIndexEntry {
+	/** The file's modification time (in epoch milliseconds) when it was last processed. */
+	mtime: number;
+	/** The file's size (in bytes) when it was last processed. */
+	size: number;
+	/** The ISO datetime string of the newest annotation found in the entire file. */
+	newestAnnotationTimestamp: string | null;
+}
+
+export type ImportIndex = Record<string, ImportIndexEntry>;
 
 // --- UI / Modal Related Types ---
 

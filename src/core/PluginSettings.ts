@@ -59,6 +59,7 @@ export const DEFAULT_SETTINGS: KoreaderHighlightImporterSettings = {
 	},
 	commentStyle: "html",
 	backupRetentionDays: 30,
+	scanTimeoutSeconds: 8,
 };
 
 /* ------------------------------------------------------------------ */
@@ -182,6 +183,12 @@ export class PluginSettings {
 				raw.backupRetentionDays,
 				DEFAULT_SETTINGS.backupRetentionDays,
 			),
+		);
+
+		// Scan timeout (seconds) with sane floor of 1s
+		settings.scanTimeoutSeconds = Math.max(
+			1,
+			ensureNumber(raw.scanTimeoutSeconds, DEFAULT_SETTINGS.scanTimeoutSeconds),
 		);
 
 		return settings;

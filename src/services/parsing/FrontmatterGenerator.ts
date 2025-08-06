@@ -15,17 +15,44 @@ import type {
 /*               1.  Key mapping / helpers (typed)                    */
 /* ------------------------------------------------------------------ */
 
-const ALWAYS_UPDATE: ReadonlySet<keyof FrontmatterData> = new Set([
-	"lastRead",
-	"firstRead",
-	"totalReadTime",
-	"progress",
-	"readingStatus",
-	"averageTimePerPage",
-	"highlightCount",
-	"noteCount",
-	"pages",
-]);
+/* ------------------------------------------------------------------ */
+/*               1.a  Merge policy types                              */
+/* ------------------------------------------------------------------ */
+
+type MergePolicy =
+	| { kind: "overwrite" }
+	| { kind: "preserveIfMissing" }
+	| { kind: "preserveAlways" }
+	| { kind: "custom"; fn: (oldValue: any, newValue: any) => any };
+
+type PolicyMap = {
+	[K in keyof FrontmatterData]?: MergePolicy;
+};
+
+/* ------------------------------------------------------------------ */
+/*               1.b  Default merge policies                          */
+/* ------------------------------------------------------------------ */
+
+const MERGE_POLICIES: PolicyMap = {
+	// Statistics should be overwritten with new, valid data.
+	lastRead: { kind: "overwrite" },
+	firstRead: { kind: "overwrite" },
+	totalReadTime: { kind: "overwrite" },
+	progress: { kind: "overwrite" },
+	readingStatus: { kind: "overwrite" },
+	averageTimePerPage: { kind: "overwrite" },
+	highlightCount: { kind: "overwrite" },
+	noteCount: { kind: "overwrite" },
+	pages: { kind: "overwrite" },
+
+	// Core metadata should be preserved if it already exists.
+	title: { kind: "preserveIfMissing" },
+	authors: { kind: "preserveIfMissing" },
+	description: { kind: "preserveIfMissing" },
+	keywords: { kind: "preserveIfMissing" },
+	series: { kind: "preserveIfMissing" },
+	language: { kind: "preserveIfMissing" },
+};
 
 /* ------------------------------------------------------------------ */
 /*               2.  Value normalisers / formatters                   */
@@ -36,8 +63,51 @@ const ALWAYS_UPDATE: ReadonlySet<keyof FrontmatterData> = new Set([
  * @param value - Value to check
  * @returns True if value is not null/undefined/empty string
  */
-function isValid(value: unknown): boolean {
-	return value !== undefined && value !== null && String(value).trim() !== "";
+/**
+ * Returns true if a value is considered “present” for front-matter.
+ * Unlike the old `isValid`, this correctly treats `0` and `false` as valid values.
+ */
+function hasValue(v: unknown): boolean {
+	if (v === undefined || v === null) return false;
+	if (typeof v === "string" && v.trim() === "") return false;
+	if (Array.isArray(v) && v.length === 0) return false;
+	return true;
+}
+
+/**
+ * Applies a single merge policy to one field, determining the final value.
+ * @param key The key of the field being processed.
+ * @param existingFm The existing frontmatter object.
+ * @param incomingFm The new frontmatter object from KOReader.
+ * @param policy The merge policy to apply for this key.
+ * @returns The resulting value for the key.
+ */
+function applyPolicy(
+	key: keyof FrontmatterData,
+	existingFm: Partial<FrontmatterData>,
+	incomingFm: Partial<FrontmatterData>,
+	policy: MergePolicy,
+): any {
+	const oldValue = existingFm[key];
+	const newValue = incomingFm[key];
+
+	switch (policy.kind) {
+		case "overwrite":
+			// Only write the new value if it's considered valid. Otherwise, keep the old one.
+			return hasValue(newValue) ? newValue : oldValue;
+
+		case "preserveIfMissing":
+			// If an old value exists, keep it. Only write the new value if there was no old one.
+			return hasValue(oldValue) ? oldValue : newValue;
+
+		case "preserveAlways":
+			// Always keep the old value, ignoring the new one.
+			return oldValue;
+
+		case "custom":
+			// Delegate to the custom function.
+			return policy.fn(oldValue, newValue);
+	}
 }
 
 /* ------------------------------------------------------------------ */
@@ -65,13 +135,13 @@ export class FrontmatterGenerator {
 			keyof DocProps,
 			unknown,
 		][]) {
-			if (!disabled.has(k) && isValid(val)) {
+			if (!disabled.has(k) && hasValue(val)) {
 				fm[k as keyof FrontmatterData] = String(val);
 			}
 		}
 
 		if (!fm.title) fm.title = "";
-		if (!fm.authors && !disabled.has("authors")) {
+		if (!hasValue(fm.authors) && !disabled.has("authors")) {
 			fm.authors = opts.useUnknownAuthor ? "Unknown Author" : undefined;
 		}
 
@@ -98,7 +168,7 @@ export class FrontmatterGenerator {
 				keyof typeof statsMap,
 				any,
 			][]) {
-				if (!disabled.has(k) && isValid(val)) {
+				if (!disabled.has(k) && hasValue(val)) {
 					fm[k] = val;
 				}
 			}
@@ -107,7 +177,7 @@ export class FrontmatterGenerator {
 		/*  4️  extra custom fields */
 		for (const k of extra) {
 			const docPropKey = k as keyof DocProps;
-			if (!disabled.has(k) && isValid(meta.docProps?.[docPropKey])) {
+			if (!disabled.has(k) && hasValue(meta.docProps?.[docPropKey])) {
 				fm[k as keyof FrontmatterData] = meta.docProps?.[docPropKey] as any;
 			}
 		}
@@ -128,21 +198,49 @@ export class FrontmatterGenerator {
 		meta: LuaMetadata,
 		opts: FrontmatterSettings,
 	): FrontmatterData {
-		const theirs = this.createFrontmatterData(meta, opts);
+		const incoming = this.createFrontmatterData(meta, opts);
 
-		// The `existing` object is already in a key-value format.
-		// We can merge directly, letting `theirs` provide updated values.
-		const merged: Partial<FrontmatterData> = { ...existing, ...theirs };
+		// 1) Build effective policy map, respecting user settings.
+		const effectivePolicies: PolicyMap = { ...MERGE_POLICIES };
 
-		for (const key of ALWAYS_UPDATE) {
-			if (key in theirs) {
-				merged[key] = theirs[key];
-			} else {
-				delete merged[key];
+		// Disabled fields are preserved always.
+		const disabled = new Set(opts.disabledFields ?? []);
+		for (const key of disabled) {
+			effectivePolicies[key as keyof FrontmatterData] = {
+				kind: "preserveAlways",
+			};
+		}
+
+		// Custom/user-defined extra fields should be preserved if no explicit policy.
+		const custom = new Set(opts.customFields ?? []);
+		for (const key of custom) {
+			if (!effectivePolicies[key as keyof FrontmatterData]) {
+				effectivePolicies[key as keyof FrontmatterData] = {
+					kind: "preserveAlways",
+				};
 			}
 		}
 
-		// guarantee presence
+		// 2) Determine all keys present in either existing or incoming.
+		const allKeys = new Set<keyof FrontmatterData>([
+			...(Object.keys(existing) as (keyof FrontmatterData)[]),
+			...(Object.keys(incoming) as (keyof FrontmatterData)[]),
+		]);
+
+		const merged: Partial<FrontmatterData> = {};
+
+		// 3) Apply policy per key.
+		for (const key of allKeys) {
+			const policy = effectivePolicies[key] ?? { kind: "preserveAlways" };
+			const finalValue = applyPolicy(key, existing, incoming, policy);
+
+			// Only include keys with a valid final value.
+			if (hasValue(finalValue)) {
+				merged[key] = finalValue as any;
+			}
+		}
+
+		// 4) Guarantee presence of required fields with fallbacks.
 		merged.title ??= "";
 		merged.authors ??= opts.useUnknownAuthor ? "Unknown Author" : "";
 

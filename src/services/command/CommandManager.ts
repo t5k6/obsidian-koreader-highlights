@@ -6,6 +6,7 @@ import type { SDRFinder } from "../device/SDRFinder";
 import { FileSystemService } from "../FileSystemService";
 import type { ImportManager } from "../ImportManager";
 import type { LoggingService } from "../LoggingService";
+import type ImportIndexService from "../vault/ImportIndexService";
 
 export class CommandManager {
 	private readonly SCOPE = "CommandManager";
@@ -17,6 +18,7 @@ export class CommandManager {
 		private readonly sdrFinder: SDRFinder,
 		private readonly cacheManager: CacheManager,
 		private readonly loggingService: LoggingService,
+		private readonly importIndexService: ImportIndexService,
 	) {}
 
 	/**
@@ -114,7 +116,13 @@ export class CommandManager {
 	 */
 	async executeClearCaches(): Promise<void> {
 		this.loggingService.info(this.SCOPE, "Cache clear triggered from plugin.");
+		// Clear in-memory caches
 		this.cacheManager.clear();
+		// Also clear SDR-related memoized caches
+		this.sdrFinder.onSettingsChanged(this.plugin.settings);
+		// Clear persistent import index so next import reprocesses everything
+		this.importIndexService.clear();
+		await this.importIndexService.save();
 		new Notice("KOReader Importer caches cleared.");
 	}
 

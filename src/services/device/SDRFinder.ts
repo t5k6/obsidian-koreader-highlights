@@ -57,17 +57,17 @@ export class SDRFinder implements SettingsObserver {
 	/* -------------------------- Public ----------------------------- */
 
 	/**
-	 * Provides an async iterator over all SDR directories with metadata.
-	 * @yields SDR directory paths
+	 * Provides an async iterator over all metadata.lua file paths.
+	 * @yields Full paths to metadata.lua files
 	 */
 	async *iterSdrDirectories(): AsyncGenerator<string> {
-		for (const dir of await this.findSdrDirectoriesWithMetadata()) yield dir;
+		for (const file of await this.findSdrDirectoriesWithMetadata()) yield file;
 	}
 
 	/**
-	 * Finds all SDR directories containing metadata files.
+	 * Finds all metadata.lua files under SDR directories.
 	 * Results are cached and memoized for performance.
-	 * @returns Array of SDR directory paths
+	 * @returns Array of full metadata file paths
 	 */
 	async findSdrDirectoriesWithMetadata(): Promise<string[]> {
 		if (!this.cacheKey) return [];
@@ -158,7 +158,7 @@ export class SDRFinder implements SettingsObserver {
 		await this.walk(root, excluded, results, mountPoint);
 		this.loggingService.info(
 			this.SCOPE,
-			`Scan finished. Found ${results.length} valid SDR directories.`,
+			`Scan finished. Found ${results.length} metadata files.`,
 		);
 		return results;
 	}
@@ -182,8 +182,13 @@ export class SDRFinder implements SettingsObserver {
 			const fullPath = joinPath(dir, entry.name);
 
 			if (entry.name.endsWith(SDR_SUFFIX)) {
-				if (await this.getMetadataFileName(fullPath, mountPoint)) {
-					out.push(fullPath);
+				const metadataFileName = await this.getMetadataFileName(
+					fullPath,
+					mountPoint,
+				);
+				if (metadataFileName) {
+					// push the full path to the metadata file
+					out.push(joinPath(fullPath, metadataFileName));
 				}
 			} else if (!entry.name.startsWith(".") && entry.name !== "$RECYCLE.BIN") {
 				await io(() => this.walk(fullPath, excluded, out, mountPoint));

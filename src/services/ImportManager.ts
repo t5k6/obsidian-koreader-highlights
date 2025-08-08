@@ -170,33 +170,9 @@ export class ImportManager {
 		let latestTimestampInFile: string | null = null;
 
 		try {
-			// 1) Early exit using filesystem stats and index
+			// 1) Gather stats (used for index update and diagnostics), but do not early-exit on them
 			const stats = await this.fs.getNodeStats(metadataPath);
-			if (!stats) {
-				this.loggingService.warn(
-					this.SCOPE,
-					`Could not get stats for ${metadataPath}, skipping.`,
-				);
-				summary.errors++;
-				return { fileSummary: summary, latestTimestampInFile: null };
-			}
-
 			const previous = this.importIndexService.getEntry(metadataPath);
-			if (
-				previous &&
-				previous.mtime === stats.mtime.getTime() &&
-				previous.size === stats.size
-			) {
-				this.loggingService.info(
-					this.SCOPE,
-					`Skipping unchanged file (via index): ${metadataPath}`,
-				);
-				summary.skipped++;
-				return {
-					fileSummary: summary,
-					latestTimestampInFile: previous.newestAnnotationTimestamp,
-				};
-			}
 
 			// 2) Parse and process
 			const sdrPath = path.dirname(metadataPath);
@@ -219,16 +195,18 @@ export class ImportManager {
 				latestTimestampInFile = newestAnnotation.datetime;
 			}
 
-			// If previous exists and no newer annotations than last seen, skip
-			if (
-				previous &&
-				latestTimestampInFile !== null &&
-				previous.newestAnnotationTimestamp !== null &&
-				latestTimestampInFile <= previous.newestAnnotationTimestamp
-			) {
+			// Determine if we should skip based on both file mtime and newest annotation timestamp
+			const isFileModifiedOnDevice =
+				!!stats && !!previous ? stats.mtime.getTime() > previous.mtime : false;
+			const hasNewerAnnotations =
+				latestTimestampInFile && previous
+					? latestTimestampInFile > (previous.newestAnnotationTimestamp ?? "")
+					: true;
+
+			if (previous && !isFileModifiedOnDevice && !hasNewerAnnotations) {
 				this.loggingService.info(
 					this.SCOPE,
-					`Skipping file with no new annotations: ${metadataPath}`,
+					`Skipping unchanged file: ${metadataPath}`,
 				);
 				summary.skipped++;
 				return { fileSummary: summary, latestTimestampInFile };
@@ -249,8 +227,8 @@ export class ImportManager {
 			// 3) Update index if created/merged/automerged
 			if (latestTimestampInFile) {
 				this.importIndexService.updateEntry(metadataPath, {
-					mtime: stats.mtime.getTime(),
-					size: stats.size,
+					mtime: stats ? stats.mtime.getTime() : 0,
+					size: stats ? stats.size : 0,
 					newestAnnotationTimestamp: latestTimestampInFile,
 				});
 			}
@@ -606,22 +584,20 @@ export class ImportManager {
 	 * @returns Promise resolving to array of files, or null if no files found
 	 */
 	private async getHighlightFilesToConvert(): Promise<TFile[] | null> {
-		const folder = this.app.vault.getAbstractFileByPath(
-			this.plugin.settings.highlightsFolder,
-		) as TFolder;
-
-		if (!folder || folder.children === undefined) {
-			new Notice("Highlights folder not found. No files to convert.");
+		const folderPath = this.plugin.settings.highlightsFolder;
+		if (!folderPath) {
+			new Notice("Highlights folder is not configured.");
 			this.loggingService.warn(
 				this.SCOPE,
-				"Highlights folder not found for comment style conversion.",
+				"Highlights folder not configured for comment style conversion.",
 			);
 			return null;
 		}
 
-		const files = folder.children.filter(
-			(f): f is TFile => f instanceof TFile && f.extension === "md",
-		);
+		const { files } = await this.fs.getFilesInFolder(folderPath, {
+			extensions: ["md"],
+			recursive: false, // original logic was non-recursive
+		});
 
 		if (files.length === 0) {
 			new Notice("No markdown files found in highlights folder.");

@@ -56,6 +56,11 @@ interface FileCreationOptions {
 	useTimestampFallback?: boolean;
 }
 
+export interface FolderScanResult {
+	files: TFile[];
+	aborted: boolean;
+}
+
 export class FileSystemService {
 	private readonly LOG_PREFIX = "KOReader Importer: FileSystemService:";
 	private readonly folderExistsCache!: Cache<string, CacheEntry<boolean>>;
@@ -66,6 +71,10 @@ export class FileSystemService {
 	private readonly CACHE_TTL = 5000;
 	private readonly keyedQueue = new KeyedQueue();
 	private readonly recentNotices = new Map<string, number>();
+	private folderScanCache!: import("src/utils/cache/LruCache").LruCache<
+		string,
+		FolderScanResult
+	>;
 
 	constructor(
 		private readonly vault: Vault,
@@ -74,6 +83,8 @@ export class FileSystemService {
 	) {
 		this.folderExistsCache = this.cacheManager.createMap("fs.folderExists");
 		this.nodeStatsCache = this.cacheManager.createMap("fs.nodeStats");
+		this.folderScanCache = this.cacheManager.createLru("fs.folderScan", 200);
+		this.registerVaultEvents();
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -103,6 +114,129 @@ export class FileSystemService {
 	public static getVaultParent(vaultPath: string): string {
 		const parent = posixPath.dirname(vaultPath);
 		return parent === "." ? "" : parent;
+	}
+
+	/* ------------------------------------------------------------------ */
+	/*                     SCANNING / WALKING FOLDERS                      */
+	/* ------------------------------------------------------------------ */
+
+	public async getFilesInFolder(
+		folderVaultPathOrFolder: string | TFolder,
+		options?: {
+			extensions?: string[]; // defaults to ['md']
+			recursive?: boolean; // defaults to true
+			signal?: AbortSignal;
+		},
+	): Promise<FolderScanResult> {
+		const { files, aborted } = await this.walkFolder(folderVaultPathOrFolder, {
+			extensions: options?.extensions ?? ["md"],
+			recursive: options?.recursive ?? true,
+			signal: options?.signal,
+		});
+		return { files, aborted };
+	}
+
+	public async walkFolder(
+		folderVaultPathOrFolder: string | TFolder,
+		options?: {
+			extensions?: string[];
+			recursive?: boolean;
+			signal?: AbortSignal;
+		},
+	): Promise<FolderScanResult> {
+		const extensions = (options?.extensions ?? ["md"]).map((e) =>
+			e.replace(/^\./, "").toLowerCase(),
+		);
+		const recursive = options?.recursive ?? true;
+		const signal = options?.signal;
+
+		const folderPath =
+			typeof folderVaultPathOrFolder === "string"
+				? FileSystemService.toVaultPath(folderVaultPathOrFolder)
+				: folderVaultPathOrFolder.path;
+
+		const root =
+			typeof folderVaultPathOrFolder === "string"
+				? this.vault.getAbstractFileByPath(folderPath)
+				: folderVaultPathOrFolder;
+
+		if (!(root instanceof TFolder)) {
+			return { files: [], aborted: false };
+		}
+
+		const cacheKey = `${root.path}|${extensions.join(",")}|${recursive ? "R" : "NR"}`;
+		const cached = this.folderScanCache.get(cacheKey);
+		if (cached) return cached;
+
+		const out: TFile[] = [];
+		let aborted = false;
+
+		const walk = (entry: any): void => {
+			if (signal?.aborted) {
+				aborted = true;
+				return;
+			}
+			if (entry instanceof TFile) {
+				const ext = entry.extension?.toLowerCase();
+				if (ext && extensions.includes(ext)) out.push(entry);
+				return;
+			}
+			const children = (entry as any)?.children as any[] | undefined;
+			if (!children) return;
+			for (const child of children) {
+				if (signal?.aborted) {
+					aborted = true;
+					return;
+				}
+				if (child instanceof TFile) {
+					const ext = child.extension?.toLowerCase();
+					if (ext && extensions.includes(ext)) out.push(child);
+				} else if (recursive) {
+					walk(child);
+				}
+			}
+		};
+		walk(root);
+
+		const result: FolderScanResult = { files: out, aborted };
+		if (!aborted) this.folderScanCache.set(cacheKey, result);
+		return result;
+	}
+
+	private registerVaultEvents(): void {
+		// Invalidate scan cache when vault changes that can affect folder contents occur.
+		this.plugin.registerEvent(
+			this.vault.on("create", (file) => this.invalidateCacheFor(file.path)),
+		);
+		this.plugin.registerEvent(
+			this.vault.on("delete", (file) => this.invalidateCacheFor(file.path)),
+		);
+		this.plugin.registerEvent(
+			this.vault.on("rename", (_file, oldPath) =>
+				this.invalidateCacheFor(oldPath),
+			),
+		);
+	}
+
+	private invalidateCacheFor(vaultPath: string): void {
+		if (!this.folderScanCache) return;
+		// Drop everything whose key root is on the same prefix path
+		const prefix = FileSystemService.getVaultParent(vaultPath);
+		const keys = this.folderScanCache.keys();
+		const prefixWithSlash = prefix ? `${prefix}/` : "";
+		for (const key of keys) {
+			// cacheKey format: `${root.path}|<exts>|R|NR` — root.path is a vault path
+			const rootPath = String(key).split("|")[0] ?? "";
+			if (
+				prefix === "" ||
+				rootPath === prefix ||
+				(prefixWithSlash && rootPath.startsWith(prefixWithSlash)) ||
+				rootPath === vaultPath ||
+				rootPath.startsWith(`${vaultPath}/`)
+			) {
+				this.folderScanCache.delete(key as any);
+			}
+		}
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -177,7 +311,23 @@ export class FileSystemService {
 			await this.vault.modify(existing, content);
 			return existing;
 		}
-		return this.vault.create(normalizedPath, content);
+		try {
+			return await this.vault.create(normalizedPath, content);
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException)?.code;
+			if (
+				code === "EEXIST" ||
+				(error instanceof Error && /already exists/i.test(error.message))
+			) {
+				// Another process created it between our check and create; modify instead.
+				const nowExisting = this.vault.getAbstractFileByPath(normalizedPath);
+				if (nowExisting instanceof TFile) {
+					await this.vault.modify(nowExisting, content);
+					return nowExisting;
+				}
+			}
+			throw error;
+		}
 	}
 
 	public async ensurePluginDataDirExists(): Promise<void> {
@@ -250,6 +400,9 @@ export class FileSystemService {
 					});
 					return;
 				}
+				// If the error is already a FileSystemError we produced above,
+				// rethrow it directly to avoid double-wrapping and clearer stacks.
+				if (error instanceof FileSystemError) throw error;
 				this.handleError("ensureFolder", normalized, error, true);
 			}
 		});
@@ -295,11 +448,28 @@ export class FileSystemService {
 			}
 
 			if (useTimestampFallback) {
-				const ts = Date.now().toString(36);
-				const fallback = normalizePath(
-					`${normalizedDir}/${filenameStem}-${ts}.md`,
-				);
-				return this.vault.create(fallback, content);
+				// Guard against extremely rare collisions on timestamp by checking and retrying once.
+				for (let i = 0; i < 2; i++) {
+					const ts = `${Date.now().toString(36)}${i ? `-${i}` : ""}`;
+					const fallback = normalizePath(
+						`${normalizedDir}/${filenameStem}-${ts}.md`,
+					);
+					if (!(await this.vaultExists(fallback))) {
+						try {
+							return await this.vault.create(fallback, content);
+						} catch (error) {
+							const code = (error as NodeJS.ErrnoException)?.code;
+							if (
+								code === "EEXIST" ||
+								(error instanceof Error &&
+									/already exists/i.test(error.message))
+							) {
+								continue; // try the next fallback
+							}
+							throw error;
+						}
+					}
+				}
 			}
 
 			throw new FileSystemError(
@@ -484,7 +654,11 @@ export class FileSystemService {
 		error: unknown,
 		shouldThrow: boolean,
 	): void {
-		const fsError = this.asFileSystemError(operation, p, error);
+		// Avoid double-wrapping when a FileSystemError is already provided.
+		const fsError =
+			error instanceof FileSystemError
+				? error
+				: this.asFileSystemError(operation, p, error);
 		const userMessage = this.userMsg(fsError.code, p);
 		console.error(
 			`${this.LOG_PREFIX} ${fsError.message}`,
@@ -557,7 +731,7 @@ export class FileSystemService {
 					}
 				} catch (e: any) {
 					// Handle the case where another process creates the dir between our check and mkdir.
-					if (e?.message?.includes("already exists")) {
+					if (e instanceof Error && /already exists/i.test(e.message)) {
 						continue; // This is fine, we can continue to the next segment.
 					}
 					// If it's another error, re-throw it.

@@ -40,10 +40,9 @@ const SQL_GET_SESSIONS = /*sql*/ `SELECT * FROM page_stat_data WHERE id_book = ?
 export class DeviceStatisticsService implements SettingsObserver, Disposable {
 	private readonly SCOPE = "DeviceStatisticsService";
 	private settings: KoreaderHighlightImporterSettings;
-	private db: Database | null = null;
-	private dbInit: Promise<void> | null = null;
 	private dbFilePath: string | null = null;
-	private concurrentDb: ConcurrentDatabase | null = null;
+	private cdb: ConcurrentDatabase | null = null;
+	private cdbInit: Promise<ConcurrentDatabase | null> | null = null;
 
 	private statsCache: LruCache<string, BookStatisticsBundle | null>;
 	private deviceRootCache = new Map<string, string | null>();
@@ -71,7 +70,7 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 		if (!db) return null;
 
 		return db.execute(async (database) => {
-			const bookRow = await this.findBook(database, title, authors, md5);
+			const bookRow = this.findBook(database, title, authors, md5);
 			if (!bookRow) return null;
 
 			const cacheKey = `${bookRow.id}`;
@@ -104,32 +103,28 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 		});
 	}
 
-	private async findBook(
+	private findBook(
 		db: Database,
 		title: string,
 		authors: string,
 		md5?: string,
-	): Promise<BookStatistics | null> {
+	): BookStatistics | null {
 		let row: BookStatistics | null = null;
 		if (md5) {
-			row = this.queryFirstRow<BookStatistics>(db, SQL_FIND_BOOK_BY_MD5, [
+			const r1 = this.queryFirstRow<any>(db, SQL_FIND_BOOK_BY_MD5, [
 				md5,
 				title,
 			]);
+			row = r1 ? this.mapBookRow(r1) : null;
 		}
 		if (!row) {
-			row = this.queryFirstRow<BookStatistics>(
-				db,
-				SQL_FIND_BOOK_BY_AUTHOR_TITLE,
-				[authors, title],
-			);
+			const r2 = this.queryFirstRow<any>(db, SQL_FIND_BOOK_BY_AUTHOR_TITLE, [
+				authors,
+				title,
+			]);
+			row = r2 ? this.mapBookRow(r2) : null;
 		}
 		return row ?? null;
-	}
-
-	private async ensureDbOpen(): Promise<void> {
-		// Retained for backward compatibility; now just ensures dbFilePath is memoized.
-		await this.getDbFilePath();
 	}
 
 	private upgradeSchema(db: Database): void {
@@ -152,7 +147,7 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 		if (newSettings.koreaderMountPoint !== this.settings.koreaderMountPoint) {
 			this.loggingService.info(
 				this.SCOPE,
-				"Mount point changed, closing stats DB.",
+				"Mount point changed, resetting stats DB connection.",
 			);
 			this.dispose();
 		}
@@ -163,9 +158,9 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 		if (this.dbFilePath) {
 			this.sqlJsManager.closeDatabase(this.dbFilePath);
 		}
-		this.db = null;
 		this.dbFilePath = null;
-		this.concurrentDb = null;
+		this.cdb = null;
+		this.cdbInit = null;
 		this.statsCache.clear();
 	}
 
@@ -198,81 +193,92 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 	}
 
 	/**
+	 * Resolves the path to the statistics database.
+	 * @returns Path to the statistics database or null if not found
+	 */
+	private async resolveStatsDbPath(): Promise<string | null> {
+		const mountPoint = this.settings.koreaderMountPoint;
+		if (!mountPoint) {
+			this.loggingService.warn(
+				this.SCOPE,
+				"Mount point not set, cannot resolve stats DB path.",
+			);
+			return null;
+		}
+
+		const deviceRoot = await this.findDeviceRoot(mountPoint);
+		if (!deviceRoot) {
+			this.loggingService.warn(
+				this.SCOPE,
+				`Could not find KOReader .adds in ${mountPoint}`,
+			);
+			return null;
+		}
+
+		const filePath = path.join(
+			deviceRoot,
+			".adds/koreader/settings/statistics.sqlite3",
+		);
+
+		if (!(await this.fsService.nodeFileExists(filePath))) {
+			this.loggingService.warn(
+				this.SCOPE,
+				`Statistics DB not found or not accessible at ${filePath}.`,
+			);
+			return null;
+		}
+
+		return filePath;
+	}
+
+	/**
+	 * Gets the concurrent database instance.
+	 * @returns Concurrent database instance or null if not available
+	 */
+	private async getConcurrentDb(): Promise<ConcurrentDatabase | null> {
+		// Fast path
+		if (this.cdb) return this.cdb;
+
+		// Await ongoing init if present
+		if (this.cdbInit) return this.cdbInit;
+
+		// Start initialization
+		this.cdbInit = (async () => {
+			const filePath = await this.resolveStatsDbPath();
+			if (!filePath) {
+				this.cdbInit = null; // allow retries
+				return null;
+			}
+
+			let schemaUpgraded = false;
+
+			const cdb = new ConcurrentDatabase(async () => {
+				const db = await this.sqlJsManager.openDatabase(filePath);
+				if (!schemaUpgraded) {
+					this.upgradeSchema(db);
+					schemaUpgraded = true;
+				}
+				return db;
+			});
+
+			this.dbFilePath = filePath;
+			this.cdb = cdb;
+			this.cdbInit = null;
+
+			this.loggingService.info(this.SCOPE, `Stats DB is ready: ${filePath}`);
+			return cdb;
+		})();
+
+		return this.cdbInit;
+	}
+
+	/**
 	 * Executes a SQL query and returns the first row.
 	 * @param db - SQLite database instance
 	 * @param sql - SQL query string
 	 * @param params - Query parameters
 	 * @returns First row as object or null
 	 */
-	private async getDbFilePath(): Promise<string | null> {
-		if (this.dbFilePath) return this.dbFilePath;
-
-		try {
-			const mountPoint = this.settings.koreaderMountPoint;
-			if (!mountPoint) {
-				this.loggingService.warn(
-					this.SCOPE,
-					"Mount point not set, cannot open stats DB.",
-				);
-				return null;
-			}
-
-			const deviceRoot = await this.findDeviceRoot(mountPoint);
-			if (!deviceRoot) {
-				this.loggingService.warn(
-					this.SCOPE,
-					`Could not find KOReader .adds in ${mountPoint}`,
-				);
-				return null;
-			}
-
-			const filePath = path.join(
-				deviceRoot,
-				".adds/koreader/settings/statistics.sqlite3",
-			);
-
-			if (!(await this.fsService.nodeFileExists(filePath))) {
-				this.loggingService.warn(
-					this.SCOPE,
-					`Statistics DB not found or not accessible at ${filePath}. This is expected in a sandboxed environment. Continuing without device statistics.`,
-				);
-				return null;
-			}
-
-			// Open once to verify and apply any upgrades; cache path for locking
-			const db = await this.sqlJsManager.openDatabase(filePath);
-			this.upgradeSchema(db);
-			this.db = db;
-			this.dbFilePath = filePath;
-			// Create a read-focused concurrent DB (no markDirty)
-			this.concurrentDb = new ConcurrentDatabase(async () => {
-				// openDatabase returns cached DB
-				return await this.sqlJsManager.openDatabase(filePath);
-			});
-			this.loggingService.info(this.SCOPE, `Opened stats DB: ${filePath}`);
-			return this.dbFilePath;
-		} catch (error) {
-			this.loggingService.error(
-				this.SCOPE,
-				"Failed to open/process statistics DB",
-				error,
-			);
-			this.dispose(); // Ensure cleanup on failure
-			return null;
-		}
-	}
-
-	private async getConcurrentDb(): Promise<ConcurrentDatabase | null> {
-		const dbFilePath = await this.getDbFilePath();
-		if (!dbFilePath) return null;
-		if (this.concurrentDb) return this.concurrentDb;
-		// Fallback safety: create wrapper if missing
-		this.concurrentDb = new ConcurrentDatabase(async () => {
-			return await this.sqlJsManager.openDatabase(dbFilePath);
-		});
-		return this.concurrentDb;
-	}
-
 	private queryFirstRow<R extends object>(
 		db: Database,
 		sql: string,
@@ -335,14 +341,19 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 		const pages = this.toNumber(book.pages);
 		const rawPercent = pages > 0 ? (totalReadPages / pages) * 100 : 0;
 
-		const firstReadDate = sessions[0]
-			? new Date(sessions[0].start_time * 1000)
-			: null;
-		const lastOpenDate = new Date(Math.max(0, book.last_open) * 1000);
+		const lastOpenSec = this.toNumber(book.last_open);
+		const lastOpenDate = lastOpenSec > 0 ? new Date(lastOpenSec * 1000) : null;
+
+		const firstStartSec = sessions[0]
+			? this.toNumber(sessions[0].start_time)
+			: 0;
+		const firstReadDate =
+			firstStartSec > 0 ? new Date(firstStartSec * 1000) : null;
+
 		const lastReadDate =
-			firstReadDate && lastOpenDate < firstReadDate
+			lastOpenDate && firstReadDate && lastOpenDate < firstReadDate
 				? firstReadDate
-				: lastOpenDate;
+				: (lastOpenDate ?? firstReadDate);
 
 		const percentComplete = Math.max(0, Math.min(100, Math.round(rawPercent)));
 
@@ -362,6 +373,45 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 			firstReadDate,
 			lastReadDate,
 			readingStatus,
+		};
+	}
+
+	// Map database row to typed BookStatistics with safety conversions
+	private mapBookRow(o: any): BookStatistics {
+		if (
+			!o ||
+			(typeof o.id !== "number" && typeof o.id !== "string") ||
+			typeof o.title !== "string"
+		) {
+			this.loggingService.warn(
+				this.SCOPE,
+				"Received malformed book row from database",
+				o,
+			);
+			return {
+				id: 0,
+				title: "Invalid Row",
+				authors: "",
+				md5: "",
+				last_open: 0,
+				pages: 0,
+				total_read_pages: 0,
+				total_read_time: 0,
+				series: undefined,
+				language: undefined,
+			};
+		}
+		return {
+			id: this.toNumber(o.id),
+			md5: String(o.md5 ?? ""),
+			last_open: this.toNumber(o.last_open),
+			pages: this.toNumber(o.pages),
+			total_read_pages: this.toNumber(o.total_read_pages),
+			total_read_time: this.toNumber(o.total_read_time),
+			title: String(o.title),
+			authors: String(o.authors ?? ""),
+			series: o.series ? String(o.series) : undefined,
+			language: o.language ? String(o.language) : undefined,
 		};
 	}
 }

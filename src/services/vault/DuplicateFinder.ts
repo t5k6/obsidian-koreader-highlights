@@ -10,6 +10,7 @@ import type {
 import type { CacheManager } from "src/utils/cache/CacheManager";
 import { getHighlightKey } from "src/utils/formatUtils";
 import { extractHighlights } from "src/utils/highlightExtractor";
+import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 import type { LocalIndexService } from "./LocalIndexService";
 import type { SnapshotManager } from "./SnapshotManager";
@@ -31,6 +32,7 @@ export class DuplicateFinder {
 		private snapshotManager: SnapshotManager,
 		private cacheManager: CacheManager,
 		private loggingService: LoggingService,
+		private fs: FileSystemService,
 	) {
 		this.potentialDuplicatesCache = this.cacheManager.createMap(
 			"duplicate.potential",
@@ -114,15 +116,23 @@ export class DuplicateFinder {
 			(this.plugin.settings.scanTimeoutSeconds ?? 8) * 1000;
 		let timedOut = false;
 
-		for (const file of this.walkMarkdownFiles(root)) {
+		const { files, aborted } = await this.fs.getFilesInFolder(root, {
+			extensions: ["md"],
+			recursive: true,
+			signal: undefined,
+		});
+		if (aborted || Date.now() - startTime > SCAN_TIMEOUT_MS) {
+			this.loggingService.warn(
+				this.SCOPE,
+				`Degraded duplicate scan timed out after ${SCAN_TIMEOUT_MS}ms.`,
+			);
+			timedOut = true;
+		}
+
+		for (const file of files) {
 			if (Date.now() - startTime > SCAN_TIMEOUT_MS) {
-				this.loggingService.warn(
-					this.SCOPE,
-					`Degraded duplicate scan timed out after ${SCAN_TIMEOUT_MS}ms.`,
-				);
-				// No Notice here; propagate state upward for a centralized decision.
 				timedOut = true;
-				break; // Stop scanning
+				break;
 			}
 			try {
 				const cache = await this.getFmCached(file);
@@ -230,24 +240,6 @@ export class DuplicateFinder {
 	public clearCache(): void {
 		this.potentialDuplicatesCache.clear();
 		this.fmCache.clear();
-	}
-
-	// Recursively walk folders yielding markdown files
-	private *walkMarkdownFiles(entry: any): Generator<TFile> {
-		if (entry instanceof TFile) {
-			if (entry.extension === "md") yield entry;
-			return;
-		}
-		// entry may be a TFolder or other; guard for children
-		const children = (entry as any)?.children as any[] | undefined;
-		if (!children) return;
-		for (const child of children) {
-			if (child instanceof TFile) {
-				if (child.extension === "md") yield child;
-			} else {
-				yield* this.walkMarkdownFiles(child);
-			}
-		}
 	}
 
 	private async getFmCached(

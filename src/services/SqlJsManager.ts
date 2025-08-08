@@ -90,9 +90,10 @@ export class SqlJsManager implements Disposable {
 				throw e;
 			}
 		}
-
-		// This logic is now guaranteed to execute correctly on first run.
 		const db = bytes ? new SQL.Database(bytes) : new SQL.Database();
+
+		// Cache immediately so setDirty on a brand new DB marks it correctly
+		this.dbCache.set(filePath, db);
 
 		if (!bytes && options.schemaSql) {
 			this.loggingService.info(
@@ -123,7 +124,6 @@ export class SqlJsManager implements Disposable {
 		}
 
 		db.exec("PRAGMA foreign_keys = ON;");
-		this.dbCache.set(filePath, db);
 		return db;
 	}
 
@@ -158,6 +158,8 @@ export class SqlJsManager implements Disposable {
 				`Failed to persist database: ${filePath}`,
 				e,
 			);
+			// Propagate critical I/O errors so callers can handle/notify
+			throw e;
 		}
 	}
 

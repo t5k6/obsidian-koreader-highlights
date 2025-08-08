@@ -84,6 +84,36 @@ export class ImportIndexService {
 		this.index = {};
 		this.isDirty = true;
 	}
+
+	/**
+	 * Physically deletes the import index file from disk.
+	 * This is intended for a full reset to avoid stale or corrupted state.
+	 * After deletion, the in-memory index is cleared.
+	 */
+	public async deleteIndexFile(): Promise<void> {
+		this.logging.warn(this.SCOPE, "Deleting import index file for full reset.");
+
+		// Reset in-memory state regardless of file deletion outcome
+		this.index = {};
+		this.isDirty = false;
+
+		try {
+			if (await this.fs.vaultExists(this.indexFilePath)) {
+				await this.app.vault.adapter.remove(this.indexFilePath);
+				this.logging.info(
+					this.SCOPE,
+					`Successfully deleted import index file at ${this.indexFilePath}.`,
+				);
+			}
+		} catch (e) {
+			this.logging.error(
+				this.SCOPE,
+				`Failed to delete import index file at ${this.indexFilePath}.`,
+				e as Error,
+			);
+			// Proceed even if deletion fails; memory state is cleared.
+		}
+	}
 }
 
 export default ImportIndexService;

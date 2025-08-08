@@ -120,6 +120,15 @@ export class SDRFinder implements SettingsObserver {
 		}
 	}
 
+	/**
+	 * Explicitly clears SDR-related caches.
+	 * Useful to force a fresh device scan within the same session.
+	 */
+	public clearCache(): void {
+		this.cacheManager.clear("sdr.*");
+		this.loggingService.info(this.SCOPE, "SDRFinder caches have been cleared.");
+	}
+
 	/* ------------------------- Private ----------------------------- */
 
 	/**

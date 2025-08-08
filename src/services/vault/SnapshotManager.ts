@@ -115,34 +115,20 @@ export class SnapshotManager {
 		let deletedCount = 0;
 
 		try {
-			const folder = this.app.vault.getAbstractFileByPath(this.backupDir);
-			const walk = function* (entry: any): Generator<TFile> {
-				if (entry instanceof TFile) {
-					if (entry.extension === "md") yield entry;
-					return;
-				}
-				const children = (entry as any)?.children as any[] | undefined;
-				if (!children) return;
-				for (const child of children) {
-					if (child instanceof TFile) {
-						if (child.extension === "md") yield child;
-					} else {
-						yield* walk(child);
-					}
-				}
-			};
-			if (folder) {
-				for (const file of walk(folder)) {
-					const statsTime = file.stat.mtime;
-					if (statsTime < cutoffTime) {
-						// eslint-disable-next-line no-await-in-loop
-						await this.app.vault.delete(file);
-						this.loggingService.info(
-							this.SCOPE,
-							`Deleted old backup: ${file.path}`,
-						);
-						deletedCount++;
-					}
+			const { files } = await this.fs.getFilesInFolder(this.backupDir, {
+				extensions: ["md"],
+				recursive: true,
+			});
+			for (const file of files) {
+				const statsTime = file.stat.mtime;
+				if (statsTime < cutoffTime) {
+					// eslint-disable-next-line no-await-in-loop
+					await this.app.vault.delete(file);
+					this.loggingService.info(
+						this.SCOPE,
+						`Deleted old backup: ${file.path}`,
+					);
+					deletedCount++;
 				}
 			}
 		} catch (dirError) {
@@ -251,18 +237,37 @@ export class SnapshotManager {
 				".__snap_probe__",
 			);
 
+			// Defensive cleanup: remove a leftover probe from a previous run to ensure idempotency
+			try {
+				const leftover = this.app.vault.getAbstractFileByPath(probePath);
+				if (leftover) {
+					await this.app.vault.delete(leftover);
+				}
+			} catch (cleanupError) {
+				this.loggingService.warn(
+					this.SCOPE,
+					"Could not clean up leftover probe file before capability check. Proceeding.",
+					cleanupError,
+				);
+			}
+
 			try {
 				// Make the probe idempotent and specific.
-				// First, ensure the parent directory exists. This is crucial.
+				// First, ensure the parent directories exist. This is crucial.
 				await this.fs.ensureVaultFolder(this.snapshotDir);
+				await this.fs.ensureVaultFolder(this.backupDir);
 
 				// Attempt to write the file. This is the core test.
 				await this.fs.writeVaultFile(probePath, "probe");
 
-				// If write succeeds, immediately clean up.
-				const file = this.app.vault.getAbstractFileByPath(probePath);
-				if (file) {
-					await this.app.vault.delete(file);
+				// If write succeeds, immediately clean up (ignore races if someone else deleted it already).
+				try {
+					const file = this.app.vault.getAbstractFileByPath(probePath);
+					if (file) {
+						await this.app.vault.delete(file);
+					}
+				} catch (_) {
+					// no-op
 				}
 
 				// Only if all steps succeed, we are writable.

@@ -11,6 +11,7 @@ import {
 } from "obsidian";
 import type { Database } from "sql.js";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
 import type {
 	DebouncedFn,
 	Disposable,
@@ -22,9 +23,10 @@ import { ConcurrentDatabase } from "src/utils/ConcurrentDatabase";
 import type { CacheManager } from "src/utils/cache/CacheManager";
 import type { LruCache } from "src/utils/cache/LruCache";
 import { normalizeFileNamePiece } from "src/utils/formatUtils";
-import type { FileSystemService } from "../FileSystemService";
+import { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 import type { SqlJsManager } from "../SqlJsManager";
+import { ParallelIndexProcessor } from "./ParallelIndexProcessor";
 
 const INDEX_DB_SCHEMA = `
 PRAGMA user_version = 1;
@@ -118,15 +120,12 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		private cacheManager: CacheManager,
 		private sqlJsManager: SqlJsManager,
 		private readonly loggingService: LoggingService,
+		private readonly frontmatterService: FrontmatterService,
 	) {
 		this.settings = plugin.settings;
 
-		this.idxPath = path.join(
-			this.app.vault.configDir,
-			"plugins",
-			this.plugin.manifest.id, // Use manifest ID for correctness
-			"highlight_index.sqlite",
-		);
+		// Use a vault-relative, normalized path for cross-platform adapter compatibility
+		this.idxPath = this.fsService.joinPluginDataPath("highlight_index.sqlite");
 
 		this.pathCache = this.cacheManager.createLru("db.path", 500);
 		this.persistIndexDebounced = debounce(
@@ -160,6 +159,8 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 				) => void
 			)(file, data, cache);
 		};
+
+		// Initialize index processor once DB is available (lazy via getter later if needed)
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -289,6 +290,8 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 					validate: true,
 				});
 				this.indexState = "persistent";
+				// Ensure the brand-new DB is flushed at least once to disk
+				await this.sqlJsManager.persistDatabase(this.idxPath);
 			} catch (error) {
 				this.loggingService.warn(
 					this.SCOPE,
@@ -335,16 +338,14 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 
 	/**
 	 * Starts a background rebuild of the in-memory index by scanning the highlights
-	 * folder and inserting book rows. This is non-blocking and chunked with progress.
+	 * folder and inserting book rows using the ParallelIndexProcessor.
 	 */
 	private async startBackgroundRebuild(): Promise<void> {
 		if (this.isRebuilding) return;
 		this.isRebuildingFlag = true;
 		this.rebuildAbortController = new AbortController();
-		this.processedDuringRebuild = new Set();
 		this.rebuildProgress = { current: 0, total: 0 };
 
-		// Long-lived notice with progress updates
 		try {
 			this.rebuildNotice = new Notice("📚 Building temporary index…", 0);
 
@@ -364,37 +365,52 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 			}
 
 			// Collect markdown files upfront to give a stable total count
-			const files: TFile[] = Array.from(this.walkMarkdownFiles(root));
+			const { files } = await this.fsService.getFilesInFolder(root, {
+				extensions: ["md"],
+				recursive: true,
+			});
 			this.rebuildProgress.total = files.length;
 			this.updateRebuildNotice();
 
-			// Use a small pool to avoid blocking UI; reuse our Mutex-based db serializer
-			const POOL = 4;
-			const BATCH = 24; // process in small visible increments
-			for (let i = 0; i < files.length; i += BATCH) {
-				this.throwIfAborted();
-				const slice = files.slice(i, i + BATCH);
+			// Use the new parallel processor
+			const db = await this.getConcurrentDb();
+			const processor = new ParallelIndexProcessor(
+				this.frontmatterService,
+				db,
+				this.loggingService,
+				{
+					workers: Math.min(6, Math.max(2, navigator.hardwareConcurrency || 4)),
+					batchSize: 64,
+				},
+			);
 
-				// Map over a pool of 4 workers
-				await Promise.all(
-					Array.from({ length: Math.min(POOL, slice.length) }, async (_, w) => {
-						for (let j = w; j < slice.length; j += POOL) {
-							this.throwIfAborted();
-							const file = slice[j];
-							await this.processFileIntoIndex(file);
-							this.rebuildProgress!.current++;
-							// Throttle updates a bit by only updating every few files
-							if (this.rebuildProgress!.current % 5 === 0) {
-								this.updateRebuildNotice();
-							}
-						}
-					}),
+			const onProgress = (current: number, total: number) => {
+				if (!this.rebuildProgress) return;
+				this.rebuildProgress.current = current;
+				// Update occasionally to avoid UI thrash
+				if (current % 5 === 0 || current === total) this.updateRebuildNotice();
+			};
+
+			const result = await processor.processFiles(
+				files,
+				onProgress,
+				this.rebuildAbortController.signal,
+			);
+
+			if (this.rebuildAbortController.signal.aborted) {
+				this.finishRebuildNotice(false, "⏸ Index rebuild cancelled");
+				this.loggingService.warn(
+					this.SCOPE,
+					"Index rebuild cancelled by user.",
 				);
+				return;
+			}
 
-				// Ensure a visible update between batches
-				this.updateRebuildNotice();
-				// Yield to event loop to keep UI responsive
-				await new Promise((r) => setTimeout(r, 0));
+			if (result.errors.length > 0) {
+				this.loggingService.warn(
+					this.SCOPE,
+					`Index rebuild completed with ${result.errors.length} errors.`,
+				);
 			}
 
 			this.finishRebuildNotice(false, "✅ Temporary index ready");
@@ -418,7 +434,6 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 			}
 		} finally {
 			this.rebuildAbortController = null;
-			this.processedDuringRebuild = null;
 			this.rebuildProgress = null;
 			this.isRebuildingFlag = false;
 		}
@@ -432,59 +447,9 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		}
 	}
 
-	private async processFileIntoIndex(file: TFile): Promise<void> {
-		if (!this.concurrentDb || !this.idxDb) return; // nothing to do if DB unavailable
-		if (this.processedDuringRebuild?.has(file.path)) return;
-
-		try {
-			// Parse only frontmatter quickly using cached metadata path in FrontmatterService
-			// We don't have direct access here; instead, parse minimally by reading first KB if needed.
-			// For simplicity and reliability, read full file and extract naive title/authors from YAML frontmatter.
-			const content = await this.app.vault.read(file);
-			const fmMatch = content.match(
-				/^---\s*?\r?\n([\s\S]+?)\r?\n---\s*?\r?\n?/s,
-			);
-			let title = "";
-			let authors = "";
-			if (fmMatch) {
-				try {
-					// Lazy import to avoid circular deps; parse as YAML via Obsidian's parseYaml on demand
-					const { parseYaml } = await import("obsidian");
-					const fm = (parseYaml(fmMatch[1]) ?? {}) as Record<string, unknown>;
-					// Accept either friendly keys or normalized keys
-					title = String(fm.Title ?? fm.title ?? "");
-					authors = String(fm["Author(s)"] ?? fm.authors ?? "");
-				} catch {
-					// ignore file-level parse errors
-				}
-			}
-			if (!title && !authors) {
-				// Skip files with no identifying metadata
-				return;
-			}
-			const key = this.bookKeyFromDocProps({ title, authors });
-
-			await this.concurrentDb.execute((db) => {
-				db.run(
-					`INSERT INTO book(key,id,title,authors,vault_path) VALUES(?,?,?,?,?)
-			                  ON CONFLICT(key) DO UPDATE SET
-			                     id=COALESCE(excluded.id, book.id),
-			                     title=excluded.title,
-			                     authors=excluded.authors,
-			                     vault_path=excluded.vault_path;`,
-					[key, null, title, authors, file.path],
-				);
-			}, true);
-
-			this.processedDuringRebuild?.add(file.path);
-			// In-memory: no persistence to disk needed
-		} catch (e) {
-			this.loggingService.warn(
-				this.SCOPE,
-				`Failed to process file for temporary index: ${file.path}`,
-				e,
-			);
-		}
+	// Deprecated: replaced by ParallelIndexProcessor
+	private async processFileIntoIndex(_file: TFile): Promise<void> {
+		// no-op
 	}
 
 	private updateRebuildNotice(): void {
@@ -510,7 +475,59 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 	public async flushIndex(): Promise<void> {
 		this.persistIndexDebounced.cancel();
 		if (this.isIndexPersistent()) {
-			await this.sqlJsManager.persistDatabase(this.idxPath);
+			try {
+				await this.sqlJsManager.persistDatabase(this.idxPath);
+			} catch (e) {
+				this.loggingService.error(
+					this.SCOPE,
+					`Failed to save index to ${this.idxPath}`,
+					e as Error,
+				);
+				new Notice(
+					"KOReader Importer: Failed to save index. Changes may be lost.",
+					8000,
+				);
+			}
+		}
+	}
+
+	/**
+	 * Completely deletes the persistent index database file.
+	 * This is a destructive operation intended for a full reset.
+	 */
+	public async deleteIndexFile(): Promise<void> {
+		this.loggingService.warn(
+			this.SCOPE,
+			"Deleting persistent index database file.",
+		);
+
+		// 1. Ensure any pending writes are flushed and the DB is closed.
+		await this.dispose();
+
+		// 2. Reset in-memory state immediately
+		this.idxDb = null;
+		this.concurrentDb = null;
+		this.pathCache.clear();
+		this.indexState = "unavailable";
+
+		// 3. Physically delete the file
+		try {
+			// Use Vault adapter to delete the file physically (normalize path for adapter)
+			const normalizedPath = FileSystemService.toVaultPath(this.idxPath);
+			if (await this.fsService.vaultExists(normalizedPath)) {
+				await this.app.vault.adapter.remove(normalizedPath);
+				this.loggingService.info(
+					this.SCOPE,
+					"Successfully deleted index file.",
+				);
+			}
+		} catch (error) {
+			this.loggingService.error(
+				this.SCOPE,
+				`Failed to delete index file at ${this.idxPath}`,
+				error as Error,
+			);
+			// Proceed anyway; in-memory state is cleared.
 		}
 	}
 
@@ -540,20 +557,34 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 
 		const db = await this.getConcurrentDb();
 		await db.execute((database) => {
-			if (file instanceof TFolder) {
-				database.run(
-					`UPDATE book SET vault_path = REPLACE(vault_path, ?, ?) WHERE vault_path LIKE ?`,
-					[`${oldPath}/`, `${(file as TFolder).path}/`, `${oldPath}/%`],
-				);
-			} else if (file instanceof TFile) {
-				database.run(`UPDATE book SET vault_path = ? WHERE vault_path = ?`, [
-					(file as TFile).path,
-					oldPath,
-				]);
-			}
+			database.run("BEGIN IMMEDIATE;");
+			try {
+				if (file instanceof TFolder) {
+					database.run(
+						`UPDATE book SET vault_path = REPLACE(vault_path, ?, ?) WHERE vault_path LIKE ?`,
+						[`${oldPath}/`, `${(file as TFolder).path}/`, `${oldPath}/%`],
+					);
+				} else if (file instanceof TFile) {
+					database.run(`UPDATE book SET vault_path = ? WHERE vault_path = ?`, [
+						(file as TFile).path,
+						oldPath,
+					]);
+				}
 
-			if (database.getRowsModified() > 0) {
-				this.persistIndexDebounced();
+				if (database.getRowsModified() > 0) {
+					database.run("COMMIT;");
+					this.persistIndexDebounced();
+				} else {
+					database.run("ROLLBACK;");
+				}
+			} catch (e) {
+				database.run("ROLLBACK;");
+				this.loggingService.error(
+					this.SCOPE,
+					`Transaction failed for handleRename: ${oldPath} -> ${(file as any)?.path}`,
+					e,
+				);
+				throw e;
 			}
 		}, true);
 	}
@@ -564,43 +595,51 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 
 		const db = await this.getConcurrentDb();
 		await db.execute((database) => {
-			if (file instanceof TFolder) {
-				database.run(
-					`UPDATE book SET vault_path = NULL WHERE vault_path LIKE ?`,
-					[`${pathToDelete}/%`],
-				);
-			} else if (file instanceof TFile) {
-				database.run(`UPDATE book SET vault_path = NULL WHERE vault_path = ?`, [
-					pathToDelete,
-				]);
-			}
+			database.run("BEGIN IMMEDIATE;");
+			try {
+				if (file instanceof TFolder) {
+					database.run(
+						`UPDATE book SET vault_path = NULL WHERE vault_path LIKE ?`,
+						[`${pathToDelete}/%`],
+					);
+				} else if (file instanceof TFile) {
+					database.run(
+						`UPDATE book SET vault_path = NULL WHERE vault_path = ?`,
+						[pathToDelete],
+					);
+				}
 
-			if (database.getRowsModified() > 0) {
-				this.persistIndexDebounced();
+				if (database.getRowsModified() > 0) {
+					database.run("COMMIT;");
+					this.persistIndexDebounced();
+				} else {
+					database.run("ROLLBACK;");
+				}
+			} catch (e) {
+				database.run("ROLLBACK;");
+				this.loggingService.error(
+					this.SCOPE,
+					`Transaction failed for handleDelete: ${pathToDelete}`,
+					e,
+				);
+				throw e;
 			}
 		}, true);
 	}
 	private async _handleMetadataChange(
 		file: TFile,
-		data: string,
-		cache: CachedMetadata,
+		_data: string,
+		_cache: CachedMetadata,
 	): Promise<void> {
 		try {
 			if (!(file instanceof TFile) || file.extension !== "md") return;
 			if (!this.settings.highlightsFolder) return;
 			if (!file.path.startsWith(this.settings.highlightsFolder)) return;
 
-			const newTitle =
-				(cache.frontmatter?.title as string | undefined) ?? undefined;
-			let newAuthors = cache.frontmatter?.authors as
-				| string
-				| string[]
-				| undefined;
-			if (Array.isArray(newAuthors)) newAuthors = newAuthors.join(",");
-
 			const oldKey = await this.findKeyByVaultPath(file.path);
+			const metadata = await this.frontmatterService.extractMetadata(file);
 
-			if (!newTitle || !newAuthors) {
+			if (!metadata) {
 				if (oldKey) {
 					this.loggingService.info(
 						this.SCOPE,
@@ -611,20 +650,21 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 				return;
 			}
 
-			const newKey = this.bookKeyFromDocProps({
-				title: newTitle,
-				authors: newAuthors,
-			});
-
-			if (oldKey && oldKey !== newKey) {
+			if (oldKey && oldKey !== metadata.key) {
 				this.loggingService.info(
 					this.SCOPE,
-					`Book key for ${file.path} changed from "${oldKey}" to "${newKey}". Updating index.`,
+					`Book key for ${file.path} changed from "${oldKey}" to "${metadata.key}". Updating index.`,
 				);
 				await this.removePathFromIndex(file.path, oldKey);
 			}
 
-			await this.upsertBook(null, newKey, newTitle, newAuthors, file.path);
+			await this.upsertBook(
+				null,
+				metadata.key,
+				metadata.title,
+				metadata.authors,
+				file.path,
+			);
 		} catch (e) {
 			this.loggingService.warn(
 				this.SCOPE,
@@ -655,12 +695,30 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 	): Promise<void> {
 		const db = await this.getConcurrentDb();
 		await db.execute((database) => {
-			database.run(`UPDATE book SET vault_path = NULL WHERE vault_path = ?`, [
-				vaultPath,
-			]);
+			database.run("BEGIN IMMEDIATE;");
+			try {
+				database.run(`UPDATE book SET vault_path = NULL WHERE vault_path = ?`, [
+					vaultPath,
+				]);
+				const modified = database.getRowsModified();
+				if (modified > 0) {
+					database.run("COMMIT;");
+					// Only update caches/persistence after a successful commit
+					this.pathCache.delete(oldKey);
+					this.persistIndexDebounced();
+				} else {
+					database.run("ROLLBACK;");
+				}
+			} catch (e) {
+				database.run("ROLLBACK;");
+				this.loggingService.error(
+					this.SCOPE,
+					`Transaction failed for removePathFromIndex: ${vaultPath}`,
+					e,
+				);
+				throw e;
+			}
 		}, true);
-		this.pathCache.delete(oldKey);
-		this.persistIndexDebounced();
 	}
 
 	private async getConcurrentDb(): Promise<ConcurrentDatabase> {
@@ -699,37 +757,4 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		return this.concurrentDb;
 	}
 
-	// Minimal recursive walker to enumerate markdown files under a TFolder
-	private *walkMarkdownFiles(entry: any): Generator<TFile> {
-		if (entry instanceof TFile) {
-			if (entry.extension === "md") yield entry;
-			return;
-		}
-		const children = (entry as any)?.children as any[] | undefined;
-		if (!children) return;
-		for (const child of children) {
-			if (child instanceof TFile) {
-				if (child.extension === "md") yield child;
-			} else {
-				yield* this.walkMarkdownFiles(child);
-			}
-		}
-	}
-}
-
-function getGlobalObsidianAppDataPath(): string | null {
-	const p = platform();
-	let dataPath: string | undefined;
-
-	if (p === "win32") {
-		dataPath = process.env.APPDATA; // Roaming AppData
-	} else if (p === "darwin") {
-		dataPath = path.join(homedir(), "Library/Application Support");
-	} else {
-		// linux
-		dataPath = process.env.XDG_CONFIG_HOME ?? path.join(homedir(), ".config");
-	}
-
-	if (!dataPath) return null;
-	return path.join(dataPath, "obsidian");
 }

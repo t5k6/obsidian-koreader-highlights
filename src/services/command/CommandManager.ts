@@ -7,6 +7,7 @@ import { FileSystemService } from "../FileSystemService";
 import type { ImportManager } from "../ImportManager";
 import type { LoggingService } from "../LoggingService";
 import type ImportIndexService from "../vault/ImportIndexService";
+import type { LocalIndexService } from "../vault/LocalIndexService";
 
 export class CommandManager {
 	private readonly SCOPE = "CommandManager";
@@ -19,6 +20,7 @@ export class CommandManager {
 		private readonly cacheManager: CacheManager,
 		private readonly loggingService: LoggingService,
 		private readonly importIndexService: ImportIndexService,
+		private readonly localIndexService: LocalIndexService,
 	) {}
 
 	/**
@@ -67,6 +69,10 @@ export class CommandManager {
 		}
 
 		try {
+			// Invalidate SDR caches before starting import to ensure fresh scan
+			if (typeof (this.sdrFinder as any).clearCache === "function") {
+				(this.sdrFinder as any).clearCache();
+			}
 			await this.importManager.importHighlights();
 		} catch (error) {
 			if ((error as DOMException)?.name === "AbortError") {
@@ -115,15 +121,74 @@ export class CommandManager {
 	 * Useful when encountering issues or after changing settings.
 	 */
 	async executeClearCaches(): Promise<void> {
+		if (!this.cacheManager) {
+			this.loggingService.error(
+				this.SCOPE,
+				"CacheManager dependency not available. Cannot clear caches.",
+			);
+			new Notice(
+				"Error: Cache Manager service not ready. Please try reloading the plugin.",
+			);
+			return;
+		}
+
 		this.loggingService.info(this.SCOPE, "Cache clear triggered from plugin.");
 		// Clear in-memory caches
 		this.cacheManager.clear();
-		// Also clear SDR-related memoized caches
-		this.sdrFinder.onSettingsChanged(this.plugin.settings);
+		// Clear SDR-related caches explicitly
+		if (typeof (this.sdrFinder as any).clearCache === "function") {
+			(this.sdrFinder as any).clearCache();
+		} else {
+			// Fallback: retrigger settings change to invalidate
+			this.sdrFinder.onSettingsChanged(this.plugin.settings);
+		}
 		// Clear persistent import index so next import reprocesses everything
 		this.importIndexService.clear();
 		await this.importIndexService.save();
 		new Notice("KOReader Importer caches cleared.");
+	}
+
+	/**
+	 * Performs a full, destructive reset of all plugin indexes and caches.
+	 * Deletes persistent files and requests a plugin reload.
+	 */
+	async executeFullReset(): Promise<void> {
+		this.loggingService.warn(
+			this.SCOPE,
+			"Full reset triggered. Deleting all indexes and caches.",
+		);
+
+		try {
+			// 1) Delete the persistent vault index (SQLite)
+			await this.localIndexService.deleteIndexFile();
+
+			// 2) Delete the persistent import index (JSON)
+			await this.importIndexService.deleteIndexFile();
+
+			// 3) Clear any remaining in-memory caches
+			this.cacheManager.clear();
+
+			new Notice(
+				"KOReader Importer has been reset. Reloading plugin now...",
+				5000,
+			);
+
+			// 4) Trigger a reload of the plugin for a completely clean state
+			// Delay slightly to allow the Notice to be visible
+			setTimeout(() => {
+				void (this.plugin as any).reloadPlugin?.();
+			}, 1000);
+		} catch (error) {
+			this.loggingService.error(
+				this.SCOPE,
+				"Full reset failed.",
+				error as Error,
+			);
+			new Notice(
+				"Error during reset. Check the developer console for details.",
+				10000,
+			);
+		}
 	}
 
 	/**

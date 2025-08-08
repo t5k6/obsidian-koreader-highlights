@@ -156,7 +156,7 @@ export class FrontmatterGenerator {
 		if (s?.book && s.derived) {
 			const statsMap = {
 				pages: s.book.pages,
-				lastRead: s.derived.lastReadDate.toISOString(),
+				lastRead: s.derived.lastReadDate?.toISOString(),
 				firstRead: s.derived.firstReadDate?.toISOString(),
 				totalReadTime: s.book.total_read_time,
 				progress: s.derived.percentComplete.toString(),

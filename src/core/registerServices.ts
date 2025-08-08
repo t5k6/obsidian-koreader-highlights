@@ -118,6 +118,7 @@ export function registerServices(
 		CacheManager,
 		SqlJsManager,
 		LoggingService,
+		FrontmatterService,
 	]);
 
 	// Register ImportIndexService (low-level, before ImportManager)
@@ -165,6 +166,8 @@ export function registerServices(
 		SDRFinder,
 		CacheManager,
 		LoggingService,
+		ImportIndexService,
+		LocalIndexService,
 	]);
 	container.register(DeviceStatisticsService, [
 		PLUGIN_TOKEN,

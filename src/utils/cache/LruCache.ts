@@ -33,4 +33,21 @@ export class LruCache<K, V> {
 	clear(): void {
 		this.map.clear();
 	}
+
+	/** Returns a snapshot array of current keys (from LRU-oldest to newest). */
+	keys(): K[] {
+		return Array.from(this.map.keys());
+	}
+
+	/** Deletes entries that match the given predicate. Returns number deleted. */
+	deleteWhere(predicate: (key: K, value: V) => boolean): number {
+		let removed = 0;
+		for (const [k, v] of this.map.entries()) {
+			if (predicate(k, v)) {
+				this.map.delete(k);
+				removed++;
+			}
+		}
+		return removed;
+	}
 }

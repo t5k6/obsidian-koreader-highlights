@@ -1,4 +1,4 @@
-import { Notice, Plugin } from "obsidian";
+import { type App, Modal, Notice, Plugin } from "obsidian";
 import { CommandManager } from "src/services/command/CommandManager";
 import { LoggingService } from "src/services/LoggingService";
 import { TemplateManager } from "src/services/parsing/TemplateManager";
@@ -9,6 +9,45 @@ import { DIContainer } from "./DIContainer";
 import { MigrationManager } from "./MigrationManager";
 import { PluginSettings } from "./PluginSettings";
 import { registerServices } from "./registerServices";
+
+/** Confirmation modal for destructive reset */
+class ResetConfirmationModal extends Modal {
+	constructor(
+		app: App,
+		private readonly onConfirm: () => void,
+	) {
+		super(app);
+	}
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.createEl("h2", { text: "Reset KOReader Importer?" });
+		contentEl.createEl("p", {
+			text: "This will delete the plugin's index files and caches. Your actual highlight notes in the vault are not affected.",
+		});
+		contentEl.createEl("p", {
+			text: "This action will also reload the plugin to ensure a completely clean state. Continue?",
+		});
+
+		const buttonContainer = contentEl.createDiv({
+			cls: "modal-button-container",
+		});
+
+		const cancelBtn = buttonContainer.createEl("button", { text: "Cancel" });
+		cancelBtn.addEventListener("click", () => this.close());
+
+		const confirmBtn = buttonContainer.createEl("button", {
+			text: "Yes, Reset and Reload",
+			cls: "mod-warning",
+		});
+		confirmBtn.addEventListener("click", () => {
+			this.onConfirm();
+			this.close();
+		});
+	}
+	onClose() {
+		this.contentEl.empty();
+	}
+}
 
 export default class KoreaderImporterPlugin extends Plugin {
 	public settings!: KoreaderHighlightImporterSettings;
@@ -126,6 +165,27 @@ export default class KoreaderImporterPlugin extends Plugin {
 			name: "Convert All Files to Current Comment Style",
 			callback: () => this.triggerConvertCommentStyle(),
 		});
+
+		// Less-destructive cache clear (existing behavior)
+		this.addCommand({
+			id: "clear-koreader-importer-caches",
+			name: "Clear in-memory caches",
+			callback: () => this.triggerClearCaches(),
+		});
+
+		// Force re-scan and import (clear caches then import)
+		this.addCommand({
+			id: "force-import-koreader-highlights",
+			name: "Force Re-scan and Import KOReader Highlights",
+			callback: () => this.triggerForceImport(),
+		});
+
+		// Full reset and reload
+		this.addCommand({
+			id: "reset-koreader-importer",
+			name: "Troubleshoot: Full Reset and Reload Plugin",
+			callback: () => this.triggerFullReset(),
+		});
 	}
 
 	// --- Utility Methods ---
@@ -173,6 +233,23 @@ export default class KoreaderImporterPlugin extends Plugin {
 		await commandManager.executeConvertCommentStyle();
 	}
 
+	// Force re-scan and import (clear caches then immediately import)
+	async triggerForceImport(): Promise<void> {
+		if (!this.checkServiceStatus("force import")) return;
+		await this.triggerClearCaches();
+		await this.triggerImport();
+	}
+
+	// Trigger full reset with confirmation
+	async triggerFullReset(): Promise<void> {
+		if (!this.checkServiceStatus("full reset")) return;
+		new ResetConfirmationModal(this.app, async () => {
+			const commandManager =
+				this.diContainer.resolve<CommandManager>(CommandManager);
+			await commandManager.executeFullReset();
+		}).open();
+	}
+
 	async saveSettings(forceUpdate: boolean = false): Promise<void> {
 		if (!this.pluginSettings) {
 			this.loggingService.error(
@@ -195,5 +272,25 @@ export default class KoreaderImporterPlugin extends Plugin {
 			"KoreaderImporterPlugin",
 			"Settings saved. Services notified of changes.",
 		);
+	}
+
+	/**
+	 * Programmatically reloads the plugin to apply a full reset.
+	 */
+	public async reloadPlugin(): Promise<void> {
+		this.loggingService.info("KoreaderImporterPlugin", "Reloading plugin...");
+		const pluginId = this.manifest.id;
+		// 'plugins' exists at runtime; the App type doesn't declare it, so cast to any
+		const pluginsApi = (this.app as any).plugins;
+		if (pluginsApi?.disablePlugin && pluginsApi?.enablePlugin) {
+			await pluginsApi.disablePlugin(pluginId);
+			await pluginsApi.enablePlugin(pluginId);
+		} else {
+			// Fallback: show notice if API unavailable
+			new Notice(
+				"Unable to reload plugin programmatically on this Obsidian version.",
+				5000,
+			);
+		}
 	}
 }

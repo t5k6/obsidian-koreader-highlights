@@ -72,7 +72,15 @@ export class CacheManager implements Disposable {
 	public clear(pattern?: string): void {
 		if (!pattern) {
 			for (const cache of this.caches.values()) {
-				cache.clear();
+				try {
+					(cache as any)?.clear?.();
+				} catch (e) {
+					this.loggingService.warn(
+						this.SCOPE,
+						"Encountered error while clearing a cache; continuing.",
+						e,
+					);
+				}
 			}
 			this.loggingService.info(
 				this.SCOPE,
@@ -84,7 +92,15 @@ export class CacheManager implements Disposable {
 		const regex = new RegExp(`^${pattern.replace(/\*/g, ".*")}$`);
 		for (const [name, cache] of this.caches.entries()) {
 			if (regex.test(name)) {
-				cache.clear();
+				try {
+					(cache as any)?.clear?.();
+				} catch (e) {
+					this.loggingService.warn(
+						this.SCOPE,
+						`Encountered error while clearing cache "${name}"; continuing.`,
+						e,
+					);
+				}
 				this.loggingService.info(
 					this.SCOPE,
 					`Cleared cache "${name}" via pattern "${pattern}"`,

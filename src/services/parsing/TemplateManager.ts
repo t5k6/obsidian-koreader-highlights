@@ -60,7 +60,7 @@ export class TemplateManager implements SettingsObserver {
 		private vault: Vault,
 		private cacheManager: CacheManager,
 		private fs: FileSystemService,
-		private loggingService: LoggingService, // Injected dependency
+		private loggingService: LoggingService,
 	) {
 		this.rawTemplateCache = cacheManager.createLru("template.raw", 10);
 		this.compiledTemplateCache = cacheManager.createLru(

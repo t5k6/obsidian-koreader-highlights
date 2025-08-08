@@ -56,7 +56,7 @@ export interface ReadingProgress {
 	percentComplete: number;
 	averageTimePerPage: number;
 	firstReadDate: Date | null;
-	lastReadDate: Date;
+	lastReadDate: Date | null;
 	readingStatus: ReadingStatus;
 }
 
@@ -301,4 +301,17 @@ export interface SettingsObserver {
 export interface DebouncedFn {
 	(): void;
 	cancel(): void;
+}
+
+/** Book metadata extracted from a vault file for indexing */
+export interface BookMetadata {
+	key: string;
+	title: string;
+	authors: string;
+	vaultPath: string;
+}
+
+/** Interface for metadata extractor used by indexing pipeline */
+export interface FileMetadataExtractor {
+	extractMetadata(file: TFile): Promise<BookMetadata | null>;
 }

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import luaparser from "luaparse";
 import type {
 	Expression,
@@ -33,7 +34,7 @@ export class MetadataParser {
 	constructor(
 		private sdrFinder: SDRFinder,
 		private cacheManager: CacheManager,
-		private loggingService: LoggingService, // Injected dependency
+		private loggingService: LoggingService,
 	) {
 		this.parsedMetadataCache = cacheManager.createLru("metadata.parsed", 50);
 		this.stringCache = cacheManager.createLru("metadata.strings", 2000);
@@ -46,15 +47,6 @@ export class MetadataParser {
 	 * @returns Parsed metadata object or null if parsing fails
 	 */
 	async parseFile(sdrDirectoryPath: string): Promise<LuaMetadata | null> {
-		const cached = this.parsedMetadataCache.get(sdrDirectoryPath);
-		if (cached) {
-			this.loggingService.info(
-				this.SCOPE,
-				`Using cached metadata for: ${sdrDirectoryPath}`,
-			);
-			return cached;
-		}
-
 		this.loggingService.info(
 			this.SCOPE,
 			`Parsing metadata for: ${sdrDirectoryPath}`,
@@ -70,6 +62,18 @@ export class MetadataParser {
 				return null;
 			}
 
+			// Use a content-based cache key to avoid stale caching across sessions/updates
+			const contentHash = createHash("sha1").update(luaContent).digest("hex");
+			const cacheKey = `${sdrDirectoryPath}::${contentHash}`;
+			const cachedByContent = this.parsedMetadataCache.get(cacheKey);
+			if (cachedByContent) {
+				this.loggingService.info(
+					this.SCOPE,
+					`Using cached parsed metadata (content match) for: ${sdrDirectoryPath}`,
+				);
+				return cachedByContent;
+			}
+
 			const parsedBase = this.parseLuaContent(luaContent);
 
 			const fullMetadata: LuaMetadata = {
@@ -77,7 +81,7 @@ export class MetadataParser {
 				originalFilePath: sdrDirectoryPath,
 			};
 
-			this.parsedMetadataCache.set(sdrDirectoryPath, fullMetadata);
+			this.parsedMetadataCache.set(cacheKey, fullMetadata);
 			return fullMetadata;
 		} catch (error) {
 			this.loggingService.error(

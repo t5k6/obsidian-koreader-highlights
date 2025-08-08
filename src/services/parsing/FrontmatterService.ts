@@ -6,11 +6,12 @@ import {
 	type TFile,
 } from "obsidian";
 import type { LoggingService } from "src/services/LoggingService";
+import type { BookMetadata, FileMetadataExtractor } from "src/types";
 import {
 	formatDateWithFormat,
 	secondsToHoursMinutesSeconds,
 } from "src/utils/dateUtils";
-import { formatPercent } from "src/utils/formatUtils";
+import { formatPercent, normalizeFileNamePiece } from "src/utils/formatUtils";
 
 // --- Formatting Constants and Helpers ---
 const FRIENDLY_KEY_MAP = {
@@ -58,7 +59,7 @@ const metaFieldFormatters: Partial<Record<ProgKey, (v: unknown) => unknown>> = {
 	keywords: (v) => (Array.isArray(v) ? v : splitAndTrim(String(v), /,/)),
 };
 
-export class FrontmatterService {
+export class FrontmatterService implements FileMetadataExtractor {
 	private static readonly FRONTMATTER_REGEX =
 		/^---\s*?\r?\n([\s\S]+?)\r?\n---\s*?\r?\n?/s;
 	private readonly SCOPE = "FrontmatterService";
@@ -90,6 +91,72 @@ export class FrontmatterService {
 		// Fallback: parse content ourselves
 		const content = await this.app.vault.read(file);
 		return this.parseContent(content);
+	}
+
+	/**
+	 * Extract minimal book metadata for indexing. Prioritizes metadata cache,
+	 * falls back to a partial file read and YAML parse.
+	 */
+	public async extractMetadata(file: TFile): Promise<BookMetadata | null> {
+		try {
+			const cache = this.app.metadataCache.getFileCache(file);
+			if (cache?.frontmatter) {
+				return this.extractFromFrontmatter(cache.frontmatter, file.path);
+			}
+
+			const content = await this.readPartial(file, 4096);
+			const match = content.match(FrontmatterService.FRONTMATTER_REGEX);
+			if (!match) return null;
+
+			try {
+				const fm = parseYaml(match[1]) ?? {};
+				return this.extractFromFrontmatter(
+					fm as Record<string, unknown>,
+					file.path,
+				);
+			} catch (e) {
+				this.loggingService.warn(
+					this.SCOPE,
+					`YAML parse failed for partial read of ${file.path}`,
+					e,
+				);
+				return null;
+			}
+		} catch (e) {
+			this.loggingService.warn(
+				this.SCOPE,
+				`extractMetadata failed for ${file.path}`,
+				e,
+			);
+			return null;
+		}
+	}
+
+	private extractFromFrontmatter(
+		fm: Record<string, unknown>,
+		vaultPath: string,
+	): BookMetadata | null {
+		const title = String((fm as any).Title ?? (fm as any).title ?? "");
+		const authors = String(
+			(fm as any)["Author(s)"] ??
+				(fm as any).authors ??
+				(fm as any).author ??
+				"",
+		);
+
+		if (!title && !authors) return null;
+
+		const authorSlug = normalizeFileNamePiece(authors).toLowerCase();
+		const titleSlug = normalizeFileNamePiece(title).toLowerCase();
+		const key = `${authorSlug}::${titleSlug}`;
+
+		return { title, authors, key, vaultPath };
+	}
+
+	private async readPartial(file: TFile, bytes: number): Promise<string> {
+		// For simplicity and cross-platform reliability, use full read then slice.
+		const buffer = await this.app.vault.read(file);
+		return buffer.slice(0, bytes);
 	}
 
 	/**

@@ -49,7 +49,7 @@ export interface TemplateValidationResult {
 }
 
 export class TemplateManager implements SettingsObserver {
-	private readonly SCOPE = "TemplateManager";
+	private readonly log;
 	private isDarkTheme: boolean = true;
 	private rawTemplateCache: LruCache<string, string>;
 	private compiledTemplateCache: LruCache<string, CachedTemplate>;
@@ -68,15 +68,14 @@ export class TemplateManager implements SettingsObserver {
 			10,
 		);
 
+		this.log = this.loggingService.scoped("TemplateManager");
+
 		this.updateTheme = this.updateTheme.bind(this);
 		this.updateTheme();
 		this.plugin.registerEvent(
 			this.plugin.app.workspace.on("css-change", this.updateTheme),
 		);
-		this.loggingService.info(
-			this.SCOPE,
-			`Initialized. Dark theme: ${this.isDarkTheme}`,
-		);
+		this.log.info(`Initialized. Dark theme: ${this.isDarkTheme}`);
 	}
 
 	public onSettingsChanged(
@@ -92,10 +91,7 @@ export class TemplateManager implements SettingsObserver {
 
 		if (templateChanged) {
 			this.cacheManager.clear("template.*");
-			this.loggingService.info(
-				this.SCOPE,
-				"Template settings changed, relevant caches cleared.",
-			);
+			this.log.info("Template settings changed, relevant caches cleared.");
 		}
 	}
 
@@ -107,10 +103,7 @@ export class TemplateManager implements SettingsObserver {
 		const newThemeState = document.body.classList.contains(DARK_THEME_CLASS);
 		if (this.isDarkTheme !== newThemeState) {
 			this.isDarkTheme = newThemeState;
-			this.loggingService.info(
-				this.SCOPE,
-				`Theme changed. Dark theme: ${this.isDarkTheme}`,
-			);
+			this.log.info(`Theme changed. Dark theme: ${this.isDarkTheme}`);
 		}
 	}
 
@@ -171,14 +164,9 @@ export class TemplateManager implements SettingsObserver {
 			// eslint-disable-next-line no-new-func
 			return new Function("d", functionBody) as CompiledTemplate;
 		} catch (error) {
-			this.loggingService.error(
-				this.SCOPE,
-				"Failed to compile template.",
-				error,
-				{
-					template: functionBody,
-				},
-			);
+			this.log.error("Failed to compile template.", error, {
+				template: functionBody,
+			});
 			return () => "Error: Template compilation failed.";
 		}
 	}
@@ -223,16 +211,9 @@ export class TemplateManager implements SettingsObserver {
 				});
 			}
 		} catch (error) {
-			this.loggingService.error(
-				this.SCOPE,
-				"Failed to parse built-in templates.",
-				error,
-			);
+			this.log.error("Failed to parse built-in templates.", error);
 		}
-		this.loggingService.info(
-			this.SCOPE,
-			`Loaded ${this.builtInTemplates.size} built-in templates.`,
-		);
+		this.log.info(`Loaded ${this.builtInTemplates.size} built-in templates.`);
 	}
 
 	/**
@@ -309,11 +290,7 @@ export class TemplateManager implements SettingsObserver {
 			new Notice(
 				`Template "${templateId}" has errors. Falling back to Default.`,
 			);
-			this.loggingService.error(
-				this.SCOPE,
-				"Template validation failed:",
-				validation.errors,
-			);
+			this.log.error("Template validation failed:", validation.errors);
 			templateContent =
 				this.builtInTemplates.get(FALLBACK_TEMPLATE_ID)?.content ?? "";
 		}
@@ -356,10 +333,7 @@ export class TemplateManager implements SettingsObserver {
 		const normalizedPath = normalizePath(vaultPath);
 		const file = this.vault.getAbstractFileByPath(normalizedPath);
 		if (file instanceof TFile) return this.vault.read(file);
-		this.loggingService.warn(
-			this.SCOPE,
-			`Custom template file not found: "${vaultPath}"`,
-		);
+		this.log.warn(`Custom template file not found: "${vaultPath}"`);
 		return null;
 	}
 
@@ -389,8 +363,7 @@ export class TemplateManager implements SettingsObserver {
 			await this.fs.ensureVaultFolder(templateDir);
 		} catch (err) {
 			// If we can't even create the directory, we can't proceed.
-			this.loggingService.error(
-				this.SCOPE,
+			this.log.error(
 				`Failed to create template directory at ${templateDir}`,
 				err,
 			);
@@ -410,17 +383,13 @@ export class TemplateManager implements SettingsObserver {
 
 				// Check if the file already exists to avoid unnecessary writes.
 				if (!(await this.fs.vaultExists(filePath))) {
-					this.loggingService.info(
-						this.SCOPE,
-						`Creating built-in template file: ${filePath}`,
-					);
+					this.log.info(`Creating built-in template file: ${filePath}`);
 					const fileContent = `---\ndescription: ${template.description}\n---\n\n${template.content}`;
 
 					try {
 						await this.vault.create(filePath, fileContent);
 					} catch (writeError) {
-						this.loggingService.error(
-							this.SCOPE,
+						this.log.error(
 							`Failed to write template file ${filePath}`,
 							writeError,
 						);

@@ -284,6 +284,32 @@ export class FileSystemService {
 	}
 
 	/* ------------------------------------------------------------------ */
+	/*                         AUTO-ROUTING HELPERS                        */
+	/* ------------------------------------------------------------------ */
+
+	/**
+	 * Read binary content from either an absolute system path (Node fs)
+	 * or a vault-relative path (Vault adapter), based on the input path.
+	 */
+	async readBinaryAuto(filePath: string): Promise<ArrayBuffer> {
+		return path.isAbsolute(filePath)
+			? ((await this.readNodeFile(filePath, true)).buffer as ArrayBuffer)
+			: await this.readVaultBinary(filePath);
+	}
+
+	/**
+	 * Write binary content to either an absolute system path (Node fs)
+	 * or a vault-relative path (Vault adapter), based on the input path.
+	 */
+	async writeBinaryAuto(filePath: string, data: Uint8Array): Promise<void> {
+		if (path.isAbsolute(filePath)) {
+			await this.writeNodeFile(filePath, data);
+		} else {
+			await this.writeVaultBinary(filePath, data.buffer as ArrayBuffer);
+		}
+	}
+
+	/* ------------------------------------------------------------------ */
 	/*                         VAULT OPERATIONS                           */
 	/* ------------------------------------------------------------------ */
 

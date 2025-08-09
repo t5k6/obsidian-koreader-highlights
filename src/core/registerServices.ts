@@ -1,4 +1,5 @@
 import type { App } from "obsidian";
+import { CapabilityManager } from "src/services/CapabilityManager";
 import { CommandManager } from "src/services/command/CommandManager";
 import { DeviceStatisticsService } from "src/services/device/DeviceStatisticsService";
 import { ScanManager } from "src/services/device/ScanManager";
@@ -68,11 +69,17 @@ export function registerServices(
 		FileSystemService,
 		LoggingService,
 	]);
+	container.register(CapabilityManager, [
+		APP_TOKEN,
+		FileSystemService,
+		LoggingService,
+	]);
 	container.register(SnapshotManager, [
 		APP_TOKEN,
 		PLUGIN_TOKEN,
 		FileSystemService,
 		LoggingService,
+		CapabilityManager,
 	]);
 	container.register(TemplateManager, [
 		PLUGIN_TOKEN,
@@ -110,6 +117,7 @@ export function registerServices(
 		SnapshotManager,
 		FileSystemService,
 		LoggingService,
+		CapabilityManager,
 	]);
 	container.register(LocalIndexService, [
 		PLUGIN_TOKEN,
@@ -119,6 +127,7 @@ export function registerServices(
 		SqlJsManager,
 		LoggingService,
 		FrontmatterService,
+		CapabilityManager,
 	]);
 
 	// Register ImportIndexService (low-level, before ImportManager)
@@ -168,6 +177,7 @@ export function registerServices(
 		LoggingService,
 		ImportIndexService,
 		LocalIndexService,
+		CapabilityManager,
 	]);
 	container.register(DeviceStatisticsService, [
 		PLUGIN_TOKEN,

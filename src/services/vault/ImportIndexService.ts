@@ -10,7 +10,7 @@ export class ImportIndexService {
 	private index: ImportIndex = {};
 	private indexFilePath: string;
 	private isDirty = false;
-	private readonly SCOPE = "ImportIndexService";
+	private readonly log;
 
 	constructor(
 		private readonly plugin: KoreaderImporterPlugin,
@@ -19,6 +19,7 @@ export class ImportIndexService {
 		private readonly logging: LoggingService,
 	) {
 		this.indexFilePath = this.fs.joinPluginDataPath(INDEX_FILE_NAME);
+		this.log = this.logging.scoped("ImportIndexService");
 	}
 
 	public async load(): Promise<void> {
@@ -27,24 +28,19 @@ export class ImportIndexService {
 				const content = await this.app.vault.adapter.read(this.indexFilePath);
 				if (content) {
 					this.index = JSON.parse(content);
-					this.logging.info(
-						this.SCOPE,
+					this.log.info(
 						`Loaded import index with ${Object.keys(this.index).length} entries.`,
 					);
 				}
 			} catch (e) {
-				this.logging.error(
-					this.SCOPE,
+				this.log.error(
 					"Failed to load or parse import index. Starting fresh.",
 					e as Error,
 				);
 				this.index = {};
 			}
 		} else {
-			this.logging.info(
-				this.SCOPE,
-				"No import index found. A new one will be created.",
-			);
+			this.log.info("No import index found. A new one will be created.");
 		}
 		this.isDirty = false;
 	}
@@ -58,16 +54,11 @@ export class ImportIndexService {
 				JSON.stringify(this.index, null, 2),
 			);
 			this.isDirty = false;
-			this.logging.info(
-				this.SCOPE,
+			this.log.info(
 				`Successfully saved import index to ${this.indexFilePath}.`,
 			);
 		} catch (e) {
-			this.logging.error(
-				this.SCOPE,
-				"Failed to save KOReader import index.",
-				e as Error,
-			);
+			this.log.error("Failed to save KOReader import index.", e as Error);
 		}
 	}
 
@@ -91,7 +82,7 @@ export class ImportIndexService {
 	 * After deletion, the in-memory index is cleared.
 	 */
 	public async deleteIndexFile(): Promise<void> {
-		this.logging.warn(this.SCOPE, "Deleting import index file for full reset.");
+		this.log.warn("Deleting import index file for full reset.");
 
 		// Reset in-memory state regardless of file deletion outcome
 		this.index = {};
@@ -100,14 +91,12 @@ export class ImportIndexService {
 		try {
 			if (await this.fs.vaultExists(this.indexFilePath)) {
 				await this.app.vault.adapter.remove(this.indexFilePath);
-				this.logging.info(
-					this.SCOPE,
+				this.log.info(
 					`Successfully deleted import index file at ${this.indexFilePath}.`,
 				);
 			}
 		} catch (e) {
-			this.logging.error(
-				this.SCOPE,
+			this.log.error(
 				`Failed to delete import index file at ${this.indexFilePath}.`,
 				e as Error,
 			);

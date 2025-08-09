@@ -21,7 +21,11 @@ function isSettingsObserver(obj: unknown): obj is SettingsObserver {
 }
 
 function isDisposable(obj: unknown): obj is Disposable {
-	return !!obj && typeof (obj as any).dispose === "function";
+	return (
+		!!obj &&
+		typeof (obj as { dispose?: () => void | Promise<void> }).dispose ===
+			"function"
+	);
 }
 
 export class DIContainer {
@@ -33,9 +37,11 @@ export class DIContainer {
 		new: KoreaderHighlightImporterSettings;
 		old: KoreaderHighlightImporterSettings;
 	} | null = null;
-	private readonly SCOPE = "DIContainer";
+	private readonly log;
 
-	constructor(private loggingService: LoggingService) {}
+	constructor(private loggingService: LoggingService) {
+		this.log = this.loggingService.scoped("DIContainer");
+	}
 
 	private getTokenName(token: Token<unknown>): string {
 		return typeof token === "symbol" ? token.toString() : token.name;
@@ -48,8 +54,7 @@ export class DIContainer {
 	): this {
 		const token = ctor as Token<T>;
 		if (this.registrations.has(token)) {
-			this.loggingService.warn(
-				this.SCOPE,
+			this.log.warn(
 				`DI registration for ${this.getTokenName(token)} is being overwritten.`,
 			);
 		}
@@ -63,8 +68,7 @@ export class DIContainer {
 
 	public registerValue<T>(token: Token<T>, value: T): this {
 		if (this.values.has(token)) {
-			this.loggingService.warn(
-				this.SCOPE,
+			this.log.warn(
 				`DI value for ${this.getTokenName(token)} is being overwritten.`,
 			);
 		}
@@ -135,18 +139,14 @@ export class DIContainer {
 					instance.onSettingsChanged(newSettings, oldSettings);
 					notifiedCount++;
 				} catch (error) {
-					this.loggingService.error(
-						this.SCOPE,
+					this.log.error(
 						`Error notifying observer ${instance.constructor.name} of settings change.`,
 						error,
 					);
 				}
 			}
 		}
-		this.loggingService.info(
-			this.SCOPE,
-			`Notified ${notifiedCount} observers of settings changes.`,
-		);
+		this.log.info(`Notified ${notifiedCount} observers of settings changes.`);
 	}
 
 	public async dispose(): Promise<void> {
@@ -158,19 +158,14 @@ export class DIContainer {
 		}
 
 		await Promise.all(disposalPromises).catch((error) => {
-			this.loggingService.error(
-				this.SCOPE,
-				"Error during instance disposal.",
-				error,
-			);
+			this.log.error("Error during instance disposal.", error);
 		});
 
 		this.instances.clear();
 		this.registrations.clear();
 		this.values.clear();
 
-		this.loggingService.info(
-			this.SCOPE,
+		this.log.info(
 			"All disposable instances have been cleared and container is disposed.",
 		);
 	}

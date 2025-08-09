@@ -2,6 +2,7 @@ import { Notice } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import type { ScanManager } from "src/services/device/ScanManager";
 import type { CacheManager } from "src/utils/cache/CacheManager";
+import type { CapabilityManager } from "../CapabilityManager";
 import type { SDRFinder } from "../device/SDRFinder";
 import { FileSystemService } from "../FileSystemService";
 import type { ImportManager } from "../ImportManager";
@@ -10,7 +11,7 @@ import type ImportIndexService from "../vault/ImportIndexService";
 import type { LocalIndexService } from "../vault/LocalIndexService";
 
 export class CommandManager {
-	private readonly SCOPE = "CommandManager";
+	private readonly log;
 
 	constructor(
 		private readonly plugin: KoreaderImporterPlugin,
@@ -21,7 +22,10 @@ export class CommandManager {
 		private readonly loggingService: LoggingService,
 		private readonly importIndexService: ImportIndexService,
 		private readonly localIndexService: LocalIndexService,
-	) {}
+		private readonly capabilities: CapabilityManager,
+	) {
+		this.log = this.loggingService.scoped("CommandManager");
+	}
 
 	/**
 	 * Ensures the KOReader mount point is available and settings are up-to-date.
@@ -30,10 +34,7 @@ export class CommandManager {
 	private async prepareExecution(): Promise<string | null> {
 		const rawMountPoint = await this.sdrFinder.findActiveMountPoint();
 		if (!rawMountPoint) {
-			this.loggingService.warn(
-				this.SCOPE,
-				"Mount point not available. Aborting command execution.",
-			);
+			this.log.warn("Mount point not available. Aborting command execution.");
 			new Notice(
 				"KOReader device not found. Please check the mount point in settings.",
 			);
@@ -43,10 +44,7 @@ export class CommandManager {
 		const mountPoint = FileSystemService.normalizeSystemPath(rawMountPoint);
 
 		if (mountPoint !== this.plugin.settings.koreaderMountPoint) {
-			this.loggingService.info(
-				this.SCOPE,
-				`Auto-detected new mount point: ${mountPoint}`,
-			);
+			this.log.info(`Auto-detected new mount point: ${mountPoint}`);
 			this.plugin.settings.koreaderMountPoint = mountPoint;
 			await this.plugin.saveSettings();
 			new Notice(`KOReader: Auto-detected device at "${mountPoint}"`, 5000);
@@ -61,7 +59,7 @@ export class CommandManager {
 	 * Handles cancellation and error reporting.
 	 */
 	async executeImport(): Promise<void> {
-		this.loggingService.info(this.SCOPE, "Import triggered.");
+		this.log.info("Import triggered.");
 
 		const mountPoint = await this.prepareExecution();
 		if (!mountPoint) {
@@ -76,17 +74,10 @@ export class CommandManager {
 			await this.importManager.importHighlights();
 		} catch (error) {
 			if ((error as DOMException)?.name === "AbortError") {
-				this.loggingService.info(
-					this.SCOPE,
-					"Import was cancelled by the user.",
-				);
+				this.log.info("Import was cancelled by the user.");
 				new Notice("Import cancelled.");
 			} else {
-				this.loggingService.error(
-					this.SCOPE,
-					"Import failed with an unexpected error",
-					error,
-				);
+				this.log.error("Import failed with an unexpected error", error);
 				new Notice("Import failed. Check console for details.");
 			}
 		}
@@ -97,7 +88,7 @@ export class CommandManager {
 	 * Shows what files would be processed in an import.
 	 */
 	async executeScan(): Promise<void> {
-		this.loggingService.info(this.SCOPE, "Scan triggered.");
+		this.log.info("Scan triggered.");
 
 		const mountPoint = await this.prepareExecution();
 		if (!mountPoint) {
@@ -107,11 +98,7 @@ export class CommandManager {
 		try {
 			await this.scanManager.scanForHighlights();
 		} catch (error) {
-			this.loggingService.error(
-				this.SCOPE,
-				"Scan failed with an unexpected error",
-				error,
-			);
+			this.log.error("Scan failed with an unexpected error", error);
 			new Notice("Scan failed. Check console for details.");
 		}
 	}
@@ -122,8 +109,7 @@ export class CommandManager {
 	 */
 	async executeClearCaches(): Promise<void> {
 		if (!this.cacheManager) {
-			this.loggingService.error(
-				this.SCOPE,
+			this.log.error(
 				"CacheManager dependency not available. Cannot clear caches.",
 			);
 			new Notice(
@@ -132,7 +118,7 @@ export class CommandManager {
 			return;
 		}
 
-		this.loggingService.info(this.SCOPE, "Cache clear triggered from plugin.");
+		this.log.info("Cache clear triggered from plugin.");
 		// Clear in-memory caches
 		this.cacheManager.clear();
 		// Clear SDR-related caches explicitly
@@ -153,10 +139,7 @@ export class CommandManager {
 	 * Deletes persistent files and requests a plugin reload.
 	 */
 	async executeFullReset(): Promise<void> {
-		this.loggingService.warn(
-			this.SCOPE,
-			"Full reset triggered. Deleting all indexes and caches.",
-		);
+		this.log.warn("Full reset triggered. Deleting all indexes and caches.");
 
 		try {
 			// 1) Delete the persistent vault index (SQLite)
@@ -175,15 +158,11 @@ export class CommandManager {
 
 			// 4) Trigger a reload of the plugin for a completely clean state
 			// Delay slightly to allow the Notice to be visible
-			setTimeout(() => {
+			setTimeout((): void => {
 				void (this.plugin as any).reloadPlugin?.();
 			}, 1000);
 		} catch (error) {
-			this.loggingService.error(
-				this.SCOPE,
-				"Full reset failed.",
-				error as Error,
-			);
+			this.log.error("Full reset failed.", error as Error);
 			new Notice(
 				"Error during reset. Check the developer console for details.",
 				10000,
@@ -196,25 +175,40 @@ export class CommandManager {
 	 * Rewrites all files to ensure consistency across the highlights folder.
 	 */
 	async executeConvertCommentStyle(): Promise<void> {
-		this.loggingService.info(this.SCOPE, "Comment style conversion triggered.");
+		this.log.info("Comment style conversion triggered.");
 
 		try {
 			await this.importManager.convertAllFilesToCommentStyle();
 		} catch (error) {
 			if ((error as DOMException)?.name === "AbortError") {
-				this.loggingService.info(
-					this.SCOPE,
-					"Comment style conversion was cancelled by the user.",
-				);
+				this.log.info("Comment style conversion was cancelled by the user.");
 				new Notice("Conversion cancelled.");
 			} else {
-				this.loggingService.error(
-					this.SCOPE,
+				this.log.error(
 					"Comment style conversion failed with an unexpected error",
 					error,
 				);
 				new Notice("Conversion failed. Check console for details.");
 			}
+		}
+	}
+
+	/**
+	 * Forces CapabilityManager to refresh all probes, bypassing TTL/backoff.
+	 * Useful when environment changes (e.g., vault remounted read-write).
+	 */
+	async executeRecheckCapabilities(): Promise<void> {
+		try {
+			const snap = await this.capabilities.refreshAll(true);
+			const msg = `Capabilities: snapshotsWritable=${snap.areSnapshotsWritable ? "ok" : "unavailable"}, indexPersistent=${snap.isPersistentIndexAvailable ? "ok" : "unavailable"}`;
+			this.log.info("Capability refresh complete.", snap);
+			new Notice(`KOReader Importer: ${msg}`, 5000);
+		} catch (e) {
+			this.log.error("Capability refresh failed", e);
+			new Notice(
+				"Failed to re-check capabilities. See console for details.",
+				7000,
+			);
 		}
 	}
 }

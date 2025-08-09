@@ -7,10 +7,12 @@ import { LruCache } from "./LruCache";
  * This centralizes cache management, removing duplicated logic from other services.
  */
 export class CacheManager implements Disposable {
-	private readonly SCOPE = "CacheManager";
+	private readonly log;
 	private caches = new Map<string, Cache<unknown, unknown>>();
 
-	constructor(private loggingService: LoggingService) {}
+	constructor(private loggingService: LoggingService) {
+		this.log = this.loggingService.scoped("CacheManager");
+	}
 
 	/* ---------- Factory Methods ---------- */
 
@@ -45,10 +47,7 @@ export class CacheManager implements Disposable {
 		cache: T,
 	): T {
 		if (this.caches.has(name)) {
-			this.loggingService.warn(
-				this.SCOPE,
-				`Overwriting already registered cache "${name}"`,
-			);
+			this.log.warn(`Overwriting already registered cache "${name}"`);
 		}
 		this.caches.set(name, cache);
 		return cache;
@@ -75,17 +74,13 @@ export class CacheManager implements Disposable {
 				try {
 					(cache as any)?.clear?.();
 				} catch (e) {
-					this.loggingService.warn(
-						this.SCOPE,
+					this.log.warn(
 						"Encountered error while clearing a cache; continuing.",
 						e,
 					);
 				}
 			}
-			this.loggingService.info(
-				this.SCOPE,
-				`Cleared all ${this.caches.size} caches.`,
-			);
+			this.log.info(`Cleared all ${this.caches.size} caches.`);
 			return;
 		}
 
@@ -95,16 +90,12 @@ export class CacheManager implements Disposable {
 				try {
 					(cache as any)?.clear?.();
 				} catch (e) {
-					this.loggingService.warn(
-						this.SCOPE,
+					this.log.warn(
 						`Encountered error while clearing cache "${name}"; continuing.`,
 						e,
 					);
 				}
-				this.loggingService.info(
-					this.SCOPE,
-					`Cleared cache "${name}" via pattern "${pattern}"`,
-				);
+				this.log.info(`Cleared cache "${name}" via pattern "${pattern}"`);
 			}
 		}
 	}
@@ -115,7 +106,7 @@ export class CacheManager implements Disposable {
 	public dispose(): void {
 		this.clear();
 		this.caches.clear();
-		this.loggingService.info(this.SCOPE, "Disposed and cleared registry.");
+		this.log.info("Disposed and cleared registry.");
 	}
 }
 

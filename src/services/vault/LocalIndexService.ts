@@ -1,5 +1,3 @@
-import { homedir, platform } from "node:os";
-import path from "node:path";
 import {
 	type App,
 	type CachedMetadata,
@@ -23,6 +21,7 @@ import { ConcurrentDatabase } from "src/utils/ConcurrentDatabase";
 import type { CacheManager } from "src/utils/cache/CacheManager";
 import type { LruCache } from "src/utils/cache/LruCache";
 import { normalizeFileNamePiece } from "src/utils/formatUtils";
+import type { CapabilityManager } from "../CapabilityManager";
 import { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 import type { SqlJsManager } from "../SqlJsManager";
@@ -50,7 +49,7 @@ interface DebouncedMetadataChangeHandler extends DebouncedFn {
 
 export class LocalIndexService implements Disposable, SettingsObserver {
 	private settings: KoreaderHighlightImporterSettings;
-	private readonly SCOPE = "LocalIndexService";
+	private readonly log;
 	private idxDb: Database | null = null;
 	private idxInitializing: Promise<void> | null = null;
 	private concurrentDb: ConcurrentDatabase | null = null;
@@ -74,6 +73,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 	private rebuildProgress: { current: number; total: number } | null = null;
 	private processedDuringRebuild: Set<string> | null = null;
 	private isRebuildingFlag = false;
+	private readonly capabilities: CapabilityManager;
 
 	public getIndexState(): "persistent" | "in_memory" | "unavailable" {
 		return this.indexState;
@@ -93,15 +93,10 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 	 */
 	public warnIfDegradedMode(): void {
 		if (this.indexState !== "persistent") {
-			// Use a lightweight session flag on the plugin instance to avoid repeated notices
+			// CapabilityManager will surface user notices; we only log here
 			const anyPlugin = this.plugin as any;
 			if (!anyPlugin.__kohlWarnedDegraded) {
-				new Notice(
-					"KOReader Importer: running without a persistent index. Duplicate detection will be slower and may time out.",
-					8000,
-				);
-				this.loggingService.warn(
-					this.SCOPE,
+				this.log.warn(
 					`Index state is "${this.indexState}". Operating in degraded scan mode.`,
 				);
 				anyPlugin.__kohlWarnedDegraded = true;
@@ -121,8 +116,18 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		private sqlJsManager: SqlJsManager,
 		private readonly loggingService: LoggingService,
 		private readonly frontmatterService: FrontmatterService,
+		capabilities?: CapabilityManager,
 	) {
 		this.settings = plugin.settings;
+		this.log = this.loggingService.scoped("LocalIndexService");
+
+		// Backwards-compatible default CapabilityManager stub for tests
+		this.capabilities =
+			capabilities ??
+			({
+				ensure: async () => true,
+				reportOutcome: () => void 0,
+			} as unknown as CapabilityManager);
 
 		// Use a vault-relative, normalized path for cross-platform adapter compatibility
 		this.idxPath = this.fsService.joinPluginDataPath("highlight_index.sqlite");
@@ -170,10 +175,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 	public async initialize(): Promise<void> {
 		await this.ensureIndexReady();
 		this.registerVaultEvents();
-		this.loggingService.info(
-			this.SCOPE,
-			`Service initialized. Index path: ${this.idxPath}`,
-		);
+		this.log.info(`Service initialized. Index path: ${this.idxPath}`);
 		// Proactively inform user if we're not persistent
 		this.warnIfDegradedMode();
 
@@ -181,7 +183,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		// so future duplicate checks can be O(1) against the temporary index.
 		if (this.indexState === "in_memory" && !this.isRebuilding) {
 			this.startBackgroundRebuild().catch((e) => {
-				this.loggingService.error(this.SCOPE, "Failed to start rebuild", e);
+				this.log.error("Failed to start rebuild", e);
 			});
 		}
 	}
@@ -274,12 +276,21 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 			// If idxPath is invalid (e.g., could not be determined), skip directly to in-memory mode.
 			if (!this.idxPath) {
 				// The check is now just for a valid path string.
-				this.loggingService.info(
-					this.SCOPE,
+				this.log.info(
 					"Persistent index path not available. Initializing in-memory DB.",
 				);
 				await this.initializeInMemoryDb();
 				this.idxInitializing = null;
+				return;
+			}
+
+			// Ask capability manager whether persistence is likely before attempting
+			const likely = await this.capabilities.ensure("indexPersistenceLikely", {
+				notifyOnce: true,
+			});
+			if (!likely) {
+				await this.initializeInMemoryDb();
+				this.indexState = "in_memory";
 				return;
 			}
 
@@ -292,16 +303,13 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 				this.indexState = "persistent";
 				// Ensure the brand-new DB is flushed at least once to disk
 				await this.sqlJsManager.persistDatabase(this.idxPath);
+				this.capabilities.reportOutcome("indexPersistenceLikely", true);
 			} catch (error) {
-				this.loggingService.warn(
-					this.SCOPE,
+				this.log.warn(
 					"Persistent index unavailable; falling back to in-memory...",
 					error,
 				);
-				new Notice(
-					"KOReader Importer: Index is in-memory. Duplicate detection will be slower this session.",
-					8000,
-				);
+				this.capabilities.reportOutcome("indexPersistenceLikely", false, error);
 				await this.initializeInMemoryDb();
 			} finally {
 				this.idxInitializing = null;
@@ -325,11 +333,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 				undefined, // in-memory persistence handled separately
 			);
 		} catch (memErr) {
-			this.loggingService.error(
-				this.SCOPE,
-				"Failed to initialize in-memory index database.",
-				memErr,
-			);
+			this.log.error("Failed to initialize in-memory index database.", memErr);
 			this.idxDb = null;
 			this.concurrentDb = null;
 			this.indexState = "unavailable";
@@ -353,8 +357,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 			const folderPath = this.settings.highlightsFolder ?? "";
 			const root = this.app.vault.getAbstractFileByPath(folderPath);
 			if (!(root instanceof TFolder)) {
-				this.loggingService.warn(
-					this.SCOPE,
+				this.log.warn(
 					`Cannot rebuild index: highlights folder not found or not a folder: '${folderPath}'`,
 				);
 				this.finishRebuildNotice(
@@ -399,57 +402,33 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 
 			if (this.rebuildAbortController.signal.aborted) {
 				this.finishRebuildNotice(false, "⏸ Index rebuild cancelled");
-				this.loggingService.warn(
-					this.SCOPE,
-					"Index rebuild cancelled by user.",
-				);
 				return;
 			}
 
 			if (result.errors.length > 0) {
-				this.loggingService.warn(
-					this.SCOPE,
+				this.log.warn(
 					`Index rebuild completed with ${result.errors.length} errors.`,
 				);
 			}
 
 			this.finishRebuildNotice(false, "✅ Temporary index ready");
-			this.loggingService.info(
-				this.SCOPE,
-				"In-memory index rebuild completed.",
-			);
-		} catch (e: any) {
-			if (e?.name === "AbortError") {
+			this.log.info("In-memory index rebuild completed.");
+		} catch (e: unknown) {
+			if (e instanceof DOMException && e.name === "AbortError") {
 				this.finishRebuildNotice(false, "⏸ Index rebuild cancelled");
-				this.loggingService.warn(
-					this.SCOPE,
-					"Index rebuild cancelled by user.",
-				);
+				this.log.warn("Index rebuild cancelled by user.");
 			} else {
 				this.finishRebuildNotice(
 					true,
 					"⚠️ Rebuild failed. Using slower duplicate detection",
 				);
-				this.loggingService.error(this.SCOPE, "Index rebuild failed", e);
+				this.log.error("Index rebuild failed", e);
 			}
 		} finally {
 			this.rebuildAbortController = null;
 			this.rebuildProgress = null;
 			this.isRebuildingFlag = false;
 		}
-	}
-
-	private throwIfAborted(): void {
-		if (this.rebuildAbortController?.signal.aborted) {
-			// Use DOMException semantics for consistency
-			const err = new DOMException("Aborted", "AbortError");
-			throw err;
-		}
-	}
-
-	// Deprecated: replaced by ParallelIndexProcessor
-	private async processFileIntoIndex(_file: TFile): Promise<void> {
-		// no-op
 	}
 
 	private updateRebuildNotice(): void {
@@ -478,11 +457,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 			try {
 				await this.sqlJsManager.persistDatabase(this.idxPath);
 			} catch (e) {
-				this.loggingService.error(
-					this.SCOPE,
-					`Failed to save index to ${this.idxPath}`,
-					e as Error,
-				);
+				this.log.error(`Failed to save index to ${this.idxPath}`, e as Error);
 				new Notice(
 					"KOReader Importer: Failed to save index. Changes may be lost.",
 					8000,
@@ -496,10 +471,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 	 * This is a destructive operation intended for a full reset.
 	 */
 	public async deleteIndexFile(): Promise<void> {
-		this.loggingService.warn(
-			this.SCOPE,
-			"Deleting persistent index database file.",
-		);
+		this.log.warn("Deleting persistent index database file.");
 
 		// 1. Ensure any pending writes are flushed and the DB is closed.
 		await this.dispose();
@@ -516,18 +488,14 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 			const normalizedPath = FileSystemService.toVaultPath(this.idxPath);
 			if (await this.fsService.vaultExists(normalizedPath)) {
 				await this.app.vault.adapter.remove(normalizedPath);
-				this.loggingService.info(
-					this.SCOPE,
-					"Successfully deleted index file.",
-				);
+				this.log.info("Successfully deleted index file.");
 			}
 		} catch (error) {
-			this.loggingService.error(
-				this.SCOPE,
+			this.log.error(
 				`Failed to delete index file at ${this.idxPath}`,
 				error as Error,
 			);
-			// Proceed anyway; in-memory state is cleared.
+			// proceed anyway
 		}
 	}
 
@@ -579,8 +547,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 				}
 			} catch (e) {
 				database.run("ROLLBACK;");
-				this.loggingService.error(
-					this.SCOPE,
+				this.log.error(
 					`Transaction failed for handleRename: ${oldPath} -> ${(file as any)?.path}`,
 					e,
 				);
@@ -617,8 +584,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 				}
 			} catch (e) {
 				database.run("ROLLBACK;");
-				this.loggingService.error(
-					this.SCOPE,
+				this.log.error(
 					`Transaction failed for handleDelete: ${pathToDelete}`,
 					e,
 				);
@@ -641,8 +607,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 
 			if (!metadata) {
 				if (oldKey) {
-					this.loggingService.info(
-						this.SCOPE,
+					this.log.info(
 						`Note ${file.path} lost identifying frontmatter. Removing from index.`,
 					);
 					await this.removePathFromIndex(file.path, oldKey);
@@ -651,8 +616,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 			}
 
 			if (oldKey && oldKey !== metadata.key) {
-				this.loggingService.info(
-					this.SCOPE,
+				this.log.info(
 					`Book key for ${file.path} changed from "${oldKey}" to "${metadata.key}". Updating index.`,
 				);
 				await this.removePathFromIndex(file.path, oldKey);
@@ -666,11 +630,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 				file.path,
 			);
 		} catch (e) {
-			this.loggingService.warn(
-				this.SCOPE,
-				"Failed handling metadata change",
-				e,
-			);
+			this.log.warn("Failed handling metadata change", e);
 		}
 	}
 
@@ -711,8 +671,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 				}
 			} catch (e) {
 				database.run("ROLLBACK;");
-				this.loggingService.error(
-					this.SCOPE,
+				this.log.error(
 					`Transaction failed for removePathFromIndex: ${vaultPath}`,
 					e,
 				);
@@ -756,5 +715,4 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		);
 		return this.concurrentDb;
 	}
-
 }

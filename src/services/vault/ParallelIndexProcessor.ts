@@ -20,7 +20,7 @@ export interface ProcessResult {
  * - Reports progress and supports cancellation via AbortSignal
  */
 export class ParallelIndexProcessor {
-	private readonly SCOPE = "ParallelIndexProcessor";
+	private readonly log;
 	private readonly WORKER_COUNT: number;
 	private readonly BATCH_SIZE: number;
 
@@ -35,6 +35,7 @@ export class ParallelIndexProcessor {
 	) {
 		this.WORKER_COUNT = Math.max(1, opts?.workers ?? 6);
 		this.BATCH_SIZE = Math.max(1, opts?.batchSize ?? 64);
+		this.log = this.logging.scoped("ParallelIndexProcessor");
 	}
 
 	/**
@@ -118,11 +119,7 @@ export class ParallelIndexProcessor {
 				}
 			}, true);
 		} catch (e) {
-			this.logging.warn(
-				this.SCOPE,
-				`Failed to flush batch of size ${batch.length}`,
-				e,
-			);
+			this.log.warn(`Failed to flush batch of size ${batch.length}`, e);
 		}
 	}
 }

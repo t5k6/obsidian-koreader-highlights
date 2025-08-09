@@ -16,7 +16,7 @@ import type { LocalIndexService } from "./LocalIndexService";
 import type { SnapshotManager } from "./SnapshotManager";
 
 export class DuplicateFinder {
-	private readonly SCOPE = "DuplicateFinder";
+	private readonly log;
 	private potentialDuplicatesCache: Map<string, TFile[]>;
 	// Cache frontmatter during a session to avoid reparsing on fallback scans
 	private fmCache: import("src/utils/cache/LruCache").LruCache<
@@ -38,6 +38,8 @@ export class DuplicateFinder {
 			"duplicate.potential",
 		);
 		this.fmCache = this.cacheManager.createLru("duplicate.fm", 500);
+
+		this.log = this.loggingService.scoped("DuplicateFinder");
 	}
 
 	public async findBestMatch(
@@ -72,17 +74,13 @@ export class DuplicateFinder {
 		const bookKey = this.LocalIndexService.bookKeyFromDocProps(docProps);
 		const cached = this.potentialDuplicatesCache.get(bookKey);
 		if (cached) {
-			this.loggingService.info(
-				this.SCOPE,
-				`Cache hit for potential duplicates of key: ${bookKey}`,
-			);
+			this.log.info(`Cache hit for potential duplicates of key: ${bookKey}`);
 			return { files: cached, timedOut: false };
 		}
 
 		// If the index is persistent, use the fast path (existing behavior).
 		if (this.LocalIndexService.isIndexPersistent()) {
-			this.loggingService.info(
-				this.SCOPE,
+			this.log.info(
 				`Querying index for existing files with book key: ${bookKey}`,
 			);
 			const paths = await this.LocalIndexService.findExistingBookFiles(bookKey);
@@ -95,16 +93,14 @@ export class DuplicateFinder {
 		}
 
 		// Degraded mode: no persistent index. Fallback to scanning highlights folder recursively and parsing frontmatter.
-		this.loggingService.info(
-			this.SCOPE,
+		this.log.info(
 			`Degraded mode: scanning vault for potential duplicates of key: ${bookKey}`,
 		);
 
 		const settingsFolder = this.plugin.settings.highlightsFolder ?? "";
 		const root = this.vault.getAbstractFileByPath(settingsFolder);
 		if (!(root instanceof TFolder)) {
-			this.loggingService.warn(
-				this.SCOPE,
+			this.log.warn(
 				`Highlights folder not found or not a directory: '${settingsFolder}'`,
 			);
 			return { files: [], timedOut: false };
@@ -122,8 +118,7 @@ export class DuplicateFinder {
 			signal: undefined,
 		});
 		if (aborted || Date.now() - startTime > SCAN_TIMEOUT_MS) {
-			this.loggingService.warn(
-				this.SCOPE,
+			this.log.warn(
 				`Degraded duplicate scan timed out after ${SCAN_TIMEOUT_MS}ms.`,
 			);
 			timedOut = true;
@@ -144,8 +139,7 @@ export class DuplicateFinder {
 					results.push(file);
 				}
 			} catch (e) {
-				this.loggingService.warn(
-					this.SCOPE,
+				this.log.warn(
 					`Frontmatter parse failed for ${file.path} during duplicate scan.`,
 					e,
 				);

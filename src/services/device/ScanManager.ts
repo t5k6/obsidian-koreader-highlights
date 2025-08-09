@@ -8,7 +8,7 @@ import type { SDRFinder } from "./SDRFinder";
 
 export class ScanManager {
 	private static readonly SCAN_REPORT_FILENAME = "KOReader SDR Scan Report.md";
-	private readonly SCOPE = "ScanManager";
+	private readonly log;
 
 	constructor(
 		private app: App,
@@ -16,7 +16,9 @@ export class ScanManager {
 		private sdrFinder: SDRFinder,
 		private fs: FileSystemService,
 		private loggingService: LoggingService,
-	) {}
+	) {
+		this.log = this.loggingService.scoped("ScanManager");
+	}
 
 	/**
 	 * Performs a scan for KOReader highlight files without importing.
@@ -24,10 +26,7 @@ export class ScanManager {
 	 * Useful for debugging and verifying settings.
 	 */
 	async scanForHighlights(): Promise<void> {
-		this.loggingService.info(
-			this.SCOPE,
-			"Starting KOReader SDR scan process...",
-		);
+		this.log.info("Starting KOReader SDR scan process...");
 
 		const modal = new ProgressModal(this.app);
 		modal.open();
@@ -41,19 +40,13 @@ export class ScanManager {
 				new Notice(
 					"Scan complete: No KOReader highlight files (.sdr directories with metadata.lua) found.",
 				);
-				this.loggingService.info(
-					this.SCOPE,
-					"Scan complete. No SDR files found.",
-				);
+				this.log.info("Scan complete. No SDR files found.");
 				modal.close();
 				await this.createOrUpdateScanNote([]);
 				return;
 			}
 
-			this.loggingService.info(
-				this.SCOPE,
-				`Scan found ${sdrFilePaths.length} metadata files.`,
-			);
+			this.log.info(`Scan found ${sdrFilePaths.length} metadata files.`);
 			modal.statusEl.setText(
 				`Found ${sdrFilePaths.length} files. Generating report...`,
 			);
@@ -63,16 +56,9 @@ export class ScanManager {
 			new Notice(
 				`Scan complete: Report saved to "${ScanManager.SCAN_REPORT_FILENAME}"`,
 			);
-			this.loggingService.info(
-				this.SCOPE,
-				"Scan process finished successfully.",
-			);
+			this.log.info("Scan process finished successfully.");
 		} catch (error) {
-			this.loggingService.error(
-				this.SCOPE,
-				"Error during SDR scan process:",
-				error,
-			);
+			this.log.error("Error during SDR scan process:", error);
 			new Notice(
 				"KOReader Importer: Error during scan. Check console for details.",
 			);
@@ -93,14 +79,10 @@ export class ScanManager {
 		const reportContent = this.generateReportContent(sdrFilePaths);
 
 		try {
-			this.loggingService.info(
-				this.SCOPE,
-				`Creating or updating scan report: ${fullReportPath}`,
-			);
+			this.log.info(`Creating or updating scan report: ${fullReportPath}`);
 			await this.fs.writeVaultFile(fullReportPath, reportContent);
 		} catch (error) {
-			this.loggingService.error(
-				this.SCOPE,
+			this.log.error(
 				`Error creating/updating scan report note at ${fullReportPath}:`,
 				error,
 			);

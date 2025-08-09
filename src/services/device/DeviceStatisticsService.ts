@@ -10,6 +10,7 @@ import type {
 	ReadingStatus,
 	SettingsObserver,
 } from "src/types";
+import { AsyncLazy } from "src/utils/asyncLazy";
 import { ConcurrentDatabase } from "src/utils/ConcurrentDatabase";
 import type { CacheManager } from "src/utils/cache/CacheManager";
 import type { LruCache } from "src/utils/cache/LruCache";
@@ -38,11 +39,10 @@ const SQL_FIND_BOOK_BY_AUTHOR_TITLE = /*sql*/ `SELECT ${BOOK_COLUMNS} FROM book 
 const SQL_GET_SESSIONS = /*sql*/ `SELECT * FROM page_stat_data WHERE id_book = ? ORDER BY start_time`;
 
 export class DeviceStatisticsService implements SettingsObserver, Disposable {
-	private readonly SCOPE = "DeviceStatisticsService";
+	private readonly log;
 	private settings: KoreaderHighlightImporterSettings;
 	private dbFilePath: string | null = null;
-	private cdb: ConcurrentDatabase | null = null;
-	private cdbInit: Promise<ConcurrentDatabase | null> | null = null;
+	private cdbLazy: AsyncLazy<ConcurrentDatabase | null>;
 
 	private statsCache: LruCache<string, BookStatisticsBundle | null>;
 	private deviceRootCache = new Map<string, string | null>();
@@ -59,6 +59,27 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 			string,
 			BookStatisticsBundle | null
 		>("stats.derived", 100);
+		this.log = this.loggingService.scoped("DeviceStatisticsService");
+		this.cdbLazy = new AsyncLazy<ConcurrentDatabase | null>(async () => {
+			const filePath = await this.resolveStatsDbPath();
+			if (!filePath) {
+				return null;
+			}
+
+			let schemaUpgraded = false;
+			const cdb = new ConcurrentDatabase(async () => {
+				const db = await this.sqlJsManager.openDatabase(filePath);
+				if (!schemaUpgraded) {
+					this.upgradeSchema(db);
+					schemaUpgraded = true;
+				}
+				return db;
+			});
+
+			this.dbFilePath = filePath;
+			this.log.info(`Stats DB is ready: ${filePath}`);
+			return cdb;
+		});
 	}
 
 	public async findBookStatistics(
@@ -76,17 +97,11 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 			const cacheKey = `${bookRow.id}`;
 			const cachedStats = this.statsCache.get(cacheKey);
 			if (cachedStats) {
-				this.loggingService.info(
-					this.SCOPE,
-					`[CACHE HIT] Statistics for: "${title}"`,
-				);
+				this.log.info(`[CACHE HIT] Statistics for: "${title}"`);
 				return cachedStats;
 			}
 
-			this.loggingService.info(
-				this.SCOPE,
-				`Querying statistics for: "${title}"`,
-			);
+			this.log.info(`Querying statistics for: "${title}"`);
 			const sessions = this.queryAllRows<PageStatData>(
 				database,
 				SQL_GET_SESSIONS,
@@ -132,8 +147,7 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 		const currentVersion = Number(res[0]?.values[0]?.[0] ?? 0);
 
 		if (currentVersion < DB_SCHEMA_VERSION) {
-			this.loggingService.info(
-				this.SCOPE,
+			this.log.info(
 				`Upgrading stats DB schema v${currentVersion} -> v${DB_SCHEMA_VERSION}`,
 			);
 			db.exec(
@@ -145,10 +159,7 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 
 	onSettingsChanged(newSettings: KoreaderHighlightImporterSettings): void {
 		if (newSettings.koreaderMountPoint !== this.settings.koreaderMountPoint) {
-			this.loggingService.info(
-				this.SCOPE,
-				"Mount point changed, resetting stats DB connection.",
-			);
+			this.log.info("Mount point changed, resetting stats DB connection.");
 			this.dispose();
 		}
 		this.settings = newSettings;
@@ -159,8 +170,7 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 			this.sqlJsManager.closeDatabase(this.dbFilePath);
 		}
 		this.dbFilePath = null;
-		this.cdb = null;
-		this.cdbInit = null;
+		this.cdbLazy.reset();
 		this.statsCache.clear();
 	}
 
@@ -199,19 +209,13 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 	private async resolveStatsDbPath(): Promise<string | null> {
 		const mountPoint = this.settings.koreaderMountPoint;
 		if (!mountPoint) {
-			this.loggingService.warn(
-				this.SCOPE,
-				"Mount point not set, cannot resolve stats DB path.",
-			);
+			this.log.warn("Mount point not set, cannot resolve stats DB path.");
 			return null;
 		}
 
 		const deviceRoot = await this.findDeviceRoot(mountPoint);
 		if (!deviceRoot) {
-			this.loggingService.warn(
-				this.SCOPE,
-				`Could not find KOReader .adds in ${mountPoint}`,
-			);
+			this.log.warn(`Could not find KOReader .adds in ${mountPoint}`);
 			return null;
 		}
 
@@ -221,8 +225,7 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 		);
 
 		if (!(await this.fsService.nodeFileExists(filePath))) {
-			this.loggingService.warn(
-				this.SCOPE,
+			this.log.warn(
 				`Statistics DB not found or not accessible at ${filePath}.`,
 			);
 			return null;
@@ -236,40 +239,7 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 	 * @returns Concurrent database instance or null if not available
 	 */
 	private async getConcurrentDb(): Promise<ConcurrentDatabase | null> {
-		// Fast path
-		if (this.cdb) return this.cdb;
-
-		// Await ongoing init if present
-		if (this.cdbInit) return this.cdbInit;
-
-		// Start initialization
-		this.cdbInit = (async () => {
-			const filePath = await this.resolveStatsDbPath();
-			if (!filePath) {
-				this.cdbInit = null; // allow retries
-				return null;
-			}
-
-			let schemaUpgraded = false;
-
-			const cdb = new ConcurrentDatabase(async () => {
-				const db = await this.sqlJsManager.openDatabase(filePath);
-				if (!schemaUpgraded) {
-					this.upgradeSchema(db);
-					schemaUpgraded = true;
-				}
-				return db;
-			});
-
-			this.dbFilePath = filePath;
-			this.cdb = cdb;
-			this.cdbInit = null;
-
-			this.loggingService.info(this.SCOPE, `Stats DB is ready: ${filePath}`);
-			return cdb;
-		})();
-
-		return this.cdbInit;
+		return this.cdbLazy.get();
 	}
 
 	/**
@@ -383,11 +353,7 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 			(typeof o.id !== "number" && typeof o.id !== "string") ||
 			typeof o.title !== "string"
 		) {
-			this.loggingService.warn(
-				this.SCOPE,
-				"Received malformed book row from database",
-				o,
-			);
+			this.log.warn("Received malformed book row from database", o);
 			return {
 				id: 0,
 				title: "Invalid Row",

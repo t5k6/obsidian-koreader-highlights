@@ -30,7 +30,7 @@ const io = <T>(fn: () => Promise<T>) => ioLimiter.schedule(fn);
 /* ------------------------------------------------------------------ */
 
 export class SDRFinder implements SettingsObserver {
-	private readonly SCOPE = "SDRFinder";
+	private readonly log;
 	private sdrDirCache: Map<string, Promise<string[]>>;
 	private metadataNameCache: Map<string, string | null>;
 	private findSdrDirectoriesWithMetadataMemoized: (
@@ -52,6 +52,7 @@ export class SDRFinder implements SettingsObserver {
 			(key: string) => this.scan(key),
 		);
 		this.updateCacheKey(this.plugin.settings);
+		this.log = this.loggingService.scoped("SDRFinder");
 	}
 
 	/* -------------------------- Public ----------------------------- */
@@ -82,10 +83,7 @@ export class SDRFinder implements SettingsObserver {
 	async readMetadataFileContent(sdrDir: string): Promise<string | null> {
 		const mountPoint = await this.findActiveMountPoint();
 		if (!mountPoint) {
-			this.loggingService.warn(
-				this.SCOPE,
-				"Cannot read metadata file without an active mount point.",
-			);
+			this.log.warn("Cannot read metadata file without an active mount point.");
 			return null;
 		}
 
@@ -94,14 +92,10 @@ export class SDRFinder implements SettingsObserver {
 
 		const fullPath = joinPath(sdrDir, name);
 		try {
-			this.loggingService.info(this.SCOPE, "Reading metadata:", fullPath);
+			this.log.info("Reading metadata:", fullPath);
 			return await this.fs.readNodeFile(fullPath);
 		} catch (err) {
-			this.loggingService.error(
-				this.SCOPE,
-				`Failed to read metadata file: ${fullPath}`,
-				err,
-			);
+			this.log.error(`Failed to read metadata file: ${fullPath}`, err);
 			return null;
 		}
 	}
@@ -113,10 +107,7 @@ export class SDRFinder implements SettingsObserver {
 		this.updateCacheKey(newSettings);
 		if (this.cacheKey !== prevKey) {
 			this.cacheManager.clear("sdr.*");
-			this.loggingService.info(
-				this.SCOPE,
-				"Settings changed, SDR caches cleared.",
-			);
+			this.log.info("Settings changed, SDR caches cleared.");
 		}
 	}
 
@@ -126,7 +117,7 @@ export class SDRFinder implements SettingsObserver {
 	 */
 	public clearCache(): void {
 		this.cacheManager.clear("sdr.*");
-		this.loggingService.info(this.SCOPE, "SDRFinder caches have been cleared.");
+		this.log.info("SDRFinder caches have been cleared.");
 	}
 
 	/* ------------------------- Private ----------------------------- */
@@ -165,10 +156,7 @@ export class SDRFinder implements SettingsObserver {
 
 		const results: string[] = [];
 		await this.walk(root, excluded, results, mountPoint);
-		this.loggingService.info(
-			this.SCOPE,
-			`Scan finished. Found ${results.length} metadata files.`,
-		);
+		this.log.info(`Scan finished. Found ${results.length} metadata files.`);
 		return results;
 	}
 
@@ -252,11 +240,7 @@ export class SDRFinder implements SettingsObserver {
 
 		for (const candidate of await this.detectCandidates()) {
 			if (await this.isUsableDir(candidate)) {
-				this.loggingService.info(
-					this.SCOPE,
-					"Auto-detected a usable mount point:",
-					candidate,
-				);
+				this.log.info("Auto-detected a usable mount point:", candidate);
 				return candidate;
 			}
 		}

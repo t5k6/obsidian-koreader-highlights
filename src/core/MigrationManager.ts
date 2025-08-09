@@ -40,7 +40,7 @@ interface PluginData {
 type MigrationFn = () => Promise<void>;
 
 export class MigrationManager {
-	private readonly SCOPE = "MigrationManager";
+	private readonly log;
 	private lastDone = "0.0.0";
 	private vault: Vault;
 	private migrations: Record<string, MigrationFn>;
@@ -50,6 +50,7 @@ export class MigrationManager {
 		private loggingService: LoggingService,
 	) {
 		this.vault = this.plugin.app.vault;
+		this.log = this.loggingService.scoped("MigrationManager");
 		// Define migrations here, binding them to the class instance
 		this.migrations = {
 			"1.2.0": this.cleanupOldLogFiles.bind(this),
@@ -70,17 +71,13 @@ export class MigrationManager {
 				cmpVer(version, this.lastDone) === 1 && // version > lastDone
 				cmpVer(version, current) <= 0 // version <= current
 			) {
-				this.loggingService.info(
-					this.SCOPE,
-					`Running migration for version -> ${version}`,
-				);
+				this.log.info(`Running migration for version -> ${version}`);
 				try {
 					// eslint-disable-next-line no-await-in-loop
 					await this.migrations[version]();
 					this.lastDone = version; // Mark as done only on success
 				} catch (error) {
-					this.loggingService.error(
-						this.SCOPE,
+					this.log.error(
 						`Migration for ${version} failed. Halting further migrations.`,
 						error,
 					);
@@ -114,20 +111,13 @@ export class MigrationManager {
 						await this.vault.delete(f);
 						removed++;
 					} catch (e) {
-						this.loggingService.warn(
-							this.SCOPE,
-							`Could not delete old log ${f.path}`,
-							e,
-						);
+						this.log.warn(`Could not delete old log ${f.path}`, e);
 					}
 				}),
 			);
 		}
 		if (removed > 0) {
-			this.loggingService.info(
-				this.SCOPE,
-				`Removed ${removed} old log files during 1.2.0 migration.`,
-			);
+			this.log.info(`Removed ${removed} old log files during 1.2.0 migration.`);
 		}
 	}
 }

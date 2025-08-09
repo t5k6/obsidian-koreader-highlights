@@ -1,13 +1,12 @@
 import path from "node:path";
 import { type App, Notice, TFile, type TFolder } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
-import { asyncPool } from "src/utils/concurrency";
 import { getFileNameWithoutExt } from "src/utils/formatUtils";
 import {
 	convertCommentStyle,
 	extractHighlightsWithStyle,
 } from "src/utils/highlightExtractor";
-import { withProgress } from "src/utils/progress";
+import { runPoolWithProgress } from "src/utils/progressPool";
 import {
 	addSummary,
 	blankSummary,
@@ -32,7 +31,7 @@ import type { LocalIndexService } from "./vault/LocalIndexService";
 import type { SnapshotManager } from "./vault/SnapshotManager";
 
 export class ImportManager {
-	private readonly SCOPE = "ImportManager";
+	private readonly log;
 
 	constructor(
 		private readonly app: App,
@@ -51,7 +50,9 @@ export class ImportManager {
 		private readonly fs: FileSystemService,
 		private readonly frontmatterService: FrontmatterService,
 		private readonly importIndexService: ImportIndexService,
-	) {}
+	) {
+		this.log = this.loggingService.scoped("ImportManager");
+	}
 
 	/**
 	 * Main entry point for importing highlights from KOReader.
@@ -60,10 +61,7 @@ export class ImportManager {
 	 * @returns Promise that resolves when import is complete
 	 */
 	async importHighlights(): Promise<void> {
-		this.loggingService.info(
-			this.SCOPE,
-			"Starting KOReader highlight import process…",
-		);
+		this.log.info("Starting KOReader highlight import process…");
 
 		// Load the import index at the start of the import
 		await this.importIndexService.load();
@@ -72,7 +70,7 @@ export class ImportManager {
 			await this.sdrFinder.findSdrDirectoriesWithMetadata();
 		if (!metadataFilePaths?.length) {
 			new Notice("No KOReader highlight files found (.sdr with metadata.lua).");
-			this.loggingService.info(this.SCOPE, "No SDR files found to import.");
+			this.log.info("No SDR files found to import.");
 			return;
 		}
 
@@ -88,68 +86,49 @@ export class ImportManager {
 			this.plugin.settings.lastDeviceTimestamp ?? "";
 
 		try {
-			await withProgress(
-				this.app,
-				metadataFilePaths.length,
-				async (tick, signal) => {
-					const poolSize = Math.min(
-						6,
-						Math.max(2, navigator.hardwareConcurrency || 4),
-					);
+			const results = await runPoolWithProgress(this.app, metadataFilePaths, {
+				maxConcurrent: 6,
+				task: async (metadataPath) =>
+					this.processMetadataFile(metadataPath, session),
+			});
 
-					const results = await asyncPool(
-						poolSize,
-						metadataFilePaths,
-						async (metadataPath) => {
-							if (signal.aborted)
-								throw new DOMException("Aborted by user", "AbortError");
-							const res = await this.processMetadataFile(metadataPath, session);
-							tick();
-							return res;
-						},
-						signal,
-					);
-
-					for (const r of results) {
-						summary = addSummary(summary, r.fileSummary);
-						if (
-							r.latestTimestampInFile &&
-							r.latestTimestampInFile > latestTimestampThisSession
-						) {
-							latestTimestampThisSession = r.latestTimestampInFile;
-						}
-					}
-				},
-			);
+			for (const r of results) {
+				summary = addSummary(summary, r.fileSummary);
+				if (
+					r.latestTimestampInFile &&
+					r.latestTimestampInFile > latestTimestampThisSession
+				) {
+					latestTimestampThisSession = r.latestTimestampInFile;
+				}
+			}
 
 			new Notice(
 				`KOReader Import finished\n${summary.created} new • ${summary.merged} merged • ${summary.automerged} auto-merged • ${summary.skipped} skipped • ${summary.errors} error(s)`,
 				10_000,
 			);
-			this.loggingService.info(this.SCOPE, "Import process finished", summary);
-		} catch (err: any) {
-			if (err?.name === "AbortError") {
+			this.log.info("Import process finished", summary);
+		} catch (err: unknown) {
+			if (
+				typeof err === "object" &&
+				err !== null &&
+				(err as { name?: string }).name === "AbortError"
+			) {
 				new Notice("Import cancelled by user.");
 			} else {
-				this.loggingService.error(
-					this.SCOPE,
-					"Critical error during highlight import process:",
-					err,
-				);
+				this.log.error("Critical error during highlight import process:", err);
 				new Notice("KOReader Importer: critical error. Check console.");
 			}
 		} finally {
 			// Always save the import index at the end
 			await this.importIndexService.save();
-			this.loggingService.info(this.SCOPE, "Flushing database index …");
+			this.log.info("Flushing database index …");
 			await this.localIndexService.flushIndex();
 			try {
 				await this.snapshotManager.cleanupOldBackups(
 					this.plugin.settings.backupRetentionDays,
 				);
 			} catch (cleanupError) {
-				this.loggingService.error(
-					this.SCOPE,
+				this.log.error(
 					"An error occurred during backup cleanup.",
 					cleanupError,
 				);
@@ -178,19 +157,18 @@ export class ImportManager {
 			const sdrPath = path.dirname(metadataPath);
 			const luaMetadata = await this.metadataParser.parseFile(sdrPath);
 			if (!luaMetadata?.annotations?.length) {
-				this.loggingService.info(
-					this.SCOPE,
-					`Skipping – no annotations found in ${sdrPath}`,
-				);
+				this.log.info(`Skipping – no annotations found in ${sdrPath}`);
 				summary.skipped++;
 				return { fileSummary: summary, latestTimestampInFile: null };
 			}
 
-			const newestAnnotation = luaMetadata.annotations.reduce(
-				(newest, current) =>
-					!newest || current.datetime > newest.datetime ? current : newest,
-				null as any,
-			);
+			type Annotation = (typeof luaMetadata.annotations)[number];
+			const newestAnnotation =
+				luaMetadata.annotations.reduce<Annotation | null>(
+					(newest, current) =>
+						!newest || current.datetime > newest.datetime ? current : newest,
+					null,
+				);
 			if (newestAnnotation) {
 				latestTimestampInFile = newestAnnotation.datetime;
 			}
@@ -204,10 +182,7 @@ export class ImportManager {
 					: true;
 
 			if (previous && !isFileModifiedOnDevice && !hasNewerAnnotations) {
-				this.loggingService.info(
-					this.SCOPE,
-					`Skipping unchanged file: ${metadataPath}`,
-				);
+				this.log.info(`Skipping unchanged file: ${metadataPath}`);
 				summary.skipped++;
 				return { fileSummary: summary, latestTimestampInFile };
 			}
@@ -216,8 +191,7 @@ export class ImportManager {
 
 			if (!luaMetadata.docProps.title) {
 				luaMetadata.docProps.title = getFileNameWithoutExt(sdrPath);
-				this.loggingService.warn(
-					this.SCOPE,
+				this.log.warn(
 					`Metadata missing title for ${sdrPath}, using filename as fallback.`,
 				);
 			}
@@ -235,11 +209,7 @@ export class ImportManager {
 
 			return { fileSummary, latestTimestampInFile };
 		} catch (err) {
-			this.loggingService.error(
-				this.SCOPE,
-				`Error processing ${metadataPath}`,
-				err as Error,
-			);
+			this.log.error(`Error processing ${metadataPath}`, err as Error);
 			summary.errors++;
 			return { fileSummary: summary, latestTimestampInFile };
 		}
@@ -270,10 +240,7 @@ export class ImportManager {
 		) {
 			luaMetadata.docProps.authors = stats.book.authors;
 		}
-		this.loggingService.info(
-			this.SCOPE,
-			`Enriched metadata for "${title}" with stats DB info.`,
-		);
+		this.log.info(`Enriched metadata for "${title}" with stats DB info.`);
 	}
 
 	/**
@@ -321,8 +288,7 @@ export class ImportManager {
 		} else {
 			// We have a match; handle normally. We can optionally log timeout occurrence.
 			if (timedOut) {
-				this.loggingService.warn(
-					this.SCOPE,
+				this.log.warn(
 					`Duplicate scan timed out for "${luaMetadata.docProps.title}" but a likely match was found.`,
 				);
 			}
@@ -372,7 +338,16 @@ export class ImportManager {
 		// Reuse PromptModal for a simple two-option decision.
 		const { PromptModal } = await import("../ui/PromptModal");
 		return await new Promise<"skip" | "import-anyway">((resolve) => {
-			const modal = new (PromptModal as any)(
+			// Using `unknown` here to avoid unsafe any while constructing the modal.
+			const ModalCtor = PromptModal as unknown as {
+				new (
+					app: App,
+					title: string,
+					options: { label: string; isCta?: boolean; callback: () => void }[],
+					message: string,
+				): { open: () => void };
+			};
+			const modal = new ModalCtor(
 				this.app,
 				"Duplicate scan timed out",
 				[
@@ -421,8 +396,7 @@ export class ImportManager {
 					"> [!warning] Duplicate scan did not complete\n" +
 					"> The scan timed out before searching the entire vault. Review this note to avoid duplicates.\n\n";
 				content = warningBlock + content;
-				this.loggingService.warn(
-					this.SCOPE,
+				this.log.warn(
 					"Failed to inject timeout warning via structured frontmatter; used fallback prepend.",
 					e,
 				);
@@ -469,10 +443,7 @@ export class ImportManager {
 	 * @returns Promise that resolves when all files have been converted
 	 */
 	async convertAllFilesToCommentStyle(): Promise<void> {
-		this.loggingService.info(
-			this.SCOPE,
-			"Starting comment style conversion for all highlight files…",
-		);
+		this.log.info("Starting comment style conversion for all highlight files…");
 
 		const targetStyle = this.plugin.settings.commentStyle;
 		await this.checkIfConvertingFromNone(targetStyle);
@@ -483,42 +454,29 @@ export class ImportManager {
 		const counts = { converted: 0, skipped: 0 };
 
 		try {
-			await withProgress(this.app, files.length, async (tick, signal) => {
-				const poolSize = Math.min(
-					4,
-					Math.max(2, navigator.hardwareConcurrency || 4),
-				);
-
-				await asyncPool(
-					poolSize,
-					files,
-					async (file) => {
-						if (signal.aborted)
-							throw new DOMException("Aborted by user", "AbortError");
-						await this.convertSingleFile(file, targetStyle, counts);
-						tick();
-					},
-					signal,
-				);
+			await runPoolWithProgress(this.app, files, {
+				maxConcurrent: 4,
+				task: async (file) => {
+					await this.convertSingleFile(file, targetStyle, counts);
+				},
 			});
 
 			new Notice(
 				`Comment style conversion complete: ${counts.converted} files converted, ${counts.skipped} files skipped.`,
 				8000,
 			);
-			this.loggingService.info(
-				this.SCOPE,
+			this.log.info(
 				`Comment style conversion finished - ${counts.converted} converted, ${counts.skipped} skipped`,
 			);
-		} catch (err: any) {
-			if (err?.name === "AbortError") {
+		} catch (err: unknown) {
+			if (
+				typeof err === "object" &&
+				err !== null &&
+				(err as { name?: string }).name === "AbortError"
+			) {
 				new Notice("Comment style conversion cancelled by user.");
 			} else {
-				this.loggingService.error(
-					this.SCOPE,
-					"Error during comment style conversion:",
-					err,
-				);
+				this.log.error("Error during comment style conversion:", err);
 				new Notice(
 					"Error during comment style conversion. Check console for details.",
 				);
@@ -562,7 +520,7 @@ export class ImportManager {
 					hasFilesWithoutComments = true;
 					break;
 				}
-			} catch (error) {
+			} catch (_error) {
 				// Ignore read errors for this check
 			}
 		}
@@ -572,8 +530,7 @@ export class ImportManager {
 				`Warning: Some files appear to have no comment markers. Converting from "None" style to ${targetStyle} style cannot restore tracking information. New imports may create duplicates.`,
 				8000,
 			);
-			this.loggingService.warn(
-				this.SCOPE,
+			this.log.warn(
 				"Detected files without KOHL comments during conversion to comment style",
 			);
 		}
@@ -587,8 +544,7 @@ export class ImportManager {
 		const folderPath = this.plugin.settings.highlightsFolder;
 		if (!folderPath) {
 			new Notice("Highlights folder is not configured.");
-			this.loggingService.warn(
-				this.SCOPE,
+			this.log.warn(
 				"Highlights folder not configured for comment style conversion.",
 			);
 			return null;
@@ -601,7 +557,7 @@ export class ImportManager {
 
 		if (files.length === 0) {
 			new Notice("No markdown files found in highlights folder.");
-			this.loggingService.info(this.SCOPE, "No files found to convert.");
+			this.log.info("No files found to convert.");
 			return null;
 		}
 
@@ -635,11 +591,7 @@ export class ImportManager {
 				);
 			}
 		} catch (error) {
-			this.loggingService.error(
-				this.SCOPE,
-				`Error converting file ${file.path}:`,
-				error,
-			);
+			this.log.error(`Error converting file ${file.path}:`, error);
 			counts.skipped++;
 		}
 	}
@@ -654,18 +606,15 @@ export class ImportManager {
 	private async convertToNoneStyle(
 		file: TFile,
 		body: string,
-		frontmatter: any,
+		frontmatter: Record<string, unknown> | undefined,
 		counts: { converted: number; skipped: number },
 	): Promise<void> {
 		const newBody = convertCommentStyle(body, "html", "none");
 		counts.converted++;
-		this.loggingService.info(
-			this.SCOPE,
-			`Removing KOHL comments from ${file.path}`,
-		);
+		this.log.info(`Removing KOHL comments from ${file.path}`);
 
 		const newContent = this.frontmatterService.reconstructFileContent(
-			frontmatter,
+			frontmatter ?? {},
 			newBody,
 		);
 		await this.fs.writeVaultFile(file.path, newContent);
@@ -682,7 +631,7 @@ export class ImportManager {
 	private async convertToCommentStyle(
 		file: TFile,
 		body: string,
-		frontmatter: any,
+		frontmatter: Record<string, unknown> | undefined,
 		targetStyle: CommentStyle,
 		counts: { converted: number; skipped: number },
 	): Promise<void> {
@@ -693,8 +642,7 @@ export class ImportManager {
 		);
 
 		if (annotations.length === 0 && body.trim().length > 100) {
-			this.loggingService.info(
-				this.SCOPE,
+			this.log.info(
 				`File ${file.path} appears to have no KOHL comments - likely "none" style`,
 			);
 			counts.skipped++;
@@ -711,8 +659,7 @@ export class ImportManager {
 		if (usedStyle && usedStyle !== targetStyle) {
 			newBody = convertCommentStyle(body, usedStyle, targetStyle);
 			counts.converted++;
-			this.loggingService.info(
-				this.SCOPE,
+			this.log.info(
 				`Converting ${file.path} from ${usedStyle} to ${targetStyle} style`,
 			);
 		} else if (usedStyle === targetStyle) {
@@ -723,7 +670,7 @@ export class ImportManager {
 		}
 
 		const newContent = this.frontmatterService.reconstructFileContent(
-			frontmatter,
+			frontmatter ?? {},
 			newBody,
 		);
 		await this.fs.writeVaultFile(file.path, newContent);

@@ -12,7 +12,7 @@ import type { ContentGenerator } from "./ContentGenerator";
 import type { SnapshotManager } from "./SnapshotManager";
 
 export class MergeService {
-	private readonly SCOPE = "MergeService";
+	private readonly log;
 
 	constructor(
 		private app: App,
@@ -23,7 +23,9 @@ export class MergeService {
 		private frontmatterGenerator: FrontmatterGenerator,
 		private contentGenerator: ContentGenerator,
 		private loggingService: LoggingService,
-	) {}
+	) {
+		this.log = this.loggingService.scoped("MergeService");
+	}
 
 	/**
 	 * Performs a 2-way merge when no snapshot is available.
@@ -141,13 +143,11 @@ export class MergeService {
 		);
 
 		if (hasConflict) {
-			this.loggingService.warn(
-				this.SCOPE,
+			this.log.warn(
 				`Merge conflict detected in ${file.path}. Adding conflict callouts.`,
 			);
 		} else {
-			this.loggingService.info(
-				this.SCOPE,
+			this.log.info(
 				`Successfully merged content for ${file.path} without conflicts.`,
 			);
 		}

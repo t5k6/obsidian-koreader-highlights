@@ -166,11 +166,11 @@ export function parsePosition(
  * @returns Parsed CFI parts or null if invalid
  */
 export function parseCfi(cfi: string, logger: LoggingService): CfiParts | null {
-	const SCOPE = "formatUtils:CFI";
+	const log = logger.scoped("formatUtils:CFI");
 	const match = cfi.match(CFI_REGEX_COMBINED);
 
 	if (!match) {
-		logger.warn(SCOPE, `Could not parse CFI string: "${cfi}"`);
+		log.warn(`Could not parse CFI string: "${cfi}"`);
 		return null;
 	}
 
@@ -187,7 +187,7 @@ export function parseCfi(cfi: string, logger: LoggingService): CfiParts | null {
 		textNodeIndexStr = match[5];
 		offsetStr = match[6];
 	} else {
-		logger.warn(SCOPE, `Could not determine offset structure in CFI: "${cfi}"`);
+		log.warn(`Could not determine offset structure in CFI: "${cfi}"`);
 		return null;
 	}
 
@@ -195,10 +195,7 @@ export function parseCfi(cfi: string, logger: LoggingService): CfiParts | null {
 	const offset = Number.parseInt(offsetStr, 10);
 
 	if (Number.isNaN(offset) || Number.isNaN(textNodeIndex)) {
-		logger.warn(
-			SCOPE,
-			`Error parsing offset/text node index from CFI: "${cfi}"`,
-		);
+		log.warn(`Error parsing offset/text node index from CFI: "${cfi}"`);
 		return null;
 	}
 

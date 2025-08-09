@@ -62,12 +62,14 @@ const metaFieldFormatters: Partial<Record<ProgKey, (v: unknown) => unknown>> = {
 export class FrontmatterService implements FileMetadataExtractor {
 	private static readonly FRONTMATTER_REGEX =
 		/^---\s*?\r?\n([\s\S]+?)\r?\n---\s*?\r?\n?/s;
-	private readonly SCOPE = "FrontmatterService";
+	private readonly log;
 
 	constructor(
 		private readonly app: App,
 		private readonly loggingService: LoggingService,
-	) {}
+	) {
+		this.log = this.loggingService.scoped("FrontmatterService");
+	}
 
 	/**
 	 * Asynchronously parses a TFile to separate its frontmatter and body.
@@ -115,19 +117,11 @@ export class FrontmatterService implements FileMetadataExtractor {
 					file.path,
 				);
 			} catch (e) {
-				this.loggingService.warn(
-					this.SCOPE,
-					`YAML parse failed for partial read of ${file.path}`,
-					e,
-				);
+				this.log.warn(`YAML parse failed for partial read of ${file.path}`, e);
 				return null;
 			}
 		} catch (e) {
-			this.loggingService.warn(
-				this.SCOPE,
-				`extractMetadata failed for ${file.path}`,
-				e,
-			);
+			this.log.warn(`extractMetadata failed for ${file.path}`, e);
 			return null;
 		}
 	}
@@ -174,8 +168,7 @@ export class FrontmatterService implements FileMetadataExtractor {
 			try {
 				frontmatter = parseYaml(yaml) ?? {};
 			} catch (e) {
-				this.loggingService.error(
-					this.SCOPE,
+				this.log.error(
 					"FrontmatterService: Failed to parse YAML block:",
 					e,
 					yaml,

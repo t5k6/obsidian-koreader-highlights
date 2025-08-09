@@ -17,7 +17,6 @@ export async function pickDirectory(
 		});
 
 		if (res.canceled || res.filePaths.length === 0) return undefined;
-		if (res.canceled || res.filePaths.length === 0) return undefined;
 
 		let path = res.filePaths[0];
 		path = path.trim();

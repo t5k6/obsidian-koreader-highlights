@@ -10,8 +10,10 @@ const MAX_TOTAL_PATH_LENGTH = 255;
 const FILE_EXTENSION = ".md";
 
 export class FileNameGenerator {
-	private readonly SCOPE = "FileNameGenerator";
-	constructor(private loggingService: LoggingService) {}
+	private readonly log;
+	constructor(private loggingService: LoggingService) {
+		this.log = this.loggingService.scoped("FileNameGenerator");
+	}
 
 	/**
 	 * Renders a template string with the provided data.
@@ -61,8 +63,7 @@ export class FileNameGenerator {
 		if (!baseName?.trim()) {
 			baseName =
 				simplifySdrName(getFileNameWithoutExt(originalSdrName)) || "Untitled";
-			this.loggingService.warn(
-				this.SCOPE,
+			this.log.warn(
 				`Generated filename was empty. Falling back to SDR-based name: "${baseName}"`,
 			);
 		}
@@ -70,8 +71,7 @@ export class FileNameGenerator {
 		const sanitized = normalizeFileNamePiece(baseName);
 
 		if (!sanitized) {
-			this.loggingService.error(
-				this.SCOPE,
+			this.log.error(
 				"Could not generate a valid filename after sanitization. Defaulting to 'Untitled'.",
 				{ docProps, originalSdrName },
 			);
@@ -86,8 +86,7 @@ export class FileNameGenerator {
 		let finalBaseName = sanitized;
 		if (sanitized.length > maxBaseNameLength) {
 			finalBaseName = sanitized.slice(0, maxBaseNameLength);
-			this.loggingService.warn(
-				this.SCOPE,
+			this.log.warn(
 				`Filename truncated to fit path limits: "${sanitized}" -> "${finalBaseName}"`,
 			);
 		}

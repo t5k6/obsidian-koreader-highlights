@@ -18,6 +18,7 @@ class ResetConfirmationModal extends Modal {
 	) {
 		super(app);
 	}
+
 	onOpen() {
 		const { contentEl } = this;
 		contentEl.createEl("h2", { text: "Reset KOReader Importer?" });
@@ -186,6 +187,13 @@ export default class KoreaderImporterPlugin extends Plugin {
 			name: "Troubleshoot: Full Reset and Reload Plugin",
 			callback: () => this.triggerFullReset(),
 		});
+
+		// Re-check capabilities (force probe refresh)
+		this.addCommand({
+			id: "recheck-environment-capabilities",
+			name: "Troubleshoot: Re-check environment capabilities",
+			callback: () => this.triggerRecheckCapabilities(),
+		});
 	}
 
 	// --- Utility Methods ---
@@ -248,6 +256,13 @@ export default class KoreaderImporterPlugin extends Plugin {
 				this.diContainer.resolve<CommandManager>(CommandManager);
 			await commandManager.executeFullReset();
 		}).open();
+	}
+
+	async triggerRecheckCapabilities(): Promise<void> {
+		if (!this.checkServiceStatus("re-check capabilities")) return;
+		const commandManager =
+			this.diContainer.resolve<CommandManager>(CommandManager);
+		await commandManager.executeRecheckCapabilities();
 	}
 
 	async saveSettings(forceUpdate: boolean = false): Promise<void> {

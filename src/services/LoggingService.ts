@@ -188,8 +188,9 @@ class FileSink {
 				: `${content}\n\`\`\`\n`;
 
 			const gz = pako.gzip(closedContent);
-			// pako returns a view; we need to slice it to create a new, owned ArrayBuffer for writing.
-			const buffer = gz.buffer.slice(gz.byteOffset, gz.byteOffset + gz.length);
+			// Copy to ensure we have a standalone Uint8Array backed by a concrete ArrayBuffer
+			const copy = gz.slice();
+			const buffer = copy.buffer;
 
 			await this.vault.adapter.writeBinary(`${file.path}.gz`, buffer);
 			await this.vault.adapter.remove(file.path);
@@ -289,6 +290,18 @@ export class LoggingService implements SettingsObserver, Disposable {
 	}
 	public error(scope: string, ...args: unknown[]): void {
 		this.emit("ERROR", LogLevel.ERROR, `[${scope}]`, ...args);
+	}
+
+	public scoped(scope: string): {
+		info: (...args: unknown[]) => void;
+		warn: (...args: unknown[]) => void;
+		error: (...args: unknown[]) => void;
+	} {
+		return {
+			info: (...args: unknown[]) => this.info(scope, ...args),
+			warn: (...args: unknown[]) => this.warn(scope, ...args),
+			error: (...args: unknown[]) => this.error(scope, ...args),
+		};
 	}
 
 	public async dispose(): Promise<void> {

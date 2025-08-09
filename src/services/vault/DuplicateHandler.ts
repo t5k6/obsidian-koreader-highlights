@@ -7,6 +7,7 @@ import type {
 	IDuplicateHandlingModal,
 } from "src/types";
 import { Mutex } from "src/utils/concurrency";
+import type { CapabilityManager } from "../CapabilityManager";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 import type { MergeService } from "./MergeService";
@@ -20,7 +21,7 @@ type ResolveStatus =
 	| "keep-both";
 
 export class DuplicateHandler {
-	private readonly SCOPE = "DuplicateHandler";
+	private readonly log;
 	private readonly modalMutex = new Mutex();
 
 	constructor(
@@ -35,7 +36,10 @@ export class DuplicateHandler {
 		private snapshotManager: SnapshotManager,
 		private fsService: FileSystemService,
 		private loggingService: LoggingService,
-	) {}
+		private capabilities: CapabilityManager,
+	) {
+		this.log = this.loggingService.scoped("DuplicateHandler");
+	}
 
 	/**
 	 * Handles duplicate resolution by prompting user or applying auto-merge.
@@ -55,10 +59,7 @@ export class DuplicateHandler {
 
 		// Condition for auto-merging
 		if (autoMergeEnabled && isUpdateOnly && analysis.canMergeSafely) {
-			this.loggingService.info(
-				this.SCOPE,
-				`Auto-merging additions into ${analysis.file.path}`,
-			);
+			this.log.info(`Auto-merging additions into ${analysis.file.path}`);
 			const newContent = await contentProvider();
 			await this.mergeService.execute3WayMerge(
 				analysis.file,
@@ -79,17 +80,16 @@ export class DuplicateHandler {
 				return { status: "merged", file: analysis.file };
 			}
 			case "merge": {
-				// Re-check capability right before the operation using the new public method.
-				const canWrite = await this.snapshotManager.isWritable();
+				// Gate by centralized capability manager
+				const canWrite = await this.capabilities.ensure("snapshotsWritable", {
+					notifyOnce: true,
+				});
 				if (!canWrite) {
 					new Notice(
 						"Merge failed: Cannot write backup/snapshot file. (Read-only vault or sandbox restriction)",
 						7000,
 					);
-					this.loggingService.warn(
-						this.SCOPE,
-						"Merge aborted because SnapshotManager reported it is not writable.",
-					);
+					this.log.warn("Merge aborted: snapshotsWritable is false.");
 					return { status: "skipped", file: null };
 				}
 
@@ -98,8 +98,7 @@ export class DuplicateHandler {
 				);
 
 				if (!baseContent) {
-					this.loggingService.error(
-						this.SCOPE,
+					this.log.error(
 						"UI allowed a merge choice but no snapshot was found. This should not happen. Aborting merge.",
 						analysis,
 					);

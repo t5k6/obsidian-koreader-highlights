@@ -116,6 +116,20 @@ export class FileSystemService {
 		return parent === "." ? "" : parent;
 	}
 
+	private parseFolderScanKey(key: string): {
+		rootPath: string;
+		recursive: boolean;
+	} {
+		const [root, _exts, rflag] = key.split("|");
+		return { rootPath: root ?? "", recursive: rflag === "R" };
+	}
+
+	public static isAncestor(ancestor: string, child: string): boolean {
+		if (ancestor === "") return true; // vault root is ancestor of everything
+		if (ancestor === child) return true;
+		return child.startsWith(ancestor + "/");
+	}
+
 	/* ------------------------------------------------------------------ */
 	/*                     SCANNING / WALKING FOLDERS                      */
 	/* ------------------------------------------------------------------ */
@@ -212,31 +226,49 @@ export class FileSystemService {
 			this.vault.on("delete", (file) => this.invalidateCacheFor(file.path)),
 		);
 		this.plugin.registerEvent(
-			this.vault.on("rename", (_file, oldPath) =>
-				this.invalidateCacheFor(oldPath),
-			),
+			this.vault.on("rename", (file, oldPath) => {
+				// Invalidate both old and new locations
+				this.invalidateCacheFor(oldPath);
+				this.invalidateCacheFor(file.path);
+			}),
 		);
 	}
 
 	private invalidateCacheFor(vaultPath: string): void {
 		if (!this.folderScanCache) return;
-		// Drop everything whose key root is on the same prefix path
-		const prefix = FileSystemService.getVaultParent(vaultPath);
-		const keys = this.folderScanCache.keys();
-		const prefixWithSlash = prefix ? `${prefix}/` : "";
-		for (const key of keys) {
-			// cacheKey format: `${root.path}|<exts>|R|NR` — root.path is a vault path
-			const rootPath = String(key).split("|")[0] ?? "";
-			if (
-				prefix === "" ||
-				rootPath === prefix ||
-				(prefixWithSlash && rootPath.startsWith(prefixWithSlash)) ||
-				rootPath === vaultPath ||
-				rootPath.startsWith(`${vaultPath}/`)
-			) {
-				this.folderScanCache.delete(key as any);
+
+		const changed = FileSystemService.toVaultPath(vaultPath);
+		const immediateParent = FileSystemService.getVaultParent(changed);
+
+		this.folderScanCache.deleteWhere((rawKey) => {
+			const { rootPath: rawRoot, recursive } = this.parseFolderScanKey(
+				String(rawKey),
+			);
+			const rootPath = FileSystemService.toVaultPath(rawRoot);
+
+			const rootIsAncestorOfChanged = FileSystemService.isAncestor(
+				rootPath,
+				changed,
+			);
+			const rootUnderChangedSubtree =
+				changed !== "" && rootPath.startsWith(changed + "/");
+
+			if (recursive) {
+				// Recursive scans are affected by any change under their root, and by subtree moves.
+				return rootIsAncestorOfChanged || rootUnderChangedSubtree;
+			} else {
+				// Non-recursive scans only list direct children.
+				// Invalidate if:
+				// - the changed item's parent is the scan root (direct child added/removed/renamed), or
+				// - the scan root itself changed (folder rename/delete), or
+				// - the scan root is inside a moved/deleted subtree.
+				return (
+					rootPath === immediateParent ||
+					rootPath === changed ||
+					rootUnderChangedSubtree
+				);
 			}
-		}
+		});
 	}
 
 	/* ------------------------------------------------------------------ */

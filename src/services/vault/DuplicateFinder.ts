@@ -1,4 +1,4 @@
-import { TFile, TFolder, type Vault } from "obsidian";
+import { type App, TFile, TFolder, type Vault } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
 import type {
@@ -25,6 +25,7 @@ export class DuplicateFinder {
 	>;
 
 	constructor(
+		private app: App,
 		private vault: Vault,
 		private plugin: KoreaderImporterPlugin,
 		private LocalIndexService: LocalIndexService,
@@ -92,7 +93,9 @@ export class DuplicateFinder {
 			return { files, timedOut: false };
 		}
 
-		// Degraded mode: no persistent index. Fallback to scanning highlights folder recursively and parsing frontmatter.
+		// Degraded mode: no persistent index. Progressive scan:
+		// Phase 1: scan using metadataCache.frontmatter (no file I/O)
+		// Phase 2: for uncached candidates, targeted file reads within time budget
 		this.log.info(
 			`Degraded mode: scanning vault for potential duplicates of key: ${bookKey}`,
 		);
@@ -130,10 +133,27 @@ export class DuplicateFinder {
 				break;
 			}
 			try {
-				const cache = await this.getFmCached(file);
+				// Phase 1: try metadataCache (no disk I/O)
+				const md = this.app.metadataCache.getFileCache(file);
+				const fm = md?.frontmatter as any | undefined;
+				let title: string | undefined;
+				let authors: string | undefined;
+				if (fm) {
+					title = typeof fm.title === "string" ? fm.title : undefined;
+					if (typeof fm.authors === "string") authors = fm.authors;
+					else if (Array.isArray(fm.authors)) authors = fm.authors.join(", ");
+				}
+
+				// If metadataCache lacks needed fields, fall back to targeted file read
+				if (!title && !authors) {
+					const cachedFm = await this.getFmCached(file);
+					title = cachedFm.title;
+					authors = cachedFm.authors;
+				}
+
 				const fileKey = this.LocalIndexService.bookKeyFromDocProps({
-					title: cache.title ?? "",
-					authors: cache.authors ?? "",
+					title: title ?? "",
+					authors: authors ?? "",
 				});
 				if (fileKey === bookKey) {
 					results.push(file);

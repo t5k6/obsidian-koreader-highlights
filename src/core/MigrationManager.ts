@@ -1,4 +1,10 @@
-import { type Plugin, TFile, TFolder, type Vault } from "obsidian";
+import {
+	normalizePath,
+	type Plugin,
+	TFile,
+	TFolder,
+	type Vault,
+} from "obsidian";
 import type { LoggingService } from "src/services/LoggingService";
 
 // --- Helper Functions ---
@@ -52,8 +58,11 @@ export class MigrationManager {
 		this.vault = this.plugin.app.vault;
 		this.log = this.loggingService.scoped("MigrationManager");
 		// Define migrations here, binding them to the class instance
+		// IMPORTANT: Use the version where the migration was INTRODUCED.
+		// Do NOT bump these keys on every release; only add new entries when new migrations are added.
 		this.migrations = {
 			"1.2.0": this.cleanupOldLogFiles.bind(this),
+			"1.3.0": this.cleanupLegacyUserData.bind(this),
 			// "1.3.0": this.anotherMigration.bind(this),
 		};
 	}
@@ -118,6 +127,60 @@ export class MigrationManager {
 		}
 		if (removed > 0) {
 			this.log.info(`Removed ${removed} old log files during 1.2.0 migration.`);
+		}
+	}
+
+	/**
+	 * Removes legacy files from the plugin data directory after unified SQLite migration.
+	 * - Deletes old JSON import index and backup.
+	 * - Deletes any legacy index sqlite files except the current highlight_index.sqlite.
+	 * - Deletes probe artifacts.
+	 */
+	private async cleanupLegacyUserData(): Promise<void> {
+		try {
+			const pluginDataDir = normalizePath(
+				`${this.vault.configDir}/plugins/${this.plugin.manifest.id}`,
+			);
+			const adapter = this.vault.adapter;
+			const exists = await adapter.exists(pluginDataDir);
+			if (!exists) return;
+
+			const { files } = await adapter.list(pluginDataDir);
+			let removed = 0;
+
+			const isLegacySqlite = (p: string): boolean => {
+				const name = p.split("/").pop() ?? p;
+				if (name === "highlight_index.sqlite") return false; // keep current DB
+				if (
+					name === "highlight_index.sqlite-shm" ||
+					name === "highlight_index.sqlite-wal"
+				)
+					return false; // sqlite artifacts for current
+				return /index.*\.sqlite(\.(bak|old))?$/i.test(name);
+			};
+
+			for (const f of files) {
+				const name = f.split("/").pop() ?? f;
+				if (
+					name === "import-index.json" ||
+					name === "import-index.json.bak" ||
+					name === "highlight_index.sqlite.__probe__" ||
+					isLegacySqlite(f)
+				) {
+					try {
+						await adapter.remove(f);
+						removed++;
+					} catch (e) {
+						this.log.warn(`Could not delete legacy user data file: ${f}`);
+					}
+				}
+			}
+
+			if (removed > 0) {
+				this.log.info(`Removed ${removed} legacy files from plugin data dir.`);
+			}
+		} catch (e) {
+			this.log.warn("cleanupLegacyUserData failed", e);
 		}
 	}
 }

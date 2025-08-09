@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { type App, Notice, TFile } from "obsidian";
+import { type App, TFile } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import { normalizeFileNamePiece } from "src/utils/formatUtils";
 import type { CapabilityManager } from "../CapabilityManager";

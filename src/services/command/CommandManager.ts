@@ -7,7 +7,6 @@ import type { SDRFinder } from "../device/SDRFinder";
 import { FileSystemService } from "../FileSystemService";
 import type { ImportManager } from "../ImportManager";
 import type { LoggingService } from "../LoggingService";
-import type ImportIndexService from "../vault/ImportIndexService";
 import type { LocalIndexService } from "../vault/LocalIndexService";
 
 export class CommandManager {
@@ -20,7 +19,6 @@ export class CommandManager {
 		private readonly sdrFinder: SDRFinder,
 		private readonly cacheManager: CacheManager,
 		private readonly loggingService: LoggingService,
-		private readonly importIndexService: ImportIndexService,
 		private readonly localIndexService: LocalIndexService,
 		private readonly capabilities: CapabilityManager,
 	) {
@@ -68,9 +66,7 @@ export class CommandManager {
 
 		try {
 			// Invalidate SDR caches before starting import to ensure fresh scan
-			if (typeof (this.sdrFinder as any).clearCache === "function") {
-				(this.sdrFinder as any).clearCache();
-			}
+			this.sdrFinder.clearCache();
 			await this.importManager.importHighlights();
 		} catch (error) {
 			if ((error as DOMException)?.name === "AbortError") {
@@ -122,15 +118,9 @@ export class CommandManager {
 		// Clear in-memory caches
 		this.cacheManager.clear();
 		// Clear SDR-related caches explicitly
-		if (typeof (this.sdrFinder as any).clearCache === "function") {
-			(this.sdrFinder as any).clearCache();
-		} else {
-			// Fallback: retrigger settings change to invalidate
-			this.sdrFinder.onSettingsChanged(this.plugin.settings);
-		}
-		// Clear persistent import index so next import reprocesses everything
-		this.importIndexService.clear();
-		await this.importIndexService.save();
+		this.sdrFinder.clearCache();
+		// Clear per-source skip state in SQLite so next import reprocesses everything
+		await this.localIndexService.clearImportSource();
 		new Notice("KOReader Importer caches cleared.");
 	}
 
@@ -145,8 +135,10 @@ export class CommandManager {
 			// 1) Delete the persistent vault index (SQLite)
 			await this.localIndexService.deleteIndexFile();
 
-			// 2) Delete the persistent import index (JSON)
-			await this.importIndexService.deleteIndexFile();
+			// 2) Clear per-source table as additional safeguard (for in-memory)
+			try {
+				await this.localIndexService.clearImportSource();
+			} catch (_) {}
 
 			// 3) Clear any remaining in-memory caches
 			this.cacheManager.clear();
@@ -159,7 +151,7 @@ export class CommandManager {
 			// 4) Trigger a reload of the plugin for a completely clean state
 			// Delay slightly to allow the Notice to be visible
 			setTimeout((): void => {
-				void (this.plugin as any).reloadPlugin?.();
+				void this.plugin.reloadPlugin?.();
 			}, 1000);
 		} catch (error) {
 			this.log.error("Full reset failed.", error as Error);

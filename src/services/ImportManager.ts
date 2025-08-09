@@ -26,7 +26,6 @@ import type { ContentGenerator } from "./vault/ContentGenerator";
 import type { DuplicateFinder } from "./vault/DuplicateFinder";
 import type { DuplicateHandler } from "./vault/DuplicateHandler";
 import type { FileNameGenerator } from "./vault/FileNameGenerator";
-import type ImportIndexService from "./vault/ImportIndexService";
 import type { LocalIndexService } from "./vault/LocalIndexService";
 import type { SnapshotManager } from "./vault/SnapshotManager";
 
@@ -49,7 +48,6 @@ export class ImportManager {
 		private readonly loggingService: LoggingService,
 		private readonly fs: FileSystemService,
 		private readonly frontmatterService: FrontmatterService,
-		private readonly importIndexService: ImportIndexService,
 	) {
 		this.log = this.loggingService.scoped("ImportManager");
 	}
@@ -62,9 +60,6 @@ export class ImportManager {
 	 */
 	async importHighlights(): Promise<void> {
 		this.log.info("Starting KOReader highlight import process…");
-
-		// Load the import index at the start of the import
-		await this.importIndexService.load();
 
 		const metadataFilePaths =
 			await this.sdrFinder.findSdrDirectoriesWithMetadata();
@@ -119,8 +114,6 @@ export class ImportManager {
 				new Notice("KOReader Importer: critical error. Check console.");
 			}
 		} finally {
-			// Always save the import index at the end
-			await this.importIndexService.save();
 			this.log.info("Flushing database index …");
 			await this.localIndexService.flushIndex();
 			try {
@@ -149,9 +142,8 @@ export class ImportManager {
 		let latestTimestampInFile: string | null = null;
 
 		try {
-			// 1) Gather stats (used for index update and diagnostics), but do not early-exit on them
+			// 1) Gather stats first
 			const stats = await this.fs.getNodeStats(metadataPath);
-			const previous = this.importIndexService.getEntry(metadataPath);
 
 			// 2) Parse and process
 			const sdrPath = path.dirname(metadataPath);
@@ -173,15 +165,16 @@ export class ImportManager {
 				latestTimestampInFile = newestAnnotation.datetime;
 			}
 
-			// Determine if we should skip based on both file mtime and newest annotation timestamp
-			const isFileModifiedOnDevice =
-				!!stats && !!previous ? stats.mtime.getTime() > previous.mtime : false;
-			const hasNewerAnnotations =
-				latestTimestampInFile && previous
-					? latestTimestampInFile > (previous.newestAnnotationTimestamp ?? "")
-					: true;
-
-			if (previous && !isFileModifiedOnDevice && !hasNewerAnnotations) {
+			// Determine if we should skip using LocalIndexService
+			let should = true;
+			if (stats) {
+				should = await this.localIndexService.shouldProcessSource(
+					metadataPath,
+					{ mtime: stats.mtime.getTime(), size: stats.size },
+					latestTimestampInFile,
+				);
+			}
+			if (!should) {
 				this.log.info(`Skipping unchanged file: ${metadataPath}`);
 				summary.skipped++;
 				return { fileSummary: summary, latestTimestampInFile };
@@ -198,19 +191,33 @@ export class ImportManager {
 
 			const fileSummary = await this.saveHighlightsToFile(luaMetadata, session);
 
-			// 3) Update index if created/merged/automerged
-			if (latestTimestampInFile) {
-				this.importIndexService.updateEntry(metadataPath, {
+			// 3) Record success for per-source state
+			try {
+				const bookKey = this.localIndexService.bookKeyFromDocProps(
+					luaMetadata.docProps,
+				);
+				await this.localIndexService.recordImportSuccess({
+					path: metadataPath,
 					mtime: stats ? stats.mtime.getTime() : 0,
 					size: stats ? stats.size : 0,
-					newestAnnotationTimestamp: latestTimestampInFile,
+					newestAnnotationTs: latestTimestampInFile,
+					bookKey,
+					md5: luaMetadata.md5 ?? null,
+					// We don't have the resulting file path here directly; saveHighlightsToFile handles upsert and snapshot.
 				});
+			} catch (e) {
+				this.log.warn("Failed to record import success state", e);
 			}
 
 			return { fileSummary, latestTimestampInFile };
 		} catch (err) {
 			this.log.error(`Error processing ${metadataPath}`, err as Error);
 			summary.errors++;
+			try {
+				await this.localIndexService.recordImportFailure(metadataPath, err);
+			} catch (e) {
+				this.log.warn("Failed to record import failure state", e);
+			}
 			return { fileSummary: summary, latestTimestampInFile };
 		}
 	}
@@ -288,19 +295,50 @@ export class ImportManager {
 		} else {
 			// We have a match; handle normally. We can optionally log timeout occurrence.
 			if (timedOut) {
-				this.log.warn(
-					`Duplicate scan timed out for "${luaMetadata.docProps.title}" but a likely match was found.`,
+				const userChoice = await this.promptUserOnTimeoutWithMatch(
+					luaMetadata.docProps.title || "Unknown title",
+					bestMatch.file.path,
 				);
-			}
-			result = await this.duplicateHandler.handleDuplicate(
-				bestMatch,
-				contentProvider,
-				session,
-			);
-			if (result.status === "keep-both") {
-				const newFile = await this.createNewFile(luaMetadata, contentProvider);
-				// The summary will still count this as 'created'
-				result = { status: "created", file: newFile };
+				if (userChoice === "skip") {
+					result = { status: "skipped", file: null };
+				} else if (userChoice === "create-new") {
+					const newFile = await this.createNewFile(
+						luaMetadata,
+						contentProvider,
+						{ withTimeoutWarning: true },
+					);
+					result = { status: "created", file: newFile };
+				} else {
+					// proceed with merge/replace flow via DuplicateHandler
+					result = await this.duplicateHandler.handleDuplicate(
+						bestMatch,
+						contentProvider,
+						session,
+					);
+					if (result.status === "keep-both") {
+						const newFile = await this.createNewFile(
+							luaMetadata,
+							contentProvider,
+						);
+						// The summary will still count this as 'created'
+						result = { status: "created", file: newFile };
+					}
+				}
+			} else {
+				// No timeout → behave as today
+				result = await this.duplicateHandler.handleDuplicate(
+					bestMatch,
+					contentProvider,
+					session,
+				);
+				if (result.status === "keep-both") {
+					const newFile = await this.createNewFile(
+						luaMetadata,
+						contentProvider,
+					);
+					// The summary will still count this as 'created'
+					result = { status: "created", file: newFile };
+				}
 			}
 		}
 
@@ -362,6 +400,57 @@ export class ImportManager {
 					},
 				],
 				`The duplicate scan for “${title}” did not complete within the configured timeout.\nTo avoid accidental duplicates:\n• Choose “Skip this book” to review and retry later.\n• Or “Import anyway” to create the note with a warning and needs-review flag.`,
+			);
+			modal.open();
+		});
+	}
+
+	/**
+	 * Prompt user when duplicate scan timed out but a best match was found.
+	 * Returns 'skip', 'create-new', or 'proceed'.
+	 */
+	private async promptUserOnTimeoutWithMatch(
+		title: string,
+		existingPath: string,
+	): Promise<"skip" | "create-new" | "proceed"> {
+		const { PromptModal } = await import("../ui/PromptModal");
+		return await new Promise<"skip" | "create-new" | "proceed">((resolve) => {
+			const ModalCtor = PromptModal as unknown as {
+				new (
+					app: App,
+					title: string,
+					options: {
+						label: string;
+						isCta?: boolean;
+						callback: () => void;
+					}[],
+					message: string,
+				): { open: () => void };
+			};
+			const modal = new ModalCtor(
+				this.app,
+				"Duplicate scan timed out",
+				[
+					{
+						label: "Skip this book",
+						callback: () => resolve("skip"),
+					},
+					{
+						label: "Create new file (add warning)",
+						callback: () => resolve("create-new"),
+					},
+					{
+						label: "Proceed to merge/replace",
+						isCta: true,
+						callback: () => resolve("proceed"),
+					},
+				],
+				`The duplicate scan for “${title}” did not complete within the configured timeout.\n` +
+					`A potential existing note was found at:\n• ${existingPath}\n\n` +
+					"To avoid accidental duplicates:\n" +
+					"• Choose ‘Proceed to merge/replace’ to handle the match safely.\n" +
+					"• Or ‘Create new file’ to add a warning and a needs-review flag.\n" +
+					"• Or ‘Skip this book’ to review and retry later.",
 			);
 			modal.open();
 		});

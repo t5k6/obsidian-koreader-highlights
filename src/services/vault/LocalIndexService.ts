@@ -28,7 +28,6 @@ import type { SqlJsManager } from "../SqlJsManager";
 import { ParallelIndexProcessor } from "./ParallelIndexProcessor";
 
 const INDEX_DB_SCHEMA = `
-PRAGMA user_version = 1;
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 PRAGMA synchronous = NORMAL;
@@ -42,6 +41,139 @@ CREATE TABLE IF NOT EXISTS book(
 );
 CREATE INDEX IF NOT EXISTS idx_book_path ON book(vault_path);
 `;
+
+const CURRENT_DB_VERSION = 2;
+
+function getUserVersion(db: Database): number {
+	try {
+		const res = db.exec("PRAGMA user_version");
+		const v = res?.[0]?.values?.[0]?.[0];
+		return typeof v === "number" ? v : 0;
+	} catch {
+		return 0;
+	}
+}
+
+function setUserVersion(db: Database, v: number): void {
+	db.run(`PRAGMA user_version = ${v};`);
+}
+
+function migrateDb(db: Database): void {
+	const v = getUserVersion(db);
+	// Always ensure pragmas
+	db.run("PRAGMA foreign_keys = ON;");
+	try {
+		db.run("PRAGMA journal_mode = WAL;");
+	} catch {
+		/* ignore in-memory */
+	}
+
+	if (v < 1) {
+		// Bootstrap v1 schema (book table and index)
+		db.run(`
+      CREATE TABLE IF NOT EXISTS book(
+        key        TEXT PRIMARY KEY,
+        id         INTEGER,
+        title      TEXT NOT NULL,
+        authors    TEXT,
+        vault_path TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_book_path ON book(vault_path);
+    `);
+		setUserVersion(db, 1);
+	}
+
+	if (v < 2) {
+		db.run("BEGIN IMMEDIATE;");
+		try {
+			db.run(`
+        CREATE TABLE IF NOT EXISTS import_source(
+          source_path TEXT PRIMARY KEY,
+          last_processed_mtime INTEGER NOT NULL,
+          last_processed_size INTEGER NOT NULL,
+          newest_annotation_ts TEXT,
+          last_success_ts INTEGER,
+          last_error TEXT,
+          book_key TEXT,
+          md5 TEXT
+        );
+      `);
+			db.run(
+				"CREATE INDEX IF NOT EXISTS idx_import_source_book_key ON import_source(book_key);",
+			);
+			db.run(
+				"CREATE INDEX IF NOT EXISTS idx_import_source_md5 ON import_source(md5);",
+			);
+			setUserVersion(db, 2);
+			db.run("COMMIT;");
+		} catch (e) {
+			db.run("ROLLBACK;");
+			throw e;
+		}
+	}
+}
+
+async function backfillImportIndexJsonIfPresent(
+	fs: FileSystemService,
+	app: App,
+	db: Database,
+	log: LoggingService,
+): Promise<void> {
+	const jsonPath = fs.joinPluginDataPath("import-index.json");
+	// Only run if file exists
+	if (!(await fs.vaultExists(jsonPath))) return;
+
+	try {
+		const text = await app.vault.adapter.read(jsonPath);
+		const parsed = JSON.parse(text) as Record<
+			string,
+			{ mtime: number; size: number; newestAnnotationTimestamp?: string }
+		>;
+		const entries = Object.entries(parsed);
+		if (entries.length === 0) return;
+
+		db.run("BEGIN IMMEDIATE;");
+		try {
+			const stmt = db.prepare(`
+        INSERT INTO import_source(source_path, last_processed_mtime, last_processed_size, newest_annotation_ts, last_success_ts)
+        VALUES(?, ?, ?, ?, ?)
+        ON CONFLICT(source_path) DO UPDATE SET
+          last_processed_mtime = excluded.last_processed_mtime,
+          last_processed_size = excluded.last_processed_size,
+          newest_annotation_ts = excluded.newest_annotation_ts,
+          last_success_ts = excluded.last_success_ts
+      `);
+			const now = Date.now();
+			for (const [source_path, e] of entries) {
+				stmt.bind([
+					source_path,
+					e.mtime,
+					e.size,
+					e.newestAnnotationTimestamp ?? null,
+					now,
+				]);
+				stmt.step();
+				stmt.reset();
+			}
+			stmt.free();
+			db.run("COMMIT;");
+			// Archive JSON
+			await app.vault.adapter.rename(jsonPath, jsonPath + ".bak");
+			log
+				.scoped("LocalIndexService")
+				.info(
+					`Migrated ${entries.length} import-index entries into SQLite (import_source).`,
+				);
+		} catch (e) {
+			db.run("ROLLBACK;");
+			throw e;
+		}
+	} catch (e) {
+		log
+			.scoped("LocalIndexService")
+			.warn("Failed reading import-index.json for backfill.", e as any);
+	}
+}
 
 interface DebouncedMetadataChangeHandler extends DebouncedFn {
 	(file: TFile, data: string, cache: CachedMetadata): void;
@@ -77,6 +209,169 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 
 	public getIndexState(): "persistent" | "in_memory" | "unavailable" {
 		return this.indexState;
+	}
+
+	/**
+	 * Returns per-source processing state or null if not recorded.
+	 */
+	public async getImportSource(path: string): Promise<{
+		source_path: string;
+		last_processed_mtime: number;
+		last_processed_size: number;
+		newest_annotation_ts: string | null;
+		last_success_ts: number | null;
+		last_error: string | null;
+		book_key: string | null;
+		md5: string | null;
+	} | null> {
+		const db = await this.getConcurrentDb();
+		return db.execute((database) => {
+			const stmt = database.prepare(
+				"SELECT source_path,last_processed_mtime,last_processed_size,newest_annotation_ts,last_success_ts,last_error,book_key,md5 FROM import_source WHERE source_path = ?",
+			);
+			try {
+				stmt.bind([path]);
+				if (!stmt.step()) return null;
+				const row = stmt.getAsObject();
+				return {
+					source_path: row.source_path as string,
+					last_processed_mtime: (row.last_processed_mtime as number) ?? 0,
+					last_processed_size: (row.last_processed_size as number) ?? 0,
+					newest_annotation_ts: (row.newest_annotation_ts as string) ?? null,
+					last_success_ts: (row.last_success_ts as number) ?? null,
+					last_error: (row.last_error as string) ?? null,
+					book_key: (row.book_key as string) ?? null,
+					md5: (row.md5 as string) ?? null,
+				};
+			} finally {
+				stmt.free();
+			}
+		});
+	}
+
+	/**
+	 * Determines whether a metadata.lua source should be processed based on
+	 * stored per-source state (mtime/size and newest annotation timestamp).
+	 */
+	public async shouldProcessSource(
+		path: string,
+		stats: { mtime: number; size: number },
+		newestAnnotationTs: string | null,
+	): Promise<boolean> {
+		const existing = await this.getImportSource(path);
+		if (!existing) return true;
+		if (
+			existing.last_processed_mtime !== stats.mtime ||
+			existing.last_processed_size !== stats.size
+		) {
+			return true;
+		}
+		if (newestAnnotationTs) {
+			const prev = existing.newest_annotation_ts ?? "";
+			if (newestAnnotationTs > prev) return true;
+		}
+		return false;
+	}
+
+	public async recordImportSuccess(params: {
+		path: string;
+		mtime: number;
+		size: number;
+		newestAnnotationTs: string | null;
+		bookKey?: string | null;
+		md5?: string | null;
+		vaultPath?: string | null;
+	}): Promise<void> {
+		const db = await this.getConcurrentDb();
+		await db.execute((database) => {
+			database.run("BEGIN IMMEDIATE;");
+			try {
+				// Upsert per-source row
+				database.run(
+					`INSERT INTO import_source(source_path,last_processed_mtime,last_processed_size,newest_annotation_ts,last_success_ts,last_error,book_key,md5)
+					 VALUES(?,?,?,?,?,?,?,?)
+					 ON CONFLICT(source_path) DO UPDATE SET
+					  last_processed_mtime=excluded.last_processed_mtime,
+					  last_processed_size=excluded.last_processed_size,
+					  newest_annotation_ts=excluded.newest_annotation_ts,
+					  last_success_ts=excluded.last_success_ts,
+					  last_error=NULL,
+					  book_key=COALESCE(excluded.book_key, import_source.book_key),
+					  md5=COALESCE(excluded.md5, import_source.md5)
+					 `,
+					[
+						params.path,
+						params.mtime,
+						params.size,
+						params.newestAnnotationTs ?? null,
+						Date.now(),
+						null,
+						params.bookKey ?? null,
+						params.md5 ?? null,
+					],
+				);
+
+				// Optionally, update book.vault_path if provided and a book exists
+				if (params.vaultPath && params.bookKey) {
+					database.run(`UPDATE book SET vault_path = ? WHERE key = ?`, [
+						params.vaultPath,
+						params.bookKey,
+					]);
+				}
+
+				database.run("COMMIT;");
+				this.persistIndexDebounced();
+			} catch (e) {
+				database.run("ROLLBACK;");
+				throw e;
+			}
+		}, true);
+	}
+
+	public async recordImportFailure(
+		path: string,
+		error: unknown,
+	): Promise<void> {
+		const db = await this.getConcurrentDb();
+		await db.execute((database) => {
+			database.run("BEGIN IMMEDIATE;");
+			try {
+				const message =
+					typeof error === "string"
+						? error
+						: ((error as any)?.message ?? JSON.stringify(error ?? "error"));
+				database.run(
+					`INSERT INTO import_source(source_path,last_processed_mtime,last_processed_size,last_error)
+					 VALUES(?,?,?,?)
+					 ON CONFLICT(source_path) DO UPDATE SET last_error = excluded.last_error, last_success_ts = NULL`,
+					[path, 0, 0, message],
+				);
+				database.run("COMMIT;");
+				this.persistIndexDebounced();
+			} catch (e) {
+				database.run("ROLLBACK;");
+				throw e;
+			}
+		}, true);
+	}
+
+	public async deleteImportSource(path: string): Promise<void> {
+		const db = await this.getConcurrentDb();
+		await db.execute((database) => {
+			database.run("DELETE FROM import_source WHERE source_path = ?", [path]);
+		}, true);
+		this.persistIndexDebounced();
+	}
+
+	/**
+	 * Clears all per-source state so next import reprocesses everything.
+	 */
+	public async clearImportSource(): Promise<void> {
+		const db = await this.getConcurrentDb();
+		await db.execute((database) => {
+			database.run("DELETE FROM import_source");
+		}, true);
+		this.persistIndexDebounced();
 	}
 	/** Whether a background rebuild is currently in progress */
 	public get isRebuilding(): boolean {
@@ -300,6 +595,16 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 					schemaSql: INDEX_DB_SCHEMA,
 					validate: true,
 				});
+				// Run migrations and one-time backfill
+				migrateDb(this.idxDb);
+				if (getUserVersion(this.idxDb) >= 2) {
+					await backfillImportIndexJsonIfPresent(
+						this.fsService,
+						this.app,
+						this.idxDb,
+						this.loggingService,
+					);
+				}
 				this.indexState = "persistent";
 				// Ensure the brand-new DB is flushed at least once to disk
 				await this.sqlJsManager.persistDatabase(this.idxPath);
@@ -324,6 +629,8 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 			const memDb = await this.sqlJsManager.createInMemoryDatabase();
 			this.idxDb = memDb;
 			this.sqlJsManager.applySchema(this.idxDb, INDEX_DB_SCHEMA);
+			// Ensure schema migrations are applied to in-memory DB as well
+			migrateDb(this.idxDb);
 			this.indexState = "in_memory";
 			this.concurrentDb = new ConcurrentDatabase(
 				async () => {

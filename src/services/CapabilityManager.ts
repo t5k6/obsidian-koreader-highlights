@@ -256,10 +256,8 @@ export class CapabilityManager {
 		const probePath = this.fs.joinPluginDataPath(".__plugin_probe__");
 		try {
 			await this.fs.ensureVaultFolder(this.fs.joinPluginDataPath());
-			await this.fs.writeVaultFile(probePath, "probe");
-			// best-effort cleanup
-			const file = this.app.vault.getAbstractFileByPath(probePath);
-			if (file) await this.app.vault.delete(file);
+			const ok = await this.fs.writeProbe(probePath);
+			if (!ok) throw new Error("probe failed");
 			return true;
 		} catch (e) {
 			this.state.pluginDataWritable.lastError = e;
@@ -277,9 +275,8 @@ export class CapabilityManager {
 		try {
 			await this.fs.ensureVaultFolder(snapshotsDir);
 			await this.fs.ensureVaultFolder(backupsDir);
-			await this.fs.writeVaultFile(probePath, "probe");
-			const file = this.app.vault.getAbstractFileByPath(probePath);
-			if (file) await this.app.vault.delete(file);
+			const ok = await this.fs.writeProbe(probePath);
+			if (!ok) throw new Error("probe failed");
 			return true;
 		} catch (e) {
 			this.state.snapshotsWritable.lastError = e;
@@ -294,9 +291,8 @@ export class CapabilityManager {
 		);
 		try {
 			await this.fs.ensureVaultFolder(this.fs.joinPluginDataPath());
-			await this.fs.writeVaultFile(probePath, "probe");
-			const file = this.app.vault.getAbstractFileByPath(probePath);
-			if (file) await this.app.vault.delete(file);
+			const ok = await this.fs.writeProbe(probePath);
+			if (!ok) throw new Error("probe failed");
 			return true;
 		} catch (e) {
 			this.state.indexPersistenceLikely.lastError = e;

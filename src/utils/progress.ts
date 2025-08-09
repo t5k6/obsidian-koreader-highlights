@@ -20,6 +20,7 @@ export async function withProgress<T>(
 		},
 		signal: AbortSignal,
 	) => Promise<T>,
+	options?: { title?: string },
 ): Promise<T> {
 	const initialTotal = typeof total === "function" ? total() : total;
 
@@ -35,9 +36,11 @@ export async function withProgress<T>(
 		return runner(noopTick, controller.signal);
 	}
 
-	const modal = new ProgressModal(app);
+	const modal = new ProgressModal(app, options?.title);
 	modal.open();
 	modal.setTotal(initialTotal);
+
+	let currentTotal = initialTotal;
 
 	let done = 0;
 	let lastStatus = "";
@@ -48,6 +51,7 @@ export async function withProgress<T>(
 		}
 	};
 	const setTotal = (n: number) => {
+		currentTotal = n;
 		modal.setTotal(n);
 	};
 
@@ -63,7 +67,7 @@ export async function withProgress<T>(
 		() =>
 			modal.updateProgress(
 				done,
-				`${done}/${Math.max(initialTotal, done)} processed`,
+				`${done}/${Math.max(currentTotal, done)} processed`,
 			),
 		200,
 	);

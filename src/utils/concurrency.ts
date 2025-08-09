@@ -77,41 +77,65 @@ export async function asyncPool<T, R>(
  */
 export class Mutex {
 	private chain: Promise<void> = Promise.resolve();
-	private locked = false;
+	// Number of holders/waiters reserved. >0 means lock is held or queued.
+	private pending = 0;
 
 	/** Acquires the lock, runs `fn`, then releases. */
 	async lock<T>(fn: () => Promise<T>): Promise<T> {
-		// Create a gate that resolves when previous lock completes.
+		// Reserve immediately to avoid races with tryLock.
+		this.pending++;
+
+		// Create a gate that resolves when this holder releases.
 		let release!: () => void;
 		const gate = new Promise<void>((resolve) => {
 			release = resolve;
 		});
 
-		// Chain the gate after the current chain.
+		// Chain the gate after the current chain so the next waiter sees it.
 		const prev = this.chain;
 		this.chain = prev.then(() => gate).catch(() => gate); // ensure chain continues after errors
 
-		// Wait for previous to complete, then mark locked.
+		// Wait for previous to complete, then run.
 		await prev;
-		this.locked = true;
-
 		try {
 			return await fn();
 		} finally {
-			this.locked = false;
+			this.pending--;
 			release(); // let the next waiter proceed
 		}
 	}
 
 	/** Attempts to run `fn` only if mutex is free; returns null if busy. */
 	async tryLock<T>(fn: () => Promise<T>): Promise<T | null> {
-		if (this.locked) return null;
-		return this.lock(fn);
+		// Fast check: if anyone holds or has reserved the lock, bail.
+		if (this.pending > 0) return null;
+
+		// Reserve immediately to avoid a race with another locker starting now.
+		this.pending++;
+
+		// Create a gate and link into the chain just like lock().
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const prev = this.chain;
+		this.chain = prev.then(() => gate).catch(() => gate);
+
+		// If pending was zero, there should be no one ahead; awaiting prev will
+		// resolve immediately. If, due to unexpected reentrancy, someone slipped in,
+		// pending would have been >0 and we would have returned null above.
+		await prev;
+		try {
+			return await fn();
+		} finally {
+			this.pending--;
+			release();
+		}
 	}
 
-	/** Whether the mutex is currently held. */
+	/** Whether the mutex is currently held or has queued reservations. */
 	isLocked(): boolean {
-		return this.locked;
+		return this.pending > 0;
 	}
 }
 

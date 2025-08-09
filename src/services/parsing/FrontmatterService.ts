@@ -12,27 +12,25 @@ import {
 	secondsToHoursMinutesSeconds,
 } from "src/utils/dateUtils";
 import { formatPercent, normalizeFileNamePiece } from "src/utils/formatUtils";
+import { FieldMappingService } from "./FieldMappingService";
 
 // --- Formatting Constants and Helpers ---
-const FRIENDLY_KEY_MAP = {
-	title: "Title",
-	authors: "Author(s)",
-	description: "Description",
-	keywords: "Keywords",
-	series: "Series",
-	language: "Language",
-	pages: "Page Count",
-	highlightCount: "Highlight Count",
-	noteCount: "Note Count",
-	lastRead: "Last Read Date",
-	firstRead: "First Read Date",
-	totalReadTime: "Total Read Duration",
-	progress: "Reading Progress",
-	readingStatus: "Status",
-	averageTimePerPage: "Avg. Time Per Page",
-} as const;
-
-type ProgKey = keyof typeof FRIENDLY_KEY_MAP;
+type ProgKey =
+	| "title"
+	| "authors"
+	| "description"
+	| "keywords"
+	| "series"
+	| "language"
+	| "pages"
+	| "highlightCount"
+	| "noteCount"
+	| "lastRead"
+	| "firstRead"
+	| "totalReadTime"
+	| "progress"
+	| "readingStatus"
+	| "averageTimePerPage";
 
 function splitAndTrim(s: string, rx: RegExp): string[] {
 	return s
@@ -53,7 +51,11 @@ const metaFieldFormatters: Partial<Record<ProgKey, (v: unknown) => unknown>> = {
 		if (Array.isArray(v)) return v;
 		if (typeof v === "string" && v.startsWith("[[")) return v;
 		const arr = splitAndTrim(String(v), /\s*[,;&\n]\s*/);
-		const links = arr.map((a) => `[[${a}]]`);
+		const links = arr.map((a) => {
+			// Escape special wikilink characters that would break the link: |, ], #, ^
+			const escaped = a.replace(/([|#^\]])/g, "\\$1");
+			return `[[${escaped}]]`;
+		});
 		return links.length === 1 ? links[0] : links;
 	},
 	keywords: (v) => (Array.isArray(v) ? v : splitAndTrim(String(v), /,/)),
@@ -130,12 +132,15 @@ export class FrontmatterService implements FileMetadataExtractor {
 		fm: Record<string, unknown>,
 		vaultPath: string,
 	): BookMetadata | null {
-		const title = String((fm as any).Title ?? (fm as any).title ?? "");
+		// Canonicalize keys first (friendly/case-insensitive -> canonical)
+		const canonical: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(fm)) {
+			const canon = FieldMappingService.normalize(k);
+			canonical[canon] = v;
+		}
+		const title = String((canonical as any).title ?? "");
 		const authors = String(
-			(fm as any)["Author(s)"] ??
-				(fm as any).authors ??
-				(fm as any).author ??
-				"",
+			(canonical as any).authors ?? (canonical as any).author ?? "",
 		);
 
 		if (!title && !authors) return null;
@@ -148,9 +153,32 @@ export class FrontmatterService implements FileMetadataExtractor {
 	}
 
 	private async readPartial(file: TFile, bytes: number): Promise<string> {
-		// For simplicity and cross-platform reliability, use full read then slice.
-		const buffer = await this.app.vault.read(file);
-		return buffer.slice(0, bytes);
+		// Prefer a true partial read via FileSystemAdapter when available (desktop)
+		try {
+			const adapter: any = this.app.vault.adapter as any;
+			if (
+				adapter &&
+				typeof adapter.getFullPath === "function" &&
+				adapter.fs?.promises?.open
+			) {
+				const fullPath = adapter.getFullPath(file.path);
+				const handle = await adapter.fs.promises.open(fullPath, "r");
+				try {
+					const buf: Buffer = Buffer.alloc(bytes);
+					const { bytesRead } = await handle.read(buf, 0, bytes, 0);
+					return buf.subarray(0, bytesRead).toString("utf8");
+				} finally {
+					await handle.close();
+				}
+			}
+		} catch (e) {
+			// Fall through to full read on any failure
+			// Avoid noisy logs; this is a best-effort optimization
+		}
+
+		// Fallback: full read then slice (works across platforms/adapters)
+		const content = await this.app.vault.read(file);
+		return content.slice(0, bytes);
 	}
 
 	/**
@@ -194,9 +222,6 @@ export class FrontmatterService implements FileMetadataExtractor {
 
 		const { useFriendlyKeys = true, sortKeys = true } = options;
 		const output: Record<string, unknown> = {};
-		const reverseMap = new Map(
-			Object.entries(FRIENDLY_KEY_MAP).map(([k, v]) => [v.toLowerCase(), k]),
-		);
 
 		let entries = Object.entries(data);
 		if (sortKeys) {
@@ -207,7 +232,7 @@ export class FrontmatterService implements FileMetadataExtractor {
 			if (rawValue === undefined || rawValue === null) continue;
 
 			// Normalize incoming key if it's a friendly key
-			const progKey = (reverseMap.get(key.toLowerCase()) ?? key) as ProgKey;
+			const progKey = (FieldMappingService.normalize(key) ?? key) as ProgKey;
 
 			if (
 				useFriendlyKeys &&
@@ -221,7 +246,7 @@ export class FrontmatterService implements FileMetadataExtractor {
 			const value = formatter ? formatter(rawValue) : rawValue;
 
 			const keyOut = useFriendlyKeys
-				? (FRIENDLY_KEY_MAP[progKey] ?? key)
+				? FieldMappingService.toFriendly(progKey)
 				: progKey;
 
 			if (value !== "" && (!Array.isArray(value) || value.length > 0)) {

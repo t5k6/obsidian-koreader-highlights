@@ -1,8 +1,8 @@
 import { Notice, Setting, setIcon } from "obsidian";
-
 import { DEFAULT_LOGS_FOLDER } from "src/constants";
 import { LogLevel } from "src/services/LoggingService";
 import type { KoreaderHighlightImporterSettings } from "src/types";
+import { runPluginAction } from "src/utils/actionUtils";
 import {
 	booleanSetting,
 	dropdownSetting,
@@ -60,20 +60,82 @@ export class AdvancedSettingsSection extends SettingsSection {
 			);
 		}
 
+		// Troubleshooting
+		containerEl.createEl("h3", { text: "Troubleshooting" });
+
 		new Setting(containerEl)
-			.setName("Clear caches")
+			.setName("Reset Import Status")
 			.setDesc(
-				"Force re-scan for files and re-parse of metadata on next import.",
+				"Makes the plugin forget which books have been imported, so they will all be re-processed on the next import. This does NOT delete any notes.",
 			)
 			.addButton((button) =>
 				button
-					.setButtonText("Clear caches")
+					.setButtonText("Reset Status")
 					.setWarning()
 					.onClick(async () => {
-						await this.plugin.triggerClearCaches();
-						new Notice("KOReader Importer caches cleared.");
+						await runPluginAction(() => this.plugin.triggerClearCaches(), {
+							button: button,
+							inProgressText: "Resetting…",
+							completedText: "Reset Status",
+						});
+						new Notice(
+							"Import status has been reset. Run an import to re-process all books.",
+						);
 					}),
 			);
+
+		new Setting(containerEl)
+			.setName("Force Re-import All Books")
+			.setDesc(
+				"A shortcut that resets the import status and immediately starts a new import. Useful for refreshing all data from your device.",
+			)
+			.addButton((button) =>
+				button
+					.setButtonText("Force Re-import")
+					.setWarning()
+					.onClick(async () => {
+						await runPluginAction(() => this.plugin.triggerForceImport(), {
+							button: button,
+							inProgressText: "Importing...",
+							completedText: "Force Re-import",
+						});
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Factory Reset Plugin")
+			.setDesc(
+				"DANGER: Deletes all of the plugin's data, including the persistent index and caches, then reloads the plugin. Your highlight notes are NOT affected. Use this as a last resort if the plugin is malfunctioning.",
+			)
+			.addButton((button) =>
+				button
+					.setButtonText("Reset and Reload")
+					.setClass("mod-danger")
+					.onClick(async () => {
+						await this.plugin.triggerFullReset();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Diagnose Environment Issues")
+			.setDesc(
+				"Forces the plugin to re-check for things like vault write permissions. Use this if you've fixed a system-level issue (e.g., made a read-only vault writable) and want the plugin to recognize the change immediately.",
+			)
+			.addButton((button) =>
+				button.setButtonText("Re-check").onClick(async () => {
+					await runPluginAction(
+						() => this.plugin.triggerRecheckCapabilities(),
+						{
+							button: button,
+							inProgressText: "Checking…",
+							completedText: "Re-check",
+						},
+					);
+				}),
+			);
+
+		// Data Management
+		containerEl.createEl("h3", { text: "Data Management" });
 
 		new Setting(containerEl)
 			.setName("Comment Style")
@@ -111,7 +173,14 @@ export class AdvancedSettingsSection extends SettingsSection {
 					.setButtonText("Convert All Files")
 					.setWarning()
 					.onClick(async () => {
-						await this.plugin.triggerConvertCommentStyle();
+						await runPluginAction(
+							() => this.plugin.triggerConvertCommentStyle(),
+							{
+								button: button,
+								inProgressText: "Converting...",
+								completedText: "Convert All Files",
+							},
+						);
 					}),
 			);
 	}

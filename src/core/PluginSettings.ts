@@ -71,6 +71,15 @@ export class PluginSettings {
 
 	constructor(private plugin: Plugin) {}
 
+	/**
+	 * Normalize a possibly unknown string value into a vault path,
+	 * falling back to the provided default value.
+	 */
+	private toVaultPathOrDefault(value: unknown, defaultValue: string): string {
+		const s = ensureString(value, defaultValue);
+		return FileSystemService.toVaultPath(s || defaultValue);
+	}
+
 	public async loadSettings(): Promise<KoreaderHighlightImporterSettings> {
 		const raw: Partial<KoreaderHighlightImporterSettings> =
 			(await this.plugin.loadData()) ?? {};
@@ -116,12 +125,9 @@ export class PluginSettings {
 		) as KoreaderHighlightImporterSettings["logLevel"];
 
 		// Sanitized path
-		const folder = ensureString(
+		settings.highlightsFolder = this.toVaultPathOrDefault(
 			raw.highlightsFolder,
 			DEFAULT_HIGHLIGHTS_FOLDER,
-		);
-		settings.highlightsFolder = FileSystemService.toVaultPath(
-			folder || DEFAULT_HIGHLIGHTS_FOLDER,
 		);
 
 		// Arrays
@@ -165,6 +171,14 @@ export class PluginSettings {
 			settings.template.source = ["vault", "external"].includes(source)
 				? source
 				: DEFAULT_SETTINGS.template.source;
+
+			// Optional template directory normalization (if present)
+			if (typeof tmp.templateDir === "string") {
+				settings.template.templateDir = this.toVaultPathOrDefault(
+					tmp.templateDir,
+					DEFAULT_SETTINGS.template.templateDir,
+				);
+			}
 		}
 
 		const commentStyle = ensureString(

@@ -76,7 +76,12 @@ export class ScanManager {
 		const reportFolderPath = this.plugin.settings.highlightsFolder;
 		const fullReportPath = `${reportFolderPath}/${reportFilename}`;
 
-		const reportContent = this.generateReportContent(sdrFilePaths);
+		// Fetch the active mount point (auto-detected if available) and pass it to the report generator
+		const mountPoint = await this.sdrFinder.findActiveMountPoint();
+		const reportContent = this.generateReportContent(
+			sdrFilePaths,
+			mountPoint ?? "",
+		);
 
 		try {
 			this.log.info(`Creating or updating scan report: ${fullReportPath}`);
@@ -95,11 +100,16 @@ export class ScanManager {
 	 * @param sdrFilePaths - Array of SDR directory paths found
 	 * @returns Formatted markdown report content
 	 */
-	private generateReportContent(sdrFilePaths: string[]): string {
+	private generateReportContent(
+		sdrFilePaths: string[],
+		usedMountPoint: string,
+	): string {
 		const timestamp = new Date().toLocaleString();
 		let content = "# KOReader SDR Scan Report\n\n";
 		content += `*Scan performed on: ${timestamp}*\n`;
-		content += `*Mount Point: ${this.plugin.settings.koreaderMountPoint}*\n\n`;
+		const mountPointDisplay =
+			usedMountPoint || this.plugin.settings.koreaderMountPoint;
+		content += `*Mount Point: ${mountPointDisplay}*\n\n`;
 
 		if (sdrFilePaths.length === 0) {
 			content +=
@@ -108,11 +118,12 @@ export class ScanManager {
 			content += `Found ${sdrFilePaths.length} metadata files:\n\n`;
 			content += sdrFilePaths
 				.map((metadataFilePath) => {
-					const mountPoint = this.plugin.settings.koreaderMountPoint;
-					// Generate a relative path and ensure it uses forward slashes
-					const relativePath = path
-						.relative(mountPoint, metadataFilePath)
-						.replace(/\\/g, "/");
+					// Generate a relative path using the active mount point when available; otherwise use absolute path
+					const relativePath = usedMountPoint
+						? path
+								.relative(usedMountPoint, metadataFilePath)
+								.replace(/\\/g, "/")
+						: metadataFilePath;
 					return `- \`${relativePath}\``;
 				})
 				.join("\n");

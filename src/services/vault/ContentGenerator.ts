@@ -30,8 +30,7 @@ export class ContentGenerator {
 			return "";
 		}
 
-		const { fn: compiledTemplate, features } =
-			await this.templateManager.getCompiledTemplate();
+		const compiledTemplate = await this.templateManager.getCompiledTemplate();
 
 		// 1. Group all annotations by chapter name.
 		const groupedByChapter = annotations.reduce(
@@ -70,7 +69,7 @@ export class ContentGenerator {
 		chaptersToSort.sort((a, b) => a.startPage - b.startPage);
 
 		// 4. Render the chapters in the now-correct order.
-		let finalContent = "";
+		const renderedBlocks: string[] = [];
 		for (const chapterData of chaptersToSort) {
 			const chapterHighlights = chapterData.annotations;
 			if (!chapterHighlights || chapterHighlights.length === 0) continue;
@@ -79,7 +78,6 @@ export class ContentGenerator {
 			const groupedSuccessiveHighlights =
 				this.groupSuccessiveHighlights(chapterHighlights);
 
-			let chapterContent = "";
 			for (const highlightGroup of groupedSuccessiveHighlights) {
 				const renderedVisualGroup = this.templateManager.renderGroup(
 					compiledTemplate,
@@ -91,35 +89,22 @@ export class ContentGenerator {
 				);
 
 				// Only add KOHL markers if comment style is not "none"
+				let blockContent = renderedVisualGroup;
 				if (this.plugin.settings.commentStyle !== "none") {
 					const markers = createKohlMarkers(
 						highlightGroup.annotations,
 						this.plugin.settings.commentStyle,
 					);
-					chapterContent += `${markers}\n${renderedVisualGroup}`;
-				} else {
-					chapterContent += renderedVisualGroup;
+					blockContent = `${markers}\n${renderedVisualGroup}`;
 				}
+				renderedBlocks.push(blockContent);
 
 				isFirstHighlightInChapter = false;
-
-				if (features.autoInsertDivider) {
-					chapterContent += "\n\n---\n\n";
-				} else {
-					chapterContent += "\n\n";
-				}
 			}
-
-			// Add the processed chapter content to the final output
-			finalContent += chapterContent;
 		}
 
-		// Remove the last divider and trim whitespace
-		if (features.autoInsertDivider) {
-			finalContent = finalContent.slice(0, -7);
-		}
-
-		return finalContent.replace(/\n{3,}/g, "\n\n").trim();
+		// Join all rendered blocks with a consistent separator
+		return renderedBlocks.join("\n\n");
 	}
 
 	/**

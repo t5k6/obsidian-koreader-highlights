@@ -6,10 +6,12 @@ export class ProgressModal extends Modal {
 	private progressEl: HTMLProgressElement | null = null;
 	private total: number | null = null;
 	private controller: AbortController;
+	private baseTitle: string;
 
-	constructor(app: App) {
+	constructor(app: App, title?: string) {
 		super(app);
 		this.controller = new AbortController();
+		this.baseTitle = title ?? "Importing Highlights and Notes";
 	}
 
 	public get abortSignal(): AbortSignal {
@@ -19,7 +21,7 @@ export class ProgressModal extends Modal {
 	onOpen() {
 		const { contentEl } = this;
 		contentEl.empty();
-		this.titleEl.setText("Importing Highlights and Notes");
+		this.titleEl.setText(this.baseTitle);
 		this.statusEl = contentEl.createEl("p", {
 			text: "Collecting files...",
 		});
@@ -57,7 +59,7 @@ export class ProgressModal extends Modal {
 		if (this.progressEl && this.total) {
 			this.progressEl.value = completed;
 			const percentage = Math.round((completed / this.total) * 100);
-			this.titleEl.setText(`Importing... (${percentage}%)`);
+			this.titleEl.setText(`${this.baseTitle} (${percentage}%)`);
 		}
 		if (currentFile) {
 			this.statusEl.setText(`Processing: ${path.basename(currentFile)}`);

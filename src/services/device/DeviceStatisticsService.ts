@@ -34,6 +34,8 @@ const BOOK_COLUMNS =
 		.trim()
 		.replace(/\s+/g, " ");
 
+// Koreader DB sometimes shares the same md5 for different books
+// So we need to check both md5 and title
 const SQL_FIND_BOOK_BY_MD5 = /*sql*/ `SELECT ${BOOK_COLUMNS} FROM book WHERE md5 = ? AND title = ?`;
 const SQL_FIND_BOOK_BY_AUTHOR_TITLE = /*sql*/ `SELECT ${BOOK_COLUMNS} FROM book WHERE authors = ? AND title = ?`;
 const SQL_GET_SESSIONS = /*sql*/ `SELECT * FROM page_stat_data WHERE id_book = ? ORDER BY start_time`;

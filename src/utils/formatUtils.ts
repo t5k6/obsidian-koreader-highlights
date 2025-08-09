@@ -1,11 +1,23 @@
 import { createHash } from "node:crypto";
 import { parse } from "node:path";
 import type { LoggingService } from "src/services/LoggingService";
-import type { Annotation } from "../types";
+import type { Annotation, DocProps } from "../types";
 
 interface PositionObject {
 	x: number;
 	y: number;
+}
+
+/**
+ * Generates a deterministic key from document properties.
+ * Used for consistent book identification across imports.
+ * @param props - Document properties containing title and authors
+ * @returns Normalized key in format "author::title"
+ */
+export function bookKeyFromDocProps(props: DocProps): string {
+	const authorSlug = normalizeFileNamePiece(props.authors).toLowerCase();
+	const titleSlug = normalizeFileNamePiece(props.title).toLowerCase();
+	return `${authorSlug}::${titleSlug}`;
 }
 
 interface CfiParts {

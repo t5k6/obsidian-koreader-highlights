@@ -1,9 +1,11 @@
 import { type App, Modal, Notice, Plugin } from "obsidian";
+import { BookRefreshOrchestrator } from "src/services/BookRefreshOrchestrator";
 import { CommandManager } from "src/services/command/CommandManager";
 import { LoggingService } from "src/services/LoggingService";
 import { TemplateManager } from "src/services/parsing/TemplateManager";
 import { LocalIndexService } from "src/services/vault/LocalIndexService";
 import { SettingsTab } from "src/ui/SettingsTab";
+import { StatusBarManager } from "src/ui/StatusBarManager";
 import type { KoreaderHighlightImporterSettings } from "../types";
 import { DIContainer } from "./DIContainer";
 import { MigrationManager } from "./MigrationManager";
@@ -60,6 +62,7 @@ export default class KoreaderImporterPlugin extends Plugin {
 	private migrationManager!: MigrationManager;
 	public templateManager!: TemplateManager;
 	public localIndexService!: LocalIndexService;
+	private statusBarManager!: StatusBarManager;
 
 	async onload() {
 		console.log("KOReaderImporterPlugin: Loading...");
@@ -98,13 +101,20 @@ export default class KoreaderImporterPlugin extends Plugin {
 			this.diContainer = new DIContainer(this.loggingService);
 			this.diContainer.registerValue(LoggingService, this.loggingService);
 
-			// Step 4: Services
+			// Step 4: Register services
 			registerServices(this.diContainer, this, this.app);
+
+			// Step 5: Migrations (run before services are used)
+			this.migrationManager = new MigrationManager(this, this.loggingService);
+			await this.migrationManager.run();
+			this.loggingService.info("KoreaderImporterPlugin", "Migrations checked.");
+
+			// Step 6: Initialize services that read files/state
 			this.localIndexService =
 				this.diContainer.resolve<LocalIndexService>(LocalIndexService);
 			await this.localIndexService.initialize();
 
-			// Step 5: Critical Service Post-Init
+			// Step 7: Critical Service Post-Init
 			this.templateManager =
 				this.diContainer.resolve<TemplateManager>(TemplateManager);
 			await this.templateManager.loadBuiltInTemplates();
@@ -114,10 +124,10 @@ export default class KoreaderImporterPlugin extends Plugin {
 				"Templates initialized.",
 			);
 
-			// Step 6: Migrations (run before services are used)
-			this.migrationManager = new MigrationManager(this, this.loggingService);
-			await this.migrationManager.run();
-			this.loggingService.info("KoreaderImporterPlugin", "Migrations checked.");
+			// Step 8: UI Managers
+			this.statusBarManager =
+				this.diContainer.resolve<StatusBarManager>(StatusBarManager);
+			this.addChild(this.statusBarManager);
 
 			this.servicesInitialized = true;
 			this.loggingService.info(
@@ -194,6 +204,18 @@ export default class KoreaderImporterPlugin extends Plugin {
 			name: "Troubleshoot: Re-check environment capabilities",
 			callback: () => this.triggerRecheckCapabilities(),
 		});
+
+		// Refresh highlights for the currently active book note
+		this.addCommand({
+			id: "refresh-highlights-for-this-book",
+			name: "Refresh highlights for this book",
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveFile();
+				if (!file || file.extension !== "md") return false;
+				if (!checking) this.triggerRefreshCurrentNote(file);
+				return true;
+			},
+		});
 	}
 
 	// --- Utility Methods ---
@@ -263,6 +285,32 @@ export default class KoreaderImporterPlugin extends Plugin {
 		const commandManager =
 			this.diContainer.resolve<CommandManager>(CommandManager);
 		await commandManager.executeRecheckCapabilities();
+	}
+
+	async triggerRefreshCurrentNote(
+		file?: import("obsidian").TFile,
+	): Promise<void> {
+		if (!this.checkServiceStatus("refresh current note")) return;
+		const active = file ?? this.app.workspace.getActiveFile();
+		if (!active) {
+			new Notice("No active file to refresh.", 4000);
+			return;
+		}
+		try {
+			const orchestrator = this.diContainer.resolve<BookRefreshOrchestrator>(
+				BookRefreshOrchestrator,
+			);
+			const changed = await orchestrator.refreshNote(active);
+			new Notice(
+				changed
+					? "KOReader highlights refreshed for this book."
+					: "No changes found for this book.",
+				5000,
+			);
+		} catch (e: any) {
+			console.error("Book refresh failed", e);
+			new Notice(`Refresh failed: ${e?.message ?? e}`, 7000);
+		}
 	}
 
 	async saveSettings(forceUpdate: boolean = false): Promise<void> {

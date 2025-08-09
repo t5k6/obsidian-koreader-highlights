@@ -1,4 +1,5 @@
 import type { App } from "obsidian";
+import { BookRefreshOrchestrator } from "src/services/BookRefreshOrchestrator";
 import { CapabilityManager } from "src/services/CapabilityManager";
 import { CommandManager } from "src/services/command/CommandManager";
 import { DeviceStatisticsService } from "src/services/device/DeviceStatisticsService";
@@ -21,6 +22,7 @@ import { MergeService } from "src/services/vault/MergeService";
 import { SnapshotManager } from "src/services/vault/SnapshotManager";
 import type { DuplicateMatch } from "src/types";
 import { DuplicateHandlingModal } from "src/ui/DuplicateModal";
+import { StatusBarManager } from "src/ui/StatusBarManager";
 import { CacheManager } from "src/utils/cache/CacheManager";
 import type { DIContainer } from "./DIContainer";
 import type KoreaderImporterPlugin from "./KoreaderImporterPlugin";
@@ -47,7 +49,6 @@ export function registerServices(
 	);
 
 	// --- Level 0: Foundational (No internal dependencies) ---
-	container.register(LoggingService, [VAULT_TOKEN]);
 	container.register(FrontmatterGenerator, []);
 
 	// --- Level 0.5: Depends on LoggingService ---
@@ -60,6 +61,15 @@ export function registerServices(
 		VAULT_TOKEN,
 		PLUGIN_TOKEN,
 		CacheManager,
+	]);
+
+	// Orchestrator for single-book refresh
+	container.register(BookRefreshOrchestrator, [
+		LocalIndexService,
+		ImportManager,
+		SDRFinder,
+		FileSystemService,
+		LoggingService,
 	]);
 	container.register(SqlJsManager, [LoggingService, FileSystemService]);
 	container.register(SDRFinder, [
@@ -86,6 +96,14 @@ export function registerServices(
 		CacheManager,
 		FileSystemService,
 		LoggingService,
+	]);
+
+	// --- UI-specific Services ---
+	container.register(StatusBarManager, [
+		APP_TOKEN,
+		PLUGIN_TOKEN,
+		LocalIndexService,
+		BookRefreshOrchestrator,
 	]);
 
 	// --- Level 2: Depends on Level 1 ---

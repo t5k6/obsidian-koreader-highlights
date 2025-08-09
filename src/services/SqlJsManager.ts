@@ -1,5 +1,7 @@
+import path from "node:path";
 import initSqlJs, { type Database, type SqlJsStatic } from "sql.js";
 import { SQLITE_WASM } from "src/binaries/sql-wasm-base64";
+import { INDEX_DB_VERSION } from "src/constants";
 import type { Disposable } from "src/types";
 import { AsyncLazy } from "src/utils/asyncLazy";
 import type { FileSystemService } from "./FileSystemService";
@@ -14,6 +16,7 @@ export class SqlJsManager implements Disposable {
 	private readonly log;
 	private sqlJsLazy: AsyncLazy<SqlJsStatic>;
 	private dbCache = new Map<string, Database>();
+	private openInFlight = new Map<string, Promise<Database>>();
 	private dbIsDirty = new Map<string, boolean>();
 
 	constructor(
@@ -46,57 +49,96 @@ export class SqlJsManager implements Disposable {
 			return this.dbCache.get(filePath)!;
 		}
 
-		this.log.info(`Opening database: ${filePath}`);
-		const SQL = await this.getSqlJs();
-		let bytes: Uint8Array | null = null;
-
-		try {
-			const buffer = await this.fsService.readBinaryAuto(filePath);
-			bytes = new Uint8Array(buffer);
-		} catch (e: any) {
-			if (e.code === "ENOENT") {
-				// This is the expected "file not found" on first run. Log it and continue.
-				this.log.info(`No database file found at ${filePath}, creating new.`);
-			} else {
-				// Any other error is unexpected and should be thrown.
-				this.log.error(
-					`Unexpected error reading database file: ${filePath}`,
-					e,
-				);
-				throw e;
-			}
-		}
-		const db = bytes ? new SQL.Database(bytes) : new SQL.Database();
-
-		// Cache immediately so setDirty on a brand new DB marks it correctly
-		this.dbCache.set(filePath, db);
-
-		if (!bytes && options.schemaSql) {
-			this.log.info(`Applying schema to new DB: ${filePath}`);
-			db.run(options.schemaSql);
-			this.setDirty(filePath, true);
+		// If an open is already in-flight for this path, await it
+		const inFlight = this.openInFlight.get(filePath);
+		if (inFlight) {
+			return inFlight;
 		}
 
-		if (options.validate && bytes) {
+		const openPromise = (async (): Promise<Database> => {
+			this.log.info(`Opening database: ${filePath}`);
+			const SQL = await this.getSqlJs();
+			let bytes: Uint8Array | null = null;
+
 			try {
-				db.exec("PRAGMA quick_check;");
-			} catch (e: unknown) {
-				this.log.error(
-					`Database validation failed for ${filePath}. It may be corrupt.`,
-					e,
-				);
-				throw e;
+				// readBinaryAuto now returns a correctly-sized Uint8Array
+				bytes = await this.fsService.readBinaryAuto(filePath);
+			} catch (e: any) {
+				if (e.code === "ENOENT") {
+					// This is the expected "file not found" on first run. Log it and continue.
+					this.log.info(`No database file found at ${filePath}, creating new.`);
+				} else {
+					// Any other error is unexpected and should be thrown.
+					this.log.error(
+						`Unexpected error reading database file: ${filePath}`,
+						e,
+					);
+					throw e;
+				}
 			}
-		}
+			const db = bytes ? new SQL.Database(bytes) : new SQL.Database();
 
-		try {
-			db.exec("PRAGMA journal_mode = WAL;");
-		} catch (_) {
-			// ignore – most likely "cannot use WAL mode on an in-memory db"
-		}
+			// Cache immediately so setDirty on a brand new DB marks it correctly
+			this.dbCache.set(filePath, db);
 
-		db.exec("PRAGMA foreign_keys = ON;");
-		return db;
+			// Apply WAL mode and enable foreign keys immediately, before any transaction
+			try {
+				db.exec("PRAGMA journal_mode = WAL;");
+			} catch (_) {
+				// ignore – most likely "cannot use WAL mode on an in-memory db"
+			}
+			// Set synchronous level before starting any transaction
+			db.exec("PRAGMA synchronous = NORMAL;");
+			db.exec("PRAGMA foreign_keys = ON;");
+
+			// Bootstrap brand new databases atomically with schema and version
+			if (!bytes) {
+				this.log.info(
+					`Creating new DB with schema v${INDEX_DB_VERSION} at: ${filePath}`,
+				);
+				db.run("BEGIN;");
+				try {
+					if (options.schemaSql) {
+						db.run(options.schemaSql);
+					}
+					// Stamp the new database with the current schema version
+					db.run(`PRAGMA user_version = ${INDEX_DB_VERSION};`);
+					db.run("COMMIT;");
+					this.setDirty(filePath, true);
+				} catch (e) {
+					db.run("ROLLBACK;");
+					this.log.error(
+						`Failed to bootstrap new database: ${filePath}`,
+						e as any,
+					);
+					throw e;
+				}
+			}
+
+			if (options.validate && bytes) {
+				try {
+					const res = db.exec("PRAGMA quick_check;");
+					const ok = res?.[0]?.values?.[0]?.[0];
+					if (ok !== "ok") {
+						throw new Error(`Database integrity check failed: ${String(ok)}`);
+					}
+				} catch (e: unknown) {
+					this.log.error(
+						`Database validation failed for ${filePath}. It may be corrupt.`,
+						e,
+					);
+					throw e;
+				}
+			}
+
+			return db;
+		})().finally(() => {
+			// Ensure the in-flight promise is removed on success or failure
+			this.openInFlight.delete(filePath);
+		});
+
+		this.openInFlight.set(filePath, openPromise);
+		return openPromise;
 	}
 
 	public async persistDatabase(filePath: string): Promise<void> {
@@ -113,7 +155,11 @@ export class SqlJsManager implements Disposable {
 			const copy = data.slice();
 			const buffer = copy.buffer;
 
-			await this.fsService.writeBinaryAuto(filePath, new Uint8Array(buffer));
+			if (path.isAbsolute(filePath)) {
+				await this.fsService.writeBinaryAuto(filePath, new Uint8Array(buffer));
+			} else {
+				await this.fsService.writeVaultBinaryAtomic(filePath, buffer);
+			}
 
 			this.setDirty(filePath, false);
 		} catch (e: unknown) {
@@ -156,7 +202,9 @@ export class SqlJsManager implements Disposable {
 	async dispose(): Promise<void> {
 		this.log.info("Disposing all managed databases...");
 		const persistPromises: Promise<void>[] = [];
-		for (const filePath of this.dbCache.keys()) {
+		// Take a snapshot of keys to avoid mutating while iterating
+		const filePaths = Array.from(this.dbCache.keys());
+		for (const filePath of filePaths) {
 			if (this.dbIsDirty.get(filePath)) {
 				persistPromises.push(this.persistDatabase(filePath));
 			}
@@ -164,7 +212,7 @@ export class SqlJsManager implements Disposable {
 
 		await Promise.all(persistPromises);
 
-		for (const filePath of this.dbCache.keys()) {
+		for (const filePath of filePaths) {
 			this.closeDatabase(filePath);
 		}
 

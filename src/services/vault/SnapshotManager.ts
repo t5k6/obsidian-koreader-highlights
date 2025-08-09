@@ -41,21 +41,11 @@ export class SnapshotManager {
 	 * @param targetFile - File to create snapshot for
 	 */
 	public async createSnapshot(targetFile: TFile): Promise<void> {
-		const ok = await this.capabilities.ensure("snapshotsWritable", {
-			notifyOnce: true,
-		});
-		if (!ok) return;
-		const snapshotPath = this.getSnapshotPath(targetFile);
-		try {
-			const content = await this.app.vault.read(targetFile);
-			await this.fs.writeVaultFile(snapshotPath, content);
-			this.log.info(
-				`Created snapshot for ${targetFile.path} at ${snapshotPath}`,
-			);
-		} catch (error) {
-			this.log.error(`Failed to write snapshot for ${targetFile.path}`, error);
-			throw error;
-		}
+		await this.createVersion(
+			targetFile,
+			(f) => this.getSnapshotPath(f),
+			"snapshot",
+		);
 	}
 
 	/**
@@ -64,30 +54,11 @@ export class SnapshotManager {
 	 * @param targetFile - File to backup
 	 */
 	public async createBackup(targetFile: TFile): Promise<void> {
-		const ok = await this.capabilities.ensure("snapshotsWritable", {
-			notifyOnce: true,
-		});
-		if (!ok) return;
-		const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-		const safeBaseName = normalizeFileNamePiece(targetFile.basename).slice(
-			0,
-			50,
+		await this.createVersion(
+			targetFile,
+			(f) => this.getBackupPath(f),
+			"backup",
 		);
-		const pathHash = createHash("sha1")
-			.update(targetFile.path)
-			.digest("hex")
-			.slice(0, 8);
-		const backupFileName = `${safeBaseName}-${pathHash}-${timestamp}.md`;
-		const backupPath = path.join(this.backupDir, backupFileName);
-
-		try {
-			const content = await this.app.vault.read(targetFile);
-			await this.fs.writeVaultFile(backupPath, content);
-			this.log.info(`Created backup for ${targetFile.path} at ${backupPath}`);
-		} catch (error) {
-			this.log.error(`Failed to create backup for ${targetFile.path}`, error);
-			throw error;
-		}
 	}
 
 	/**
@@ -177,5 +148,53 @@ export class SnapshotManager {
 		const hash = createHash("sha1").update(targetFile.path).digest("hex");
 		const snapshotFileName = `${hash}.md`;
 		return path.join(this.snapshotDir, snapshotFileName);
+	}
+
+	private getBackupPath(targetFile: TFile): string {
+		const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+		const safeBaseName = normalizeFileNamePiece(targetFile.basename).slice(
+			0,
+			50,
+		);
+		const pathHash = createHash("sha1")
+			.update(targetFile.path)
+			.digest("hex")
+			.slice(0, 8);
+		const backupFileName = `${safeBaseName}-${pathHash}-${timestamp}.md`;
+		return path.join(this.backupDir, backupFileName);
+	}
+
+	private async createVersion(
+		targetFile: TFile,
+		getPath: (file: TFile) => string,
+		purpose: "snapshot" | "backup",
+	): Promise<void> {
+		const ok = await this.capabilities.ensure("snapshotsWritable", {
+			notifyOnce: true,
+		});
+		if (!ok) return;
+
+		const versionPath = getPath(targetFile);
+		try {
+			// Ensure the file still exists right before reading to avoid race conditions
+			const abs = this.app.vault.getAbstractFileByPath(targetFile.path);
+			if (!(abs instanceof TFile)) {
+				this.log.warn(
+					`File ${targetFile.path} was deleted before ${purpose} could be created.`,
+				);
+				return;
+			}
+			const content = await this.app.vault.read(targetFile);
+			await this.fs.writeVaultFile(versionPath, content);
+			this.log.info(
+				`Created ${purpose} for ${targetFile.path} at ${versionPath}`,
+			);
+		} catch (error) {
+			this.log.error(
+				`Failed to create ${purpose} for ${targetFile.path}`,
+				error,
+			);
+			throw error;
+		}
 	}
 }

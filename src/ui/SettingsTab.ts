@@ -38,6 +38,11 @@ export class SettingsTab extends PluginSettingTab {
 		containerEl.empty();
 		containerEl.addClass("koreader-importer-settings");
 
+		// Clear previous children before creating new ones to avoid leaks
+		// This will unload all registered child components from the previous render (if supported by the base class).
+		// Use optional chaining to avoid type issues in environments where PluginSettingTab typings don't expose Component methods.
+		(this as any).unload?.();
+
 		// Instantiate sections here
 		this.sections = [
 			new CoreSettingsSection(
@@ -75,17 +80,18 @@ export class SettingsTab extends PluginSettingTab {
 			),
 		];
 
-		this.sections.forEach((section) => section.display(containerEl));
+		this.sections.forEach((section) => {
+			// Register section as a child so Obsidian manages its lifecycle automatically (if available)
+			(this as any).addChild?.(section);
+			section.display(containerEl);
+		});
 
 		this.stateManager.restoreState(containerEl);
 	}
 
 	hide(): void {
 		super.hide();
-		// Manually unload each section component when the settings tab is hidden.
-		// This will trigger the entire teardown cascade for suggesters.
-		this.sections.forEach((section) => section.unload());
-		// Clear the sections array to be rebuilt on next display
+		// Sections are registered as children; lifecycle clean-up is automatic.
 		this.sections = [];
 	}
 }

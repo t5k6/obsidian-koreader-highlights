@@ -1,16 +1,22 @@
-import type { ButtonComponent } from "obsidian";
+// Minimal interface so callers can provide a ButtonComponent or a lightweight shim
+interface ButtonLike {
+	setDisabled: (disabled: boolean) => void;
+	setButtonText: (text: string) => void;
+	// Optional, only present on Obsidian's ButtonComponent
+	buttonEl?: HTMLElement;
+}
 
 export async function runPluginAction(
 	action: () => Promise<void>,
 	options: {
-		button?: ButtonComponent;
+		button?: ButtonLike;
 		inProgressText?: string;
 		completedText?: string;
 	},
 ): Promise<void> {
 	const { button, inProgressText, completedText } = options;
 
-	const originalText = button?.buttonEl.innerText;
+	const originalText = button?.buttonEl ? button.buttonEl.innerText : undefined;
 
 	try {
 		if (button) {
@@ -28,8 +34,8 @@ export async function runPluginAction(
 	} finally {
 		if (button) {
 			button.setDisabled(false);
-			const textToShow = completedText || originalText;
-			if (textToShow) {
+			const textToShow = completedText ?? originalText;
+			if (textToShow !== undefined) {
 				button.setButtonText(textToShow);
 			}
 		}

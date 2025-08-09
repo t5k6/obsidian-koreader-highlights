@@ -16,6 +16,7 @@ import {
 import type { CacheManager } from "src/utils/cache/CacheManager";
 import type { LruCache } from "src/utils/cache/LruCache";
 import type { LoggingService } from "../LoggingService";
+import { FieldMappingService } from "./FieldMappingService";
 
 const DEFAULT_DOC_PROPS: DocProps = {
 	authors: "",
@@ -98,7 +99,13 @@ export class MetadataParser {
 	private collectAnnotations(
 		node: luaparser.TableConstructorExpression,
 		pageOverride?: number,
+		depth = 0,
 	): Annotation[] {
+		if (depth > 10) {
+			this.log.warn("Annotation nesting too deep, stopping recursion");
+			return [];
+		}
+
 		const out: Annotation[] = [];
 
 		for (const field of node.fields) {
@@ -131,7 +138,9 @@ export class MetadataParser {
 
 					if (Number.isFinite(pageNum)) {
 						// It's a page number. Recurse into its value.
-						out.push(...this.collectAnnotations(annotationNode, pageNum));
+						out.push(
+							...this.collectAnnotations(annotationNode, pageNum, depth + 1),
+						);
 					}
 				}
 			}
@@ -299,44 +308,26 @@ export class MetadataParser {
 
 	/**
 	 * Creates an annotation object from Lua table fields.
-	 * Maps various field names to standardized annotation properties.
-	 * @param fields - Array of table fields from the Lua AST
-	 * @returns Parsed annotation or null if invalid
+	 * Maps various field names to standardized annotation properties using FieldMappingService.
 	 */
 	private createAnnotationFromFields(
 		fields: Array<TableKey | TableKeyString | TableValue>,
 	): Annotation | null {
 		const annotation: Partial<Annotation> & { page?: number } = {};
-		const fieldMap: Record<string, keyof Annotation | "page"> = {
-			chapter: "chapter",
-			chapter_name: "chapter",
-			datetime: "datetime",
-			date: "datetime",
-			text: "text",
-			notes: "note",
-			note: "note",
-			color: "color",
-			draw_type: "drawer",
-			drawer: "drawer",
-			pageno: "page",
-			page: "page",
-			pos0: "pos0",
-			pos1: "pos1",
-		};
 
 		const set = <K extends keyof Annotation>(
 			k: K,
 			v: Annotation[K] | undefined,
 		) => {
-			if (v !== undefined) {
-				annotation[k] = v;
-			}
+			if (v !== undefined) annotation[k] = v;
 		};
 
 		for (const field of fields) {
 			if (field.type !== "TableKey") continue;
 			const key = this.extractKeyAsString(field.key);
-			const targetField = key ? fieldMap[key] : null;
+			const mapped = key ? FieldMappingService.fromLua(key) : null;
+			const targetField: (keyof Annotation | "page") | null =
+				mapped === "page" ? "page" : ((mapped as keyof Annotation) ?? null);
 			if (!targetField) continue;
 
 			const valueNode = field.value;
@@ -362,7 +353,7 @@ export class MetadataParser {
 				case "text":
 				case "note": {
 					const s = this.extractStringValue(valueNode);
-					set(targetField, (s ?? "") as any);
+					set(targetField as keyof Annotation, (s ?? "") as any);
 					break;
 				}
 				default: {

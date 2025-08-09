@@ -8,7 +8,7 @@ import type {
 	LuaMetadata,
 } from "src/types";
 import type { CacheManager } from "src/utils/cache/CacheManager";
-import { getHighlightKey } from "src/utils/formatUtils";
+import { bookKeyFromDocProps, getHighlightKey } from "src/utils/formatUtils";
 import { extractHighlights } from "src/utils/highlightExtractor";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
@@ -72,7 +72,7 @@ export class DuplicateFinder {
 	private async findPotentialDuplicates(
 		docProps: DocProps,
 	): Promise<{ files: TFile[]; timedOut: boolean }> {
-		const bookKey = this.LocalIndexService.bookKeyFromDocProps(docProps);
+		const bookKey = bookKeyFromDocProps(docProps);
 		const cached = this.potentialDuplicatesCache.get(bookKey);
 		if (cached) {
 			this.log.info(`Cache hit for potential duplicates of key: ${bookKey}`);
@@ -124,7 +124,7 @@ export class DuplicateFinder {
 			this.log.warn(
 				`Degraded duplicate scan timed out after ${SCAN_TIMEOUT_MS}ms.`,
 			);
-			timedOut = true;
+			return { files: [], timedOut: true };
 		}
 
 		for (const file of files) {
@@ -151,7 +151,7 @@ export class DuplicateFinder {
 					authors = cachedFm.authors;
 				}
 
-				const fileKey = this.LocalIndexService.bookKeyFromDocProps({
+				const fileKey = bookKeyFromDocProps({
 					title: title ?? "",
 					authors: authors ?? "",
 				});
@@ -166,7 +166,9 @@ export class DuplicateFinder {
 			}
 		}
 
-		this.potentialDuplicatesCache.set(bookKey, results);
+		if (!timedOut) {
+			this.potentialDuplicatesCache.set(bookKey, results);
+		}
 		return { files: results, timedOut };
 	}
 

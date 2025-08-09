@@ -1,4 +1,4 @@
-import { Notice, normalizePath, TFile, type Vault } from "obsidian";
+import { debounce, Notice, normalizePath, TFile, type Vault } from "obsidian";
 import { DEFAULT_TEMPLATES_FOLDER } from "src/constants";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import type {
@@ -19,12 +19,11 @@ import {
 import { styleHighlight } from "src/utils/highlightStyle";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
+import { TemplateValidator } from "./TemplateValidator";
 
 export const FALLBACK_TEMPLATE_ID = "default";
 const DARK_THEME_CLASS = "theme-dark";
 
-const MD_RULE_REGEX = /^\s*(-{3,}|_{3,}|\*{3,})\s*$/m;
-const HTML_HR_REGEX = /<hr\s*\/?>/i;
 const NOTE_LINE_REGEX = /^\s*>\s*/;
 const CONDITIONAL_BLOCK_REGEX = /{{#(\w+)}}(.*?)({{\/\1}})/gs;
 const SIMPLE_VAR_REGEX = /\{\{((?!#|\/)[\w]+)\}\}/g;
@@ -33,13 +32,6 @@ const TEMPLATE_FRONTMATTER_REGEX = /^---.*?---\s*/s;
 declare const KOREADER_BUILTIN_TEMPLATES: string;
 
 export type CompiledTemplate = (data: TemplateData) => string;
-
-interface CachedTemplate {
-	fn: CompiledTemplate;
-	features: {
-		autoInsertDivider: boolean;
-	};
-}
 
 export interface TemplateValidationResult {
 	isValid: boolean;
@@ -52,7 +44,8 @@ export class TemplateManager implements SettingsObserver {
 	private readonly log;
 	private isDarkTheme: boolean = true;
 	private rawTemplateCache: LruCache<string, string>;
-	private compiledTemplateCache: LruCache<string, CachedTemplate>;
+	private compiledTemplateCache: LruCache<string, CompiledTemplate>;
+	private readonly updateThemeDebounced: (() => void) & { cancel: () => void };
 	public builtInTemplates: Map<string, TemplateDefinition> = new Map();
 
 	constructor(
@@ -71,9 +64,10 @@ export class TemplateManager implements SettingsObserver {
 		this.log = this.loggingService.scoped("TemplateManager");
 
 		this.updateTheme = this.updateTheme.bind(this);
+		this.updateThemeDebounced = debounce(this.updateTheme, 250, false) as any;
 		this.updateTheme();
 		this.plugin.registerEvent(
-			this.plugin.app.workspace.on("css-change", this.updateTheme),
+			this.plugin.app.workspace.on("css-change", this.updateThemeDebounced),
 		);
 		this.log.info(`Initialized. Dark theme: ${this.isDarkTheme}`);
 	}
@@ -104,20 +98,23 @@ export class TemplateManager implements SettingsObserver {
 		if (this.isDarkTheme !== newThemeState) {
 			this.isDarkTheme = newThemeState;
 			this.log.info(`Theme changed. Dark theme: ${this.isDarkTheme}`);
+			// Only clear compiled templates if they actually depend on theme differences
+			if (this.hasThemeDependentTemplates()) {
+				this.compiledTemplateCache.clear();
+				this.log.info("Cleared compiled template cache due to theme change.");
+			}
 		}
 	}
 
 	/**
-	 * Analyzes a template string to determine its features and requirements.
-	 * @param tpl - The template string to analyze
-	 * @returns Object containing feature flags like autoInsertDivider
+	 * Returns true if the currently selected templates produce theme-dependent output
+	 * requiring recompilation on theme changes. This is a conservative hook; adjust
+	 * when templates introduce theme-conditional logic.
 	 */
-	private analyseTemplateFeatures(tpl: string): CachedTemplate["features"] {
-		const hasMdRule = MD_RULE_REGEX.test(tpl);
-		const hasHtmlHr = HTML_HR_REGEX.test(tpl);
-		const autoInsertDivider = !(hasMdRule || hasHtmlHr);
-
-		return { autoInsertDivider };
+	private hasThemeDependentTemplates(): boolean {
+		// Current templates do not embed theme-conditional logic at compile-time.
+		// Rendering relies on CSS variables, so recompilation is unnecessary.
+		return false;
 	}
 
 	/**
@@ -127,6 +124,7 @@ export class TemplateManager implements SettingsObserver {
 	 * @returns Compiled template function that accepts TemplateData
 	 */
 	public compile(templateString: string): CompiledTemplate {
+		// Determine how to render note lines based on template usage
 		const noteLineHasQuote = /^[ \t]*>[^\n]*\{\{note\}\}/m.test(templateString);
 		const noteLines = templateString
 			.split(/\r?\n/)
@@ -134,51 +132,120 @@ export class TemplateManager implements SettingsObserver {
 		const userHandlesPrefix = noteLines.some((l) => NOTE_LINE_REGEX.test(l));
 		const autoPrefixNotes = !userHandlesPrefix;
 
-		let noteReplacementLogic: string;
-		if (noteLineHasQuote) {
-			noteReplacementLogic = `(d.note || '').split('\\n').map((l, i) => i === 0 ? l : '> ' + l).join('\\n')`;
-		} else if (autoPrefixNotes) {
-			noteReplacementLogic = `(d.note || '').split('\\n').map(l => '> ' + l).join('\\n')`;
-		} else {
-			noteReplacementLogic = `d.note ?? ''`;
-		}
+		type Part =
+			| { type: "literal"; value: string }
+			| { type: "var"; name: string }
+			| { type: "conditional"; key: string; parts: Part[] };
 
-		// escape native template-literal injections
-		const ESCAPE_DOLLAR_CURLY = /\$\{/g;
-		const code = templateString
-			.replace(/\\/g, "\\\\")
-			.replace(/`/g, "\\`")
-			.replace(ESCAPE_DOLLAR_CURLY, "\\${")
-			.replace(
-				CONDITIONAL_BLOCK_REGEX,
-				(_, key, body) => `\${(d.${key}) ? \`${body}\` : ''}`,
-			)
-			.replace(SIMPLE_VAR_REGEX, (_, key) => {
-				if (key === "note") return `\${${noteReplacementLogic}}`;
-				return `\${d.${key} ?? ''}`;
-			});
+		const parse = (input: string): Part[] => {
+			const parts: Part[] = [];
+			let i = 0;
+			const len = input.length;
 
-		const functionBody = `return \`${code}\`;`;
+			const pushLiteral = (text: string) => {
+				if (text) parts.push({ type: "literal", value: text });
+			};
 
-		try {
-			// eslint-disable-next-line no-new-func
-			return new Function("d", functionBody) as CompiledTemplate;
-		} catch (error) {
-			this.log.error("Failed to compile template.", error, {
-				template: functionBody,
-			});
-			return () => "Error: Template compilation failed.";
-		}
-	}
+			while (i < len) {
+				const open = input.indexOf("{{", i);
+				if (open === -1) {
+					pushLiteral(input.slice(i));
+					break;
+				}
+				// literal chunk before next tag
+				if (open > i) pushLiteral(input.slice(i, open));
 
-	/**
-	 * Determines if dividers should be automatically inserted between highlights.
-	 * Based on template analysis - returns false if template already contains dividers.
-	 * @returns Promise resolving to true if auto-insert is needed
-	 */
-	public async shouldAutoInsertDivider(): Promise<boolean> {
-		const { features } = await this.getCompiledTemplate();
-		return features.autoInsertDivider;
+				// Determine tag type
+				const isConditionalOpen = input.startsWith("{{#", open);
+				const isClose = input.startsWith("{{/", open);
+				const end = input.indexOf("}}", open + 2);
+				if (end === -1) {
+					// Unclosed tag, treat as literal
+					pushLiteral(input.slice(open));
+					break;
+				}
+
+				if (isConditionalOpen) {
+					const key = input.slice(open + 3, end).trim();
+					const after = end + 2;
+					const closeTag = `{{/${key}}}`;
+					const closeIdx = input.indexOf(closeTag, after);
+					if (closeIdx === -1) {
+						// No matching close; treat whole segment as literal
+						pushLiteral(input.slice(open, end + 2));
+						i = end + 2;
+						continue;
+					}
+					const inner = input.slice(after, closeIdx);
+					const innerParts = parse(inner);
+					parts.push({ type: "conditional", key, parts: innerParts });
+					i = closeIdx + closeTag.length;
+					continue;
+				}
+
+				if (isClose) {
+					// Unbalanced close; treat as literal and continue
+					pushLiteral(input.slice(open, end + 2));
+					i = end + 2;
+					continue;
+				}
+
+				// Simple variable {{var}}
+				const name = input.slice(open + 2, end).trim();
+				// Exclude helpers like # or /
+				if (name && !name.startsWith("#") && !name.startsWith("/")) {
+					parts.push({ type: "var", name });
+				} else {
+					// treat as literal if malformed
+					pushLiteral(input.slice(open, end + 2));
+				}
+				i = end + 2;
+			}
+			return parts;
+		};
+
+		const parts = parse(templateString);
+
+		const renderNote = (raw: unknown): string => {
+			const s = typeof raw === "string" ? raw : raw == null ? "" : String(raw);
+			if (!s) return "";
+			const lines = s.split("\n");
+			if (noteLineHasQuote) {
+				return lines.map((l, idx) => (idx === 0 ? l : "> " + l)).join("\n");
+			}
+			if (autoPrefixNotes) {
+				return lines.map((l) => "> " + l).join("\n");
+			}
+			return s;
+		};
+
+		const renderParts = (ps: Part[], d: TemplateData): string => {
+			let out = "";
+			for (const p of ps) {
+				switch (p.type) {
+					case "literal":
+						out += p.value;
+						break;
+					case "var": {
+						if (p.name === "note") {
+							out += renderNote((d as any).note);
+						} else {
+							const v = (d as any)[p.name];
+							out += v == null ? "" : String(v);
+						}
+						break;
+					}
+					case "conditional": {
+						const cond = (d as any)[p.key];
+						if (cond) out += renderParts(p.parts, d);
+						break;
+					}
+				}
+			}
+			return out;
+		};
+
+		return (d: TemplateData) => renderParts(parts, d);
 	}
 
 	/**
@@ -223,28 +290,18 @@ export class TemplateManager implements SettingsObserver {
 	 * @returns Validation result with errors, warnings, and suggestions
 	 */
 	public validateTemplate(content: string): TemplateValidationResult {
-		const result: TemplateValidationResult = {
-			isValid: true,
-			errors: [],
-			warnings: [],
-			suggestions: [],
-		};
-		const requiredVars = ["highlight", "pageno"];
-		const foundVars = new Set(
-			[...content.matchAll(SIMPLE_VAR_REGEX)].map((m) => m[1]),
-		);
-
-		requiredVars.forEach((v) => {
-			if (!foundVars.has(v)) {
-				result.errors.push(`Missing required variable: {{${v}}}`);
-				result.isValid = false;
-			}
-		});
-
+		const validator = new TemplateValidator();
+		const v = validator.validate(content);
+		// Preserve existing HTML warning behavior
 		if (/<[a-z][\s\S]*>/i.test(content)) {
-			result.warnings.push("HTML detected; may require custom CSS.");
+			v.warnings.push("HTML detected; may require custom CSS.");
 		}
-		return result;
+		return {
+			isValid: v.isValid,
+			errors: v.errors,
+			warnings: v.warnings,
+			suggestions: v.suggestions,
+		};
 	}
 
 	/**
@@ -302,24 +359,22 @@ export class TemplateManager implements SettingsObserver {
 	/**
 	 * Gets the compiled version of the current template.
 	 * Uses caching to avoid recompilation on repeated calls.
-	 * @returns Promise resolving to cached template with compiled function and features
+	 * @returns Promise resolving to the compiled template function
 	 */
-	public async getCompiledTemplate(): Promise<CachedTemplate> {
+	public async getCompiledTemplate(): Promise<CompiledTemplate> {
 		const { useCustomTemplate, selectedTemplate } =
 			this.plugin.settings.template;
 		const templateId = selectedTemplate || FALLBACK_TEMPLATE_ID;
 		const cacheKey = useCustomTemplate ? templateId : `builtin_${templateId}`;
 
-		let cached = this.compiledTemplateCache.get(cacheKey);
+		const cached = this.compiledTemplateCache.get(cacheKey);
 		if (cached) return cached;
 
 		const rawTemplate = await this.loadTemplate();
 		const compiledFn = this.compile(rawTemplate);
-		const features = this.analyseTemplateFeatures(rawTemplate);
 
-		cached = { fn: compiledFn, features };
-		this.compiledTemplateCache.set(cacheKey, cached);
-		return cached;
+		this.compiledTemplateCache.set(cacheKey, compiledFn);
+		return compiledFn;
 	}
 
 	/**
@@ -471,8 +526,10 @@ export class TemplateManager implements SettingsObserver {
 				result += " " + styledHighlights[i];
 			} else {
 				// A significant gap exists. Use a visual separator with paragraph breaks.
+				// Normalize any trailing breaks to avoid duplication.
+				result = result.replace(/<br><br>$/, "");
 				// The <br><br> ensures a blank line appears.
-				result += `<br><br>[...]<br><br>` + styledHighlights[i];
+				result += `[...]` + styledHighlights[i];
 			}
 		}
 
@@ -489,6 +546,6 @@ export class TemplateManager implements SettingsObserver {
 			.map((g) => g.note)
 			.filter((n): n is string => typeof n === "string" && n.trim() !== "");
 		if (!notes.length) return "";
-		return notes.join("\n\n---\n\n");
+		return notes.join("\n---\n");
 	}
 }

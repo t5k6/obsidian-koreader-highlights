@@ -103,19 +103,29 @@ export class ParallelIndexProcessor {
 		if (batch.length === 0) return;
 		try {
 			await this.db.execute((database) => {
-				const sql = `INSERT INTO book(key,id,title,authors,vault_path) VALUES(?,?,?,?,?)
-                     ON CONFLICT(key) DO UPDATE SET
-                        id=COALESCE(excluded.id, book.id),
-                        title=excluded.title,
-                        authors=excluded.authors,
-                        vault_path=excluded.vault_path;`;
-				const stmt = database.prepare(sql);
+				// Upsert conceptual books
+				const upsertBook = database.prepare(`
+					INSERT INTO book(key,id,title,authors) VALUES(?,?,?,?)
+					ON CONFLICT(key) DO UPDATE SET
+						id=COALESCE(excluded.id, book.id),
+						title=excluded.title,
+						authors=excluded.authors;
+				`);
+				// Upsert instances by unique path
+				const upsertInstance = database.prepare(`
+					INSERT INTO book_instances(book_key, vault_path) VALUES(?,?)
+					ON CONFLICT(vault_path) DO UPDATE SET book_key = excluded.book_key;
+				`);
 				try {
 					for (const { key, title, authors, vaultPath } of batch) {
-						stmt.run([key, null, title, authors, vaultPath ?? null]);
+						upsertBook.run([key, null, title, authors]);
+						if (vaultPath) {
+							upsertInstance.run([key, vaultPath]);
+						}
 					}
 				} finally {
-					stmt.free();
+					upsertBook.free();
+					upsertInstance.free();
 				}
 			}, true);
 		} catch (e) {

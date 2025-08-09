@@ -12,13 +12,13 @@ export function ensureNumber(value: unknown, defaultValue: number): number {
 		: defaultValue;
 }
 
-export function ensureNumberInRange<T extends number | undefined>(
+export function ensureNumberInRange(
 	value: unknown,
 	defaultValue: number,
-	range: readonly T[],
+	range: readonly number[],
 ): number {
 	const num = ensureNumber(value, defaultValue);
-	return (range as readonly number[]).includes(num) ? num : defaultValue;
+	return range.includes(num) ? num : defaultValue;
 }
 
 export function ensureStringArray(

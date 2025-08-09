@@ -1,6 +1,7 @@
 import {
 	type App,
 	type CachedMetadata,
+	type Debouncer,
 	debounce,
 	Notice,
 	type TAbstractFile,
@@ -8,41 +9,102 @@ import {
 	TFolder,
 } from "obsidian";
 import type { Database } from "sql.js";
+import { INDEX_DB_VERSION } from "src/constants";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
 import type {
 	DebouncedFn,
 	Disposable,
-	DocProps,
 	KoreaderHighlightImporterSettings,
 	SettingsObserver,
 } from "src/types";
 import { ConcurrentDatabase } from "src/utils/ConcurrentDatabase";
 import type { CacheManager } from "src/utils/cache/CacheManager";
 import type { LruCache } from "src/utils/cache/LruCache";
-import { normalizeFileNamePiece } from "src/utils/formatUtils";
-import type { CapabilityManager } from "../CapabilityManager";
+import { CapabilityManager } from "../CapabilityManager";
 import { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 import type { SqlJsManager } from "../SqlJsManager";
 import { ParallelIndexProcessor } from "./ParallelIndexProcessor";
 
 const INDEX_DB_SCHEMA = `
-PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
-PRAGMA synchronous = NORMAL;
 
+-- Conceptual books table (no file path)
 CREATE TABLE IF NOT EXISTS book(
   key        TEXT PRIMARY KEY,
   id         INTEGER,
   title      TEXT NOT NULL,
-  authors    TEXT,
-  vault_path TEXT
+  authors    TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_book_path ON book(vault_path);
+
+-- One row per physical file instance
+CREATE TABLE IF NOT EXISTS book_instances(
+  book_key   TEXT NOT NULL REFERENCES book(key) ON DELETE CASCADE,
+  vault_path TEXT NOT NULL,
+  PRIMARY KEY (book_key, vault_path)
+);
+
+-- Import source tracking (introduced in v2)
+CREATE TABLE IF NOT EXISTS import_source(
+  source_path TEXT PRIMARY KEY,
+  last_processed_mtime INTEGER NOT NULL,
+  last_processed_size INTEGER NOT NULL,
+  newest_annotation_ts TEXT,
+  last_success_ts INTEGER,
+  last_error TEXT,
+  book_key TEXT,
+  md5 TEXT
+);
+
+-- Ensure a file path cannot belong to two different books
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_book_instance_path ON book_instances(vault_path);
+CREATE INDEX IF NOT EXISTS idx_instances_book_key ON book_instances(book_key);
+CREATE INDEX IF NOT EXISTS idx_import_source_book_key ON import_source(book_key);
+CREATE INDEX IF NOT EXISTS idx_import_source_md5 ON import_source(md5);
+
+-- GC: when the last instance is removed, delete the conceptual book
+CREATE TRIGGER IF NOT EXISTS trg_gc_book AFTER DELETE ON book_instances
+BEGIN
+  DELETE FROM book
+  WHERE key = OLD.book_key
+    AND NOT EXISTS (SELECT 1 FROM book_instances WHERE book_key = OLD.book_key);
+END;
 `;
 
-const CURRENT_DB_VERSION = 2;
+const CURRENT_DB_VERSION = INDEX_DB_VERSION;
+
+function tableHasColumn(db: Database, table: string, column: string): boolean {
+	try {
+		const res = db.exec(`PRAGMA table_info(${table});`);
+		const rows = res?.[0]?.values ?? [];
+		for (const row of rows) {
+			// PRAGMA table_info columns: cid, name, type, notnull, dflt_value, pk
+			const name = row?.[1];
+			if (name === column) return true;
+		}
+	} catch {
+		// If PRAGMA fails, assume column does not exist
+	}
+	return false;
+}
+
+function tableExists(db: Database, tableName: string): boolean {
+	try {
+		const stmt = db.prepare(
+			'SELECT 1 FROM sqlite_master WHERE type="table" AND name=?',
+		);
+		try {
+			stmt.bind([tableName]);
+			const exists = stmt.step();
+			return exists;
+		} finally {
+			stmt.free();
+		}
+	} catch {
+		return false;
+	}
+}
 
 function getUserVersion(db: Database): number {
 	try {
@@ -60,7 +122,50 @@ function setUserVersion(db: Database, v: number): void {
 
 function migrateDb(db: Database): void {
 	const v = getUserVersion(db);
-	// Always ensure pragmas
+
+	// --- Remediation for databases incorrectly stamped >=2 but missing import_source ---
+	if (v >= 2 && !tableExists(db, "import_source")) {
+		try {
+			console.warn(
+				"KOReader Importer: Detected corrupt index (missing import_source table). Attempting repair.",
+			);
+			db.run("BEGIN IMMEDIATE;");
+			db.run(`
+		      CREATE TABLE IF NOT EXISTS import_source(
+		        source_path TEXT PRIMARY KEY,
+		        last_processed_mtime INTEGER NOT NULL,
+		        last_processed_size INTEGER NOT NULL,
+		        newest_annotation_ts TEXT,
+		        last_success_ts INTEGER,
+		        last_error TEXT,
+		        book_key TEXT,
+		        md5 TEXT
+		      );
+		    `);
+			db.run(
+				"CREATE INDEX IF NOT EXISTS idx_import_source_book_key ON import_source(book_key);",
+			);
+			db.run(
+				"CREATE INDEX IF NOT EXISTS idx_import_source_md5 ON import_source(md5);",
+			);
+			db.run("COMMIT;");
+			console.log("KOReader Importer: Index repair successful.");
+		} catch (e) {
+			db.run("ROLLBACK;");
+			console.error(
+				"KOReader Importer: CRITICAL - Failed to repair the index database.",
+				e,
+			);
+			throw e;
+		}
+	}
+
+	// Guard: If DB is already modern, do nothing.
+	if (v >= CURRENT_DB_VERSION) {
+		return;
+	}
+
+	// Always ensure pragmas for older DBs being upgraded
 	db.run("PRAGMA foreign_keys = ON;");
 	try {
 		db.run("PRAGMA journal_mode = WAL;");
@@ -105,6 +210,77 @@ function migrateDb(db: Database): void {
 				"CREATE INDEX IF NOT EXISTS idx_import_source_md5 ON import_source(md5);",
 			);
 			setUserVersion(db, 2);
+			db.run("COMMIT;");
+		} catch (e) {
+			db.run("ROLLBACK;");
+			throw e;
+		}
+	}
+
+	// v3: split book and book_instances, backfill, add constraints and GC
+	if (v < CURRENT_DB_VERSION) {
+		db.run("BEGIN IMMEDIATE;");
+		try {
+			// Create new conceptual table without path
+			db.run(`
+        CREATE TABLE IF NOT EXISTS book_new(
+          key        TEXT PRIMARY KEY,
+          id         INTEGER,
+          title      TEXT NOT NULL,
+          authors    TEXT
+        );
+      `);
+
+			// Instances table (one row per file)
+			db.run(`
+        CREATE TABLE IF NOT EXISTS book_instances(
+          book_key   TEXT NOT NULL REFERENCES book_new(key) ON DELETE CASCADE,
+          vault_path TEXT NOT NULL,
+          PRIMARY KEY (book_key, vault_path)
+        );
+      `);
+
+			db.run(
+				"CREATE UNIQUE INDEX IF NOT EXISTS uniq_book_instance_path ON book_instances(vault_path);",
+			);
+			db.run(
+				"CREATE INDEX IF NOT EXISTS idx_instances_book_key ON book_instances(book_key);",
+			);
+
+			// Backfill conceptual rows from old book table
+			db.run(
+				"INSERT OR IGNORE INTO book_new(key,id,title,authors) SELECT key,id,title,authors FROM book;",
+			);
+
+			// Backfill instances for non-null paths if legacy 'book.vault_path' exists; ignore dup paths
+			if (tableHasColumn(db, "book", "vault_path")) {
+				db.run(
+					"INSERT OR IGNORE INTO book_instances(book_key, vault_path) SELECT key, vault_path FROM book WHERE vault_path IS NOT NULL;",
+				);
+			}
+
+			// Drop legacy index if present
+			try {
+				db.run("DROP INDEX IF EXISTS idx_book_path;");
+			} catch {
+				/* ignore */
+			}
+
+			// Replace old book table with new
+			db.run("DROP TABLE book;");
+			db.run("ALTER TABLE book_new RENAME TO book;");
+
+			// GC trigger on instances delete
+			db.run(`
+        CREATE TRIGGER IF NOT EXISTS trg_gc_book AFTER DELETE ON book_instances
+        BEGIN
+          DELETE FROM book
+          WHERE key = OLD.book_key
+            AND NOT EXISTS (SELECT 1 FROM book_instances WHERE book_key = OLD.book_key);
+        END;
+      `);
+
+			setUserVersion(db, CURRENT_DB_VERSION);
 			db.run("COMMIT;");
 		} catch (e) {
 			db.run("ROLLBACK;");
@@ -180,20 +356,19 @@ interface DebouncedMetadataChangeHandler extends DebouncedFn {
 }
 
 export class LocalIndexService implements Disposable, SettingsObserver {
-	private settings: KoreaderHighlightImporterSettings;
-	private readonly log;
+	private settings!: KoreaderHighlightImporterSettings;
+	private readonly log!: ReturnType<LoggingService["scoped"]>;
 	private idxDb: Database | null = null;
 	private idxInitializing: Promise<void> | null = null;
 	private concurrentDb: ConcurrentDatabase | null = null;
 
-	private idxPath: string;
-	private pathCache: LruCache<string, string[]>;
-	private persistIndexDebounced: DebouncedFn;
-	private debouncedHandleMetadataChange: (
-		file: TFile,
-		data: string,
-		cache: CachedMetadata,
-	) => void;
+	private idxPath!: string;
+	private pathCache!: LruCache<string, string[]>;
+	private persistIndexDebounced!: Debouncer<[], void>;
+	private debouncedHandleMetadataChange!: Debouncer<
+		[TFile, string, CachedMetadata],
+		void
+	>;
 
 	// Degraded-mode capability
 	private indexState: "persistent" | "in_memory" | "unavailable" =
@@ -205,7 +380,75 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 	private rebuildProgress: { current: number; total: number } | null = null;
 	private processedDuringRebuild: Set<string> | null = null;
 	private isRebuildingFlag = false;
-	private readonly capabilities: CapabilityManager;
+
+	// Injected dependencies
+	private readonly plugin!: KoreaderImporterPlugin;
+	private readonly app!: App;
+	private readonly fsService!: FileSystemService;
+	private readonly cacheManager!: CacheManager;
+	private readonly sqlJsManager!: SqlJsManager;
+	private readonly loggingService!: LoggingService;
+	private readonly frontmatterService!: FrontmatterService;
+	private readonly capabilities!: CapabilityManager;
+
+	constructor(
+		plugin: KoreaderImporterPlugin,
+		app: App,
+		fsService: FileSystemService,
+		cacheManager: CacheManager,
+		sqlJsManager: SqlJsManager,
+		loggingService: LoggingService,
+		frontmatterService: FrontmatterService,
+		capabilities?: CapabilityManager,
+	) {
+		this.plugin = plugin;
+		this.app = app;
+		this.fsService = fsService;
+		this.cacheManager = cacheManager;
+		this.sqlJsManager = sqlJsManager;
+		this.loggingService = loggingService;
+		this.frontmatterService = frontmatterService;
+		// If not provided (e.g., older tests), construct a default CapabilityManager
+		this.capabilities =
+			capabilities ?? new CapabilityManager(app, fsService, loggingService);
+
+		this.log = this.loggingService.scoped("LocalIndexService");
+		this.settings = this.plugin.settings;
+
+		// Caches and paths
+		this.pathCache = this.cacheManager.createLru("db.path", 2000);
+		this.idxPath = this.fsService.joinPluginDataPath("index.db");
+
+		// Debounced helpers
+		this.persistIndexDebounced = debounce(
+			() => void this.flushIndex().catch(() => {}),
+			1500,
+			true,
+		);
+		this.debouncedHandleMetadataChange = debounce(
+			(file: TFile, data: string, cache: CachedMetadata) =>
+				void this._handleMetadataChange(file, data, cache),
+			400,
+			true,
+		);
+	}
+
+	public async initialize(): Promise<void> {
+		await this.ensureIndexReady();
+		this.registerVaultEvents();
+		if (this.indexState === "in_memory") {
+			// kick off async rebuild to speed up duplicate detection
+			void this.startBackgroundRebuild();
+		}
+	}
+
+	public isIndexPersistent(): boolean {
+		return this.indexState === "persistent";
+	}
+
+	private get isRebuilding(): boolean {
+		return this.isRebuildingFlag;
+	}
 
 	public getIndexState(): "persistent" | "in_memory" | "unavailable" {
 		return this.indexState;
@@ -283,49 +526,48 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		vaultPath?: string | null;
 	}): Promise<void> {
 		const db = await this.getConcurrentDb();
-		await db.execute((database) => {
-			database.run("BEGIN IMMEDIATE;");
-			try {
-				// Upsert per-source row
+		await db.writeTx((database) => {
+			// Upsert per-source row
+			database.run(
+				`INSERT INTO import_source(source_path,last_processed_mtime,last_processed_size,newest_annotation_ts,last_success_ts,last_error,book_key,md5)
+				 VALUES(?,?,?,?,?,?,?,?)
+				 ON CONFLICT(source_path) DO UPDATE SET
+				  last_processed_mtime=excluded.last_processed_mtime,
+				  last_processed_size=excluded.last_processed_size,
+				  newest_annotation_ts=excluded.newest_annotation_ts,
+				  last_success_ts=excluded.last_success_ts,
+				  last_error=NULL,
+				  book_key=COALESCE(excluded.book_key, import_source.book_key),
+				  md5=COALESCE(excluded.md5, import_source.md5)
+				 `,
+				[
+					params.path,
+					params.mtime,
+					params.size,
+					params.newestAnnotationTs ?? null,
+					Date.now(),
+					null,
+					params.bookKey ?? null,
+					params.md5 ?? null,
+				],
+			);
+
+			// Best-effort: ensure conceptual row then upsert instance mapping
+			if (params.vaultPath && params.bookKey) {
+				// Create a minimal book row if not exists
+				database.run(`INSERT OR IGNORE INTO book(key) VALUES (?)`, [
+					params.bookKey,
+				]);
+				// Upsert instance by path
 				database.run(
-					`INSERT INTO import_source(source_path,last_processed_mtime,last_processed_size,newest_annotation_ts,last_success_ts,last_error,book_key,md5)
-					 VALUES(?,?,?,?,?,?,?,?)
-					 ON CONFLICT(source_path) DO UPDATE SET
-					  last_processed_mtime=excluded.last_processed_mtime,
-					  last_processed_size=excluded.last_processed_size,
-					  newest_annotation_ts=excluded.newest_annotation_ts,
-					  last_success_ts=excluded.last_success_ts,
-					  last_error=NULL,
-					  book_key=COALESCE(excluded.book_key, import_source.book_key),
-					  md5=COALESCE(excluded.md5, import_source.md5)
-					 `,
-					[
-						params.path,
-						params.mtime,
-						params.size,
-						params.newestAnnotationTs ?? null,
-						Date.now(),
-						null,
-						params.bookKey ?? null,
-						params.md5 ?? null,
-					],
+					`INSERT INTO book_instances(book_key, vault_path) VALUES(?,?)
+					 ON CONFLICT(vault_path) DO UPDATE SET book_key = excluded.book_key`,
+					[params.bookKey, params.vaultPath],
 				);
-
-				// Optionally, update book.vault_path if provided and a book exists
-				if (params.vaultPath && params.bookKey) {
-					database.run(`UPDATE book SET vault_path = ? WHERE key = ?`, [
-						params.vaultPath,
-						params.bookKey,
-					]);
-				}
-
-				database.run("COMMIT;");
-				this.persistIndexDebounced();
-			} catch (e) {
-				database.run("ROLLBACK;");
-				throw e;
 			}
-		}, true);
+			return undefined;
+		});
+		this.persistIndexDebounced();
 	}
 
 	public async recordImportFailure(
@@ -333,34 +575,31 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		error: unknown,
 	): Promise<void> {
 		const db = await this.getConcurrentDb();
-		await db.execute((database) => {
-			database.run("BEGIN IMMEDIATE;");
-			try {
-				const message =
-					typeof error === "string"
-						? error
-						: ((error as any)?.message ?? JSON.stringify(error ?? "error"));
-				database.run(
-					`INSERT INTO import_source(source_path,last_processed_mtime,last_processed_size,last_error)
-					 VALUES(?,?,?,?)
-					 ON CONFLICT(source_path) DO UPDATE SET last_error = excluded.last_error, last_success_ts = NULL`,
-					[path, 0, 0, message],
-				);
-				database.run("COMMIT;");
-				this.persistIndexDebounced();
-			} catch (e) {
-				database.run("ROLLBACK;");
-				throw e;
-			}
-		}, true);
+		await db.writeTx((database) => {
+			const message =
+				typeof error === "string"
+					? error
+					: ((error as any)?.message ?? JSON.stringify(error ?? "error"));
+			database.run(
+				`INSERT INTO import_source(source_path,last_processed_mtime,last_processed_size,last_error)
+				 VALUES(?,?,?,?)
+				 ON CONFLICT(source_path) DO UPDATE SET last_error = excluded.last_error, last_success_ts = NULL`,
+				[path, 0, 0, message],
+			);
+			return undefined;
+		});
+		this.persistIndexDebounced();
 	}
 
 	public async deleteImportSource(path: string): Promise<void> {
 		const db = await this.getConcurrentDb();
-		await db.execute((database) => {
+		const changed = await db.writeTx((database) => {
 			database.run("DELETE FROM import_source WHERE source_path = ?", [path]);
-		}, true);
-		this.persistIndexDebounced();
+			return database.getRowsModified() > 0;
+		});
+		if (changed) {
+			this.persistIndexDebounced();
+		}
 	}
 
 	/**
@@ -368,131 +607,11 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 	 */
 	public async clearImportSource(): Promise<void> {
 		const db = await this.getConcurrentDb();
-		await db.execute((database) => {
+		await db.writeTx((database) => {
 			database.run("DELETE FROM import_source");
-		}, true);
+			return undefined;
+		});
 		this.persistIndexDebounced();
-	}
-	/** Whether a background rebuild is currently in progress */
-	public get isRebuilding(): boolean {
-		return this.isRebuildingFlag;
-	}
-	/** Allows UI to cancel a long background rebuild */
-	public cancelRebuild(): void {
-		this.rebuildAbortController?.abort();
-	}
-
-	/**
-	 * Proactive check for degraded mode. Shows a one-time Notice if index is not persistent.
-	 * Call this early in flows that depend on duplicate detection to inform the user.
-	 */
-	public warnIfDegradedMode(): void {
-		if (this.indexState !== "persistent") {
-			// CapabilityManager will surface user notices; we only log here
-			const anyPlugin = this.plugin as any;
-			if (!anyPlugin.__kohlWarnedDegraded) {
-				this.log.warn(
-					`Index state is "${this.indexState}". Operating in degraded scan mode.`,
-				);
-				anyPlugin.__kohlWarnedDegraded = true;
-			}
-		}
-	}
-
-	public isIndexPersistent(): boolean {
-		return this.indexState === "persistent";
-	}
-
-	constructor(
-		private plugin: KoreaderImporterPlugin,
-		private app: App,
-		private fsService: FileSystemService,
-		private cacheManager: CacheManager,
-		private sqlJsManager: SqlJsManager,
-		private readonly loggingService: LoggingService,
-		private readonly frontmatterService: FrontmatterService,
-		capabilities?: CapabilityManager,
-	) {
-		this.settings = plugin.settings;
-		this.log = this.loggingService.scoped("LocalIndexService");
-
-		// Backwards-compatible default CapabilityManager stub for tests
-		this.capabilities =
-			capabilities ??
-			({
-				ensure: async () => true,
-				reportOutcome: () => void 0,
-			} as unknown as CapabilityManager);
-
-		// Use a vault-relative, normalized path for cross-platform adapter compatibility
-		this.idxPath = this.fsService.joinPluginDataPath("highlight_index.sqlite");
-
-		this.pathCache = this.cacheManager.createLru("db.path", 500);
-		this.persistIndexDebounced = debounce(
-			() => {
-				if (this.isIndexPersistent() && this.idxDb) {
-					this.sqlJsManager.persistDatabase(this.idxPath);
-				}
-			},
-			5000,
-			false,
-		) as DebouncedFn;
-
-		// Debounced metadata change handler to avoid thrashing during edits
-		const debounced = debounce(
-			(file: TFile, data: string, cache: CachedMetadata) => {
-				void this._handleMetadataChange(file, data, cache);
-			},
-			1500,
-			false,
-		);
-		this.debouncedHandleMetadataChange = (
-			file: TFile,
-			data: string,
-			cache: CachedMetadata,
-		) => {
-			(
-				debounced as unknown as (
-					file: TFile,
-					data: string,
-					cache: CachedMetadata,
-				) => void
-			)(file, data, cache);
-		};
-
-		// Initialize index processor once DB is available (lazy via getter later if needed)
-	}
-
-	/* ------------------------------------------------------------------ */
-	/*                       ─── PUBLIC  API ───                          */
-	/* ------------------------------------------------------------------ */
-
-	public async initialize(): Promise<void> {
-		await this.ensureIndexReady();
-		this.registerVaultEvents();
-		this.log.info(`Service initialized. Index path: ${this.idxPath}`);
-		// Proactively inform user if we're not persistent
-		this.warnIfDegradedMode();
-
-		// If we're in-memory, proactively start a non-blocking background rebuild
-		// so future duplicate checks can be O(1) against the temporary index.
-		if (this.indexState === "in_memory" && !this.isRebuilding) {
-			this.startBackgroundRebuild().catch((e) => {
-				this.log.error("Failed to start rebuild", e);
-			});
-		}
-	}
-
-	/**
-	 * Generates a deterministic key from document properties.
-	 * Used for consistent book identification across imports.
-	 * @param props - Document properties containing title and authors
-	 * @returns Normalized key in format "author::title"
-	 */
-	public bookKeyFromDocProps(props: DocProps): string {
-		const authorSlug = normalizeFileNamePiece(props.authors).toLowerCase();
-		const titleSlug = normalizeFileNamePiece(props.title).toLowerCase();
-		return `${authorSlug}::${titleSlug}`;
 	}
 
 	/**
@@ -508,7 +627,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		const db = await this.getConcurrentDb();
 		return db.execute((database) => {
 			const stmt = database.prepare(
-				"SELECT vault_path FROM book WHERE key = ? AND vault_path IS NOT NULL",
+				"SELECT vault_path FROM book_instances WHERE book_key = ?",
 			);
 			const paths: string[] = [];
 			try {
@@ -542,17 +661,26 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		vaultPath?: string,
 	): Promise<void> {
 		const db = await this.getConcurrentDb();
-		await db.execute((database) => {
+		await db.writeTx((database) => {
+			// Upsert conceptual book
 			database.run(
-				`INSERT INTO book(key,id,title,authors,vault_path) VALUES(?,?,?,?,?)
-		               ON CONFLICT(key) DO UPDATE SET
-		                  id=COALESCE(excluded.id, book.id),
-		                  title=excluded.title,
-		                  authors=excluded.authors,
-		                  vault_path=excluded.vault_path;`,
-				[key, id, title, authors, vaultPath ?? null],
+				`INSERT INTO book(key,id,title,authors) VALUES(?,?,?,?)
+         ON CONFLICT(key) DO UPDATE SET
+           id=COALESCE(excluded.id, book.id),
+           title=excluded.title,
+           authors=excluded.authors`,
+				[key, id, title, authors],
 			);
-		}, true);
+			// Upsert instance if provided
+			if (vaultPath) {
+				database.run(
+					`INSERT INTO book_instances(book_key, vault_path) VALUES(?,?)
+           ON CONFLICT(vault_path) DO UPDATE SET book_key = excluded.book_key`,
+					[key, vaultPath],
+				);
+			}
+			return undefined;
+		});
 		this.pathCache.delete(key);
 		this.persistIndexDebounced();
 	}
@@ -563,6 +691,74 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		this.settings = newSettings;
 	}
 
+	/**
+	 * Look up the conceptual book key for a given vault file path.
+	 */
+	public async findKeyByVaultPath(vaultPath: string): Promise<string | null> {
+		const row = await this.queryOne<{ book_key: string }>(
+			"SELECT book_key FROM book_instances WHERE vault_path = ?",
+			[vaultPath],
+		);
+		return row?.book_key ?? null;
+	}
+
+	/**
+	 * Returns the most recently processed device metadata path for a given book.
+	 * The returned string is the stored source path with any leading drive/root trimmed,
+	 * suitable to be joined with the current mount point.
+	 */
+	public async latestSourceForBook(bookKey: string): Promise<string | null> {
+		const db = await this.getConcurrentDb();
+		const raw = await db.execute((database) => {
+			const stmt = database.prepare(
+				`SELECT source_path, newest_annotation_ts, last_success_ts, last_processed_mtime
+         FROM import_source
+         WHERE book_key = ? AND source_path IS NOT NULL
+         ORDER BY COALESCE(newest_annotation_ts, '') DESC,
+                  COALESCE(last_success_ts, 0) DESC,
+                  COALESCE(last_processed_mtime, 0) DESC
+         LIMIT 1`,
+			);
+			try {
+				stmt.bind([bookKey]);
+				if (!stmt.step()) return null as string | null;
+				const row = stmt.getAsObject();
+				return (row.source_path as string) ?? null;
+			} finally {
+				stmt.free();
+			}
+		});
+		if (!raw) return null;
+		// Normalize to be relative to mount root if an absolute path was stored
+		return this.stripRootFromDevicePath(raw);
+	}
+
+	/**
+	 * Strips a Windows drive (e.g., "E:\\") or leading slash from a stored device path
+	 * to make it relative to the mount root.
+	 */
+	private stripRootFromDevicePath(p: string): string {
+		// Windows drive like "E:\\" or "E:/"
+		const win = p.replace(/^[A-Za-z]:[\\/]+/, "");
+		if (win !== p) return win;
+		// POSIX root
+		return p.replace(/^\/+/, "");
+	}
+
+	// Centralized SQL helpers to reduce boilerplate
+	private async queryOne<T>(sql: string, params: any[]): Promise<T | null> {
+		const db = await this.getConcurrentDb();
+		return db.execute((database) => {
+			const stmt = database.prepare(sql);
+			try {
+				stmt.bind(params);
+				return stmt.step() ? (stmt.getAsObject() as T) : null;
+			} finally {
+				stmt.free();
+			}
+		});
+	}
+
 	private async ensureIndexReady(): Promise<void> {
 		if (this.idxDb) return;
 		if (this.idxInitializing) return this.idxInitializing;
@@ -570,7 +766,6 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		this.idxInitializing = (async () => {
 			// If idxPath is invalid (e.g., could not be determined), skip directly to in-memory mode.
 			if (!this.idxPath) {
-				// The check is now just for a valid path string.
 				this.log.info(
 					"Persistent index path not available. Initializing in-memory DB.",
 				);
@@ -586,22 +781,24 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 			if (!likely) {
 				await this.initializeInMemoryDb();
 				this.indexState = "in_memory";
+				this.idxInitializing = null;
 				return;
 			}
 
 			try {
-				// No need to ensure vault folder, as writeNodeFile will do it.
-				this.idxDb = await this.sqlJsManager.openDatabase(this.idxPath, {
+				// Open or create persistent DB
+				const db = await this.sqlJsManager.openDatabase(this.idxPath, {
 					schemaSql: INDEX_DB_SCHEMA,
 					validate: true,
 				});
+				this.idxDb = db;
 				// Run migrations and one-time backfill
-				migrateDb(this.idxDb);
-				if (getUserVersion(this.idxDb) >= 2) {
+				migrateDb(db);
+				if (getUserVersion(db) >= 2) {
 					await backfillImportIndexJsonIfPresent(
 						this.fsService,
 						this.app,
-						this.idxDb,
+						db,
 						this.loggingService,
 					);
 				}
@@ -614,7 +811,11 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 					"Persistent index unavailable; falling back to in-memory...",
 					error,
 				);
-				this.capabilities.reportOutcome("indexPersistenceLikely", false, error);
+				this.capabilities.reportOutcome(
+					"indexPersistenceLikely",
+					false,
+					error as any,
+				);
 				await this.initializeInMemoryDb();
 			} finally {
 				this.idxInitializing = null;
@@ -628,9 +829,11 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		try {
 			const memDb = await this.sqlJsManager.createInMemoryDatabase();
 			this.idxDb = memDb;
-			this.sqlJsManager.applySchema(this.idxDb, INDEX_DB_SCHEMA);
+			this.sqlJsManager.applySchema(memDb, INDEX_DB_SCHEMA);
+			// Stamp fresh in-memory DBs with the current schema version to avoid running upgrade migrations
+			memDb.run(`PRAGMA user_version = ${CURRENT_DB_VERSION};`);
 			// Ensure schema migrations are applied to in-memory DB as well
-			migrateDb(this.idxDb);
+			migrateDb(memDb);
 			this.indexState = "in_memory";
 			this.concurrentDb = new ConcurrentDatabase(
 				async () => {
@@ -640,7 +843,10 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 				undefined, // in-memory persistence handled separately
 			);
 		} catch (memErr) {
-			this.log.error("Failed to initialize in-memory index database.", memErr);
+			this.log.error(
+				"Failed to initialize in-memory index database.",
+				memErr as any,
+			);
 			this.idxDb = null;
 			this.concurrentDb = null;
 			this.indexState = "unavailable";
@@ -831,36 +1037,21 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		this.cacheManager.clear("db.path");
 
 		const db = await this.getConcurrentDb();
-		await db.execute((database) => {
-			database.run("BEGIN IMMEDIATE;");
-			try {
-				if (file instanceof TFolder) {
-					database.run(
-						`UPDATE book SET vault_path = REPLACE(vault_path, ?, ?) WHERE vault_path LIKE ?`,
-						[`${oldPath}/`, `${(file as TFolder).path}/`, `${oldPath}/%`],
-					);
-				} else if (file instanceof TFile) {
-					database.run(`UPDATE book SET vault_path = ? WHERE vault_path = ?`, [
-						(file as TFile).path,
-						oldPath,
-					]);
-				}
-
-				if (database.getRowsModified() > 0) {
-					database.run("COMMIT;");
-					this.persistIndexDebounced();
-				} else {
-					database.run("ROLLBACK;");
-				}
-			} catch (e) {
-				database.run("ROLLBACK;");
-				this.log.error(
-					`Transaction failed for handleRename: ${oldPath} -> ${(file as any)?.path}`,
-					e,
+		await db.writeTx((database) => {
+			if (file instanceof TFolder) {
+				database.run(
+					`UPDATE book_instances SET vault_path = REPLACE(vault_path, ?, ?) WHERE vault_path LIKE ?`,
+					[`${oldPath}/`, `${(file as TFolder).path}/`, `${oldPath}/%`],
 				);
-				throw e;
+			} else if (file instanceof TFile) {
+				database.run(
+					`UPDATE book_instances SET vault_path = ? WHERE vault_path = ?`,
+					[(file as TFile).path, oldPath],
+				);
 			}
-		}, true);
+			return undefined;
+		});
+		this.persistIndexDebounced();
 	}
 
 	private async handleDelete(file: TAbstractFile): Promise<void> {
@@ -868,37 +1059,23 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		const pathToDelete = file.path;
 
 		const db = await this.getConcurrentDb();
-		await db.execute((database) => {
-			database.run("BEGIN IMMEDIATE;");
-			try {
-				if (file instanceof TFolder) {
-					database.run(
-						`UPDATE book SET vault_path = NULL WHERE vault_path LIKE ?`,
-						[`${pathToDelete}/%`],
-					);
-				} else if (file instanceof TFile) {
-					database.run(
-						`UPDATE book SET vault_path = NULL WHERE vault_path = ?`,
-						[pathToDelete],
-					);
-				}
-
-				if (database.getRowsModified() > 0) {
-					database.run("COMMIT;");
-					this.persistIndexDebounced();
-				} else {
-					database.run("ROLLBACK;");
-				}
-			} catch (e) {
-				database.run("ROLLBACK;");
-				this.log.error(
-					`Transaction failed for handleDelete: ${pathToDelete}`,
-					e,
-				);
-				throw e;
+		const changed = await db.writeTx((database) => {
+			if (file instanceof TFolder) {
+				database.run(`DELETE FROM book_instances WHERE vault_path LIKE ?`, [
+					`${pathToDelete}/%`,
+				]);
+			} else if (file instanceof TFile) {
+				database.run(`DELETE FROM book_instances WHERE vault_path = ?`, [
+					pathToDelete,
+				]);
 			}
-		}, true);
+			return database.getRowsModified() > 0;
+		});
+		if (changed) {
+			this.persistIndexDebounced();
+		}
 	}
+
 	private async _handleMetadataChange(
 		file: TFile,
 		_data: string,
@@ -909,82 +1086,76 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 			if (!this.settings.highlightsFolder) return;
 			if (!file.path.startsWith(this.settings.highlightsFolder)) return;
 
-			const oldKey = await this.findKeyByVaultPath(file.path);
+			// Do async/expensive work outside the critical section
 			const metadata = await this.frontmatterService.extractMetadata(file);
 
-			if (!metadata) {
-				if (oldKey) {
-					this.log.info(
-						`Note ${file.path} lost identifying frontmatter. Removing from index.`,
-					);
-					await this.removePathFromIndex(file.path, oldKey);
-				}
-				return;
-			}
-
-			if (oldKey && oldKey !== metadata.key) {
-				this.log.info(
-					`Book key for ${file.path} changed from "${oldKey}" to "${metadata.key}". Updating index.`,
+			const db = await this.getConcurrentDb();
+			const result = await db.writeTx((database) => {
+				// Existing mapping for this path
+				let oldKey: string | null = null;
+				const sel = database.prepare(
+					"SELECT book_key FROM book_instances WHERE vault_path = ?",
 				);
-				await this.removePathFromIndex(file.path, oldKey);
-			}
+				try {
+					sel.bind([file.path]);
+					if (sel.step()) {
+						const row = sel.getAsObject();
+						oldKey = (row.book_key as string) ?? null;
+					}
+				} finally {
+					sel.free();
+				}
 
-			await this.upsertBook(
-				null,
-				metadata.key,
-				metadata.title,
-				metadata.authors,
-				file.path,
-			);
+				if (!metadata) {
+					if (oldKey) {
+						database.run("DELETE FROM book_instances WHERE vault_path = ?", [
+							file.path,
+						]);
+						return { changed: true, oldKey, newKey: null as string | null };
+					}
+					return {
+						changed: false,
+						oldKey: null as string | null,
+						newKey: null as string | null,
+					};
+				}
+
+				// Upsert conceptual book
+				database.run(
+					`INSERT INTO book(key,id,title,authors) VALUES(?,?,?,?)
+					 ON CONFLICT(key) DO UPDATE SET
+					   id=COALESCE(excluded.id, book.id),
+					   title=excluded.title,
+					   authors=excluded.authors`,
+					[metadata.key, null, metadata.title, metadata.authors],
+				);
+
+				if (oldKey && oldKey !== metadata.key) {
+					// Reassign mapping
+					database.run(
+						"UPDATE book_instances SET book_key = ? WHERE vault_path = ?",
+						[metadata.key, file.path],
+					);
+				} else {
+					// Ensure instance exists and points to new key
+					database.run(
+						`INSERT INTO book_instances(book_key, vault_path) VALUES(?,?)
+						 ON CONFLICT(vault_path) DO UPDATE SET book_key = excluded.book_key`,
+						[metadata.key, file.path],
+					);
+				}
+
+				return { changed: true, oldKey, newKey: metadata.key as string };
+			});
+
+			if (result.changed) {
+				if (result.oldKey) this.pathCache.delete(result.oldKey);
+				if (result.newKey) this.pathCache.delete(result.newKey);
+				this.persistIndexDebounced();
+			}
 		} catch (e) {
 			this.log.warn("Failed handling metadata change", e);
 		}
-	}
-
-	private async findKeyByVaultPath(vaultPath: string): Promise<string | null> {
-		const db = await this.getConcurrentDb();
-		return db.execute((database) => {
-			const stmt = database.prepare(
-				"SELECT key FROM book WHERE vault_path = ?",
-			);
-			try {
-				stmt.bind([vaultPath]);
-				return stmt.step() ? (stmt.getAsObject().key as string) : null;
-			} finally {
-				stmt.free();
-			}
-		});
-	}
-
-	private async removePathFromIndex(
-		vaultPath: string,
-		oldKey: string,
-	): Promise<void> {
-		const db = await this.getConcurrentDb();
-		await db.execute((database) => {
-			database.run("BEGIN IMMEDIATE;");
-			try {
-				database.run(`UPDATE book SET vault_path = NULL WHERE vault_path = ?`, [
-					vaultPath,
-				]);
-				const modified = database.getRowsModified();
-				if (modified > 0) {
-					database.run("COMMIT;");
-					// Only update caches/persistence after a successful commit
-					this.pathCache.delete(oldKey);
-					this.persistIndexDebounced();
-				} else {
-					database.run("ROLLBACK;");
-				}
-			} catch (e) {
-				database.run("ROLLBACK;");
-				this.log.error(
-					`Transaction failed for removePathFromIndex: ${vaultPath}`,
-					e,
-				);
-				throw e;
-			}
-		}, true);
 	}
 
 	private async getConcurrentDb(): Promise<ConcurrentDatabase> {

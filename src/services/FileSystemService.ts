@@ -315,6 +315,42 @@ export class FileSystemService {
 		return this.vault.adapter.writeBinary(normalizedPath, data);
 	}
 
+	/**
+	 * Atomically write a binary file in the vault by writing to a temporary file
+	 * and then renaming it over the target. Falls back to remove-then-rename
+	 * when the adapter does not support rename-over-existing.
+	 */
+	public async writeVaultBinaryAtomic(
+		vaultPath: string,
+		data: ArrayBuffer,
+	): Promise<void> {
+		const normalizedPath = FileSystemService.toVaultPath(vaultPath);
+		const parentDir = FileSystemService.getVaultParent(normalizedPath);
+		await this.ensureVaultFolder(parentDir);
+
+		const tempPath = `${normalizedPath}.__tmp__${Date.now()}`;
+		await this.vault.adapter.writeBinary(tempPath, data);
+
+		try {
+			await this.vault.adapter.rename(tempPath, normalizedPath);
+		} catch (renameError) {
+			console.warn(
+				`Atomic rename failed for ${normalizedPath}, falling back to remove-then-rename.`,
+			);
+			try {
+				await this.vault.adapter.remove(normalizedPath);
+			} catch (removeError) {
+				if (!(removeError as any)?.message?.includes("no such file")) {
+					console.error(
+						`Failed to remove target for atomic write fallback: ${normalizedPath}`,
+						removeError,
+					);
+				}
+			}
+			await this.vault.adapter.rename(tempPath, normalizedPath);
+		}
+	}
+
 	/* ------------------------------------------------------------------ */
 	/*                         AUTO-ROUTING HELPERS                        */
 	/* ------------------------------------------------------------------ */
@@ -323,10 +359,15 @@ export class FileSystemService {
 	 * Read binary content from either an absolute system path (Node fs)
 	 * or a vault-relative path (Vault adapter), based on the input path.
 	 */
-	async readBinaryAuto(filePath: string): Promise<ArrayBuffer> {
-		return path.isAbsolute(filePath)
-			? ((await this.readNodeFile(filePath, true)).buffer as ArrayBuffer)
-			: await this.readVaultBinary(filePath);
+	async readBinaryAuto(filePath: string): Promise<Uint8Array> {
+		if (path.isAbsolute(filePath)) {
+			// Node returns a Buffer (subclass of Uint8Array) with correct length
+			return (await this.readNodeFile(filePath, true)) as Uint8Array;
+		} else {
+			// Ensure we create a view with the exact byteLength
+			const ab = await this.readVaultBinary(filePath);
+			return new Uint8Array(ab);
+		}
 	}
 
 	/**
@@ -337,7 +378,10 @@ export class FileSystemService {
 		if (path.isAbsolute(filePath)) {
 			await this.writeNodeFile(filePath, data);
 		} else {
-			await this.writeVaultBinary(filePath, data.buffer as ArrayBuffer);
+			// Ensure we pass a true ArrayBuffer (not SharedArrayBuffer) to the adapter
+			// and only the valid region of the view. Creating a sliced copy guarantees ArrayBuffer.
+			const arrayBuffer: ArrayBuffer = data.slice().buffer;
+			await this.writeVaultBinary(filePath, arrayBuffer);
 		}
 	}
 
@@ -760,6 +804,25 @@ export class FileSystemService {
 		} catch (e) {
 			return false;
 		}
+	}
+
+	/**
+	 * Write-and-delete probe helper. Writes an empty string to the given
+	 * vault-relative path and immediately removes it. Returns true on success,
+	 * false on failure. Deletion is best-effort and does not affect success.
+	 */
+	public async writeProbe(vaultPath: string): Promise<boolean> {
+		const normalized = FileSystemService.toVaultPath(vaultPath);
+		try {
+			await this.vault.adapter.write(normalized, "");
+		} catch {
+			return false;
+		}
+		// Best-effort cleanup; ignore failures
+		try {
+			await this.vault.adapter.remove(normalized);
+		} catch {}
+		return true;
 	}
 
 	/* Recursively mkdir using the adapter so it also works for the hidden

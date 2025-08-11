@@ -284,7 +284,7 @@ export class SDRFinder implements SettingsObserver {
 			}
 		} else if (platform() === "win32") {
 			for (const letter of "DEFGHIJKLMNOPQRSTUVWXYZ") {
-				const root = `${letter}:`;
+				const root = `${letter}:\\`;
 				if (
 					await this.fs.nodeFileExists(path.join(root, "KoboReader.sqlite"))
 				) {

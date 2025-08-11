@@ -197,6 +197,14 @@ export interface DuplicateMatch {
 	canMergeSafely: boolean;
 }
 
+// Duplicate scan confidence and standardized result used by the pipeline
+export type ScanConfidence = "full" | "partial";
+
+export interface DuplicateScanResult {
+	confidence: ScanConfidence;
+	match: DuplicateMatch | null;
+}
+
 export interface DuplicateHandlingSession {
 	applyToAll: boolean;
 	choice: DuplicateChoice | null;
@@ -315,3 +323,28 @@ export interface BookMetadata {
 export interface FileMetadataExtractor {
 	extractMetadata(file: TFile): Promise<BookMetadata | null>;
 }
+
+// --- File Operation Result Types ---
+
+export type FileOperationResult =
+	| { success: true; file: TFile }
+	| {
+			success: false;
+			reason: "user_skipped" | "collision" | "error";
+			error?: Error;
+	  };
+
+// --- Persisted Plugin Data Shape ---
+
+export interface PluginData {
+	/** Increment when the shape of `settings` changes. */
+	schemaVersion: number;
+	/** User settings (validated/canonicalized). */
+	settings: KoreaderHighlightImporterSettings;
+	/** Ledger of idempotent migrations applied. */
+	appliedMigrations: string[];
+	/** Last plugin version that successfully ran migrations (diagnostics). */
+	lastPluginMigratedTo?: string;
+}
+
+export const CURRENT_SCHEMA_VERSION = 1;

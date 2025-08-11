@@ -171,7 +171,7 @@ export class FrontmatterService implements FileMetadataExtractor {
 					await handle.close();
 				}
 			}
-		} catch (e) {
+		} catch (_e) {
 			// Fall through to full read on any failure
 			// Avoid noisy logs; this is a best-effort optimization
 		}

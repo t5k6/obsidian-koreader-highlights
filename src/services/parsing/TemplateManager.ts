@@ -25,13 +25,17 @@ export const FALLBACK_TEMPLATE_ID = "default";
 const DARK_THEME_CLASS = "theme-dark";
 
 const NOTE_LINE_REGEX = /^\s*>\s*/;
-const CONDITIONAL_BLOCK_REGEX = /{{#(\w+)}}(.*?)({{\/\1}})/gs;
-const SIMPLE_VAR_REGEX = /\{\{((?!#|\/)[\w]+)\}\}/g;
 const TEMPLATE_FRONTMATTER_REGEX = /^---.*?---\s*/s;
 /** Injected by esbuild.define (see esbuild.config.js) */
 declare const KOREADER_BUILTIN_TEMPLATES: string;
 
 export type CompiledTemplate = (data: TemplateData) => string;
+type TemplateToken =
+	| { type: "text"; value: string }
+	| { type: "var"; key: string }
+	| { type: "cond"; key: string; body: TemplateToken[] };
+
+const MAX_TEMPLATE_NESTING = 20;
 
 export interface TemplateValidationResult {
 	isValid: boolean;
@@ -118,6 +122,82 @@ export class TemplateManager implements SettingsObserver {
 	}
 
 	/**
+	 * Tokenizes a template string into a sequence of tokens without executing code.
+	 * Supports text, variables {{var}}, and simple conditionals {{#key}}...{{/key}}.
+	 * Recursion depth is limited to prevent pathological nesting.
+	 */
+	private tokenizeTemplate(
+		template: string,
+		depth: number = 0,
+	): TemplateToken[] {
+		if (depth > MAX_TEMPLATE_NESTING) {
+			// Exceeded nesting; treat the whole string as text to avoid stack/DoS
+			return [{ type: "text", value: template }];
+		}
+
+		const tokens: TemplateToken[] = [];
+		let i = 0;
+		const len = template.length;
+
+		const pushText = (text: string) => {
+			if (text) tokens.push({ type: "text", value: text });
+		};
+
+		while (i < len) {
+			const open = template.indexOf("{{", i);
+			if (open === -1) {
+				pushText(template.slice(i));
+				break;
+			}
+			if (open > i) pushText(template.slice(i, open));
+
+			const isCondOpen = template.startsWith("{{#", open);
+			const isClose = template.startsWith("{{/", open);
+			const end = template.indexOf("}}", open + 2);
+			if (end === -1) {
+				// Unclosed tag: treat remainder as text
+				pushText(template.slice(open));
+				break;
+			}
+
+			if (isCondOpen) {
+				const key = template.slice(open + 3, end).trim();
+				const after = end + 2;
+				const closeTag = `{{/${key}}}`;
+				const closeIdx = template.indexOf(closeTag, after);
+				if (closeIdx === -1) {
+					// No closing tag; treat as text
+					pushText(template.slice(open, end + 2));
+					i = end + 2;
+					continue;
+				}
+				const inner = template.slice(after, closeIdx);
+				const body = this.tokenizeTemplate(inner, depth + 1);
+				tokens.push({ type: "cond", key, body });
+				i = closeIdx + closeTag.length;
+				continue;
+			}
+
+			if (isClose) {
+				// Unbalanced close; treat literally
+				pushText(template.slice(open, end + 2));
+				i = end + 2;
+				continue;
+			}
+
+			const name = template.slice(open + 2, end).trim();
+			if (name && !name.startsWith("#") && !name.startsWith("/")) {
+				tokens.push({ type: "var", key: name });
+			} else {
+				pushText(template.slice(open, end + 2));
+			}
+			i = end + 2;
+		}
+
+		return tokens;
+	}
+
+	/**
 	 * Compiles a template string into an executable function.
 	 * Handles variable substitution and conditional blocks.
 	 * @param templateString - The raw template string
@@ -132,79 +212,7 @@ export class TemplateManager implements SettingsObserver {
 		const userHandlesPrefix = noteLines.some((l) => NOTE_LINE_REGEX.test(l));
 		const autoPrefixNotes = !userHandlesPrefix;
 
-		type Part =
-			| { type: "literal"; value: string }
-			| { type: "var"; name: string }
-			| { type: "conditional"; key: string; parts: Part[] };
-
-		const parse = (input: string): Part[] => {
-			const parts: Part[] = [];
-			let i = 0;
-			const len = input.length;
-
-			const pushLiteral = (text: string) => {
-				if (text) parts.push({ type: "literal", value: text });
-			};
-
-			while (i < len) {
-				const open = input.indexOf("{{", i);
-				if (open === -1) {
-					pushLiteral(input.slice(i));
-					break;
-				}
-				// literal chunk before next tag
-				if (open > i) pushLiteral(input.slice(i, open));
-
-				// Determine tag type
-				const isConditionalOpen = input.startsWith("{{#", open);
-				const isClose = input.startsWith("{{/", open);
-				const end = input.indexOf("}}", open + 2);
-				if (end === -1) {
-					// Unclosed tag, treat as literal
-					pushLiteral(input.slice(open));
-					break;
-				}
-
-				if (isConditionalOpen) {
-					const key = input.slice(open + 3, end).trim();
-					const after = end + 2;
-					const closeTag = `{{/${key}}}`;
-					const closeIdx = input.indexOf(closeTag, after);
-					if (closeIdx === -1) {
-						// No matching close; treat whole segment as literal
-						pushLiteral(input.slice(open, end + 2));
-						i = end + 2;
-						continue;
-					}
-					const inner = input.slice(after, closeIdx);
-					const innerParts = parse(inner);
-					parts.push({ type: "conditional", key, parts: innerParts });
-					i = closeIdx + closeTag.length;
-					continue;
-				}
-
-				if (isClose) {
-					// Unbalanced close; treat as literal and continue
-					pushLiteral(input.slice(open, end + 2));
-					i = end + 2;
-					continue;
-				}
-
-				// Simple variable {{var}}
-				const name = input.slice(open + 2, end).trim();
-				// Exclude helpers like # or /
-				if (name && !name.startsWith("#") && !name.startsWith("/")) {
-					parts.push({ type: "var", name });
-				} else {
-					// treat as literal if malformed
-					pushLiteral(input.slice(open, end + 2));
-				}
-				i = end + 2;
-			}
-			return parts;
-		};
-
-		const parts = parse(templateString);
+		const tokens = this.tokenizeTemplate(templateString);
 
 		const renderNote = (raw: unknown): string => {
 			const s = typeof raw === "string" ? raw : raw == null ? "" : String(raw);
@@ -219,33 +227,27 @@ export class TemplateManager implements SettingsObserver {
 			return s;
 		};
 
-		const renderParts = (ps: Part[], d: TemplateData): string => {
+		const renderTokens = (ts: TemplateToken[], d: TemplateData): string => {
 			let out = "";
-			for (const p of ps) {
-				switch (p.type) {
-					case "literal":
-						out += p.value;
-						break;
-					case "var": {
-						if (p.name === "note") {
-							out += renderNote((d as any).note);
-						} else {
-							const v = (d as any)[p.name];
-							out += v == null ? "" : String(v);
-						}
-						break;
+			for (const t of ts) {
+				if (t.type === "text") {
+					out += t.value;
+				} else if (t.type === "var") {
+					if (t.key === "note") {
+						out += renderNote((d as any).note);
+					} else {
+						const v = (d as any)[t.key];
+						out += v == null ? "" : String(v);
 					}
-					case "conditional": {
-						const cond = (d as any)[p.key];
-						if (cond) out += renderParts(p.parts, d);
-						break;
-					}
+				} else if (t.type === "cond") {
+					const cond = (d as any)[t.key];
+					if (cond) out += renderTokens(t.body, d);
 				}
 			}
 			return out;
 		};
 
-		return (d: TemplateData) => renderParts(parts, d);
+		return (d: TemplateData) => renderTokens(tokens, d);
 	}
 
 	/**
@@ -444,6 +446,19 @@ export class TemplateManager implements SettingsObserver {
 					try {
 						await this.vault.create(filePath, fileContent);
 					} catch (writeError) {
+						// Gracefully handle races where the file was created by another process
+						// between our existence check and the create() call.
+						const code = (writeError as NodeJS.ErrnoException)?.code;
+						if (
+							code === "EEXIST" ||
+							(writeError instanceof Error &&
+								/already exists/i.test(writeError.message))
+						) {
+							this.log.info(
+								`Template file already exists (race handled): ${filePath}`,
+							);
+							return; // Skip logging as error
+						}
 						this.log.error(
 							`Failed to write template file ${filePath}`,
 							writeError,

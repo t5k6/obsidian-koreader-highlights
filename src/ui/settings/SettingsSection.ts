@@ -4,7 +4,6 @@ import type { DebouncedFn } from "src/types";
 
 export abstract class SettingsSection extends Component {
 	protected app: App;
-	private contentContainer: HTMLElement | null = null;
 
 	constructor(
 		protected plugin: KoreaderImporterPlugin,

@@ -5,7 +5,11 @@ import {
 	TFolder,
 	type Vault,
 } from "obsidian";
+import type { FileSystemService } from "src/services/FileSystemService";
 import type { LoggingService } from "src/services/LoggingService";
+import type { PluginData } from "src/types";
+import type { PluginDataStore } from "./PluginDataStore";
+import { normalizeSettings } from "./settingsSchema";
 
 // --- Helper Functions ---
 
@@ -39,74 +43,104 @@ function cmpVer(a: string, b: string): number {
 
 // --- Migration Manager ---
 
-interface PluginData {
-	lastMigratedTo?: string; // undefined on first install
-}
-
-type MigrationFn = () => Promise<void>;
+type MigrationFn = (ctx: {
+	vault: Vault;
+	fs: FileSystemService;
+	log: LoggingService;
+	data: PluginData;
+}) => Promise<PluginData>;
 
 export class MigrationManager {
 	private readonly log;
-	private lastDone = "0.0.0";
-	private vault: Vault;
-	private migrations: Record<string, MigrationFn>;
+	private readonly migrations: Record<string, MigrationFn>;
 
 	constructor(
-		private plugin: Plugin,
+		private vault: Vault,
+		private fs: FileSystemService,
 		private loggingService: LoggingService,
+		// Optionally provided for diagnostics; if available, stored on data.lastPluginMigratedTo
+		private pluginVersion?: string,
 	) {
-		this.vault = this.plugin.app.vault;
 		this.log = this.loggingService.scoped("MigrationManager");
-		// Define migrations here, binding them to the class instance
-		// IMPORTANT: Use the version where the migration was INTRODUCED.
-		// Do NOT bump these keys on every release; only add new entries when new migrations are added.
 		this.migrations = {
-			"1.2.0": this.cleanupOldLogFiles.bind(this),
-			"1.3.0": this.cleanupLegacyUserData.bind(this),
-			// "1.3.0": this.anotherMigration.bind(this),
+			"2024-12-clean-legacy-logs": async ({ vault, log, data }) => {
+				await this.cleanupOldLogFiles(vault, log);
+				return data;
+			},
+			"2025-01-detox-hidden-folders": async ({ data }) => {
+				// Placeholder for a future idempotent migration that may adjust settings paths.
+				return data;
+			},
+			"1.3.0": async ({ vault, log, data }) => {
+				await this.cleanupLegacyUserData(vault, log);
+				return data;
+			},
 		};
 	}
 
-	public async run(): Promise<void> {
-		const data: PluginData = (await this.plugin.loadData()) ?? {};
-		this.lastDone = data.lastMigratedTo ?? "0.0.0";
-
-		const current = this.plugin.manifest.version;
-
-		const migrationVersions = Object.keys(this.migrations).sort(cmpVer);
-
-		for (const version of migrationVersions) {
-			if (
-				cmpVer(version, this.lastDone) === 1 && // version > lastDone
-				cmpVer(version, current) <= 0 // version <= current
-			) {
-				this.log.info(`Running migration for version -> ${version}`);
-				try {
-					// eslint-disable-next-line no-await-in-loop
-					await this.migrations[version]();
-					this.lastDone = version; // Mark as done only on success
-				} catch (error) {
-					this.log.error(
-						`Migration for ${version} failed. Halting further migrations.`,
-						error,
-					);
-					break; // Stop migrations if one fails
-				}
+	public async runAll(data: PluginData): Promise<PluginData> {
+		let out = { ...data };
+		for (const [id, fn] of Object.entries(this.migrations)) {
+			if (out.appliedMigrations.includes(id)) continue;
+			try {
+				this.log.info(`Running migration: ${id}`);
+				// eslint-disable-next-line no-await-in-loop
+				out = await fn({
+					vault: this.vault,
+					fs: this.fs,
+					log: this.loggingService,
+					data: out,
+				});
+				out = {
+					...out,
+					appliedMigrations: [...out.appliedMigrations, id],
+					lastPluginMigratedTo: this.pluginVersion ?? out.lastPluginMigratedTo,
+				};
+			} catch (e) {
+				this.log.error(`Migration failed: ${id}. Will not mark as applied.`, e);
+				break;
 			}
 		}
+		return out;
+	}
 
-		data.lastMigratedTo = this.lastDone;
-		await this.plugin.saveData(data);
+	/**
+	 * Migrates legacy settings stored via plugin.loadData() to the unified data store.
+	 * Safe to run multiple times; no-op if no legacy data exists.
+	 */
+	public async migrateLegacySettingsIfNeeded(
+		plugin: Plugin,
+		dataStore: PluginDataStore,
+	): Promise<void> {
+		try {
+			const legacyRaw = await plugin.loadData();
+			if (!legacyRaw || Object.keys(legacyRaw).length === 0) return;
+
+			this.log.info("Migrating legacy settings to new data store.");
+			await dataStore.updateSettings((current) =>
+				normalizeSettings({ ...current, ...legacyRaw }),
+			);
+			await plugin.saveData(null as any);
+			this.log.info("Legacy settings migration complete.");
+		} catch (e) {
+			this.log.warn(
+				"Legacy settings migration failed; proceeding without it.",
+				e,
+			);
+		}
 	}
 
 	/* ---------------- Migration Implementations ------------------- */
 
-	private async cleanupOldLogFiles(): Promise<void> {
+	private async cleanupOldLogFiles(
+		vault: Vault,
+		log: LoggingService,
+	): Promise<void> {
 		const LEGACY_DIRS = ["koreader/logs", "koreader_importer_logs"];
 		let removed = 0;
 
 		for (const dir of LEGACY_DIRS) {
-			const folder = this.vault.getAbstractFileByPath(dir);
+			const folder = vault.getAbstractFileByPath(dir);
 			if (!(folder instanceof TFolder)) continue;
 
 			const victims = folder.children.filter(
@@ -117,16 +151,16 @@ export class MigrationManager {
 			await Promise.all(
 				victims.map(async (f) => {
 					try {
-						await this.vault.delete(f);
+						await vault.delete(f);
 						removed++;
 					} catch (e) {
-						this.log.warn(`Could not delete old log ${f.path}`, e);
+						log.warn(`Could not delete old log ${f.path}`, e);
 					}
 				}),
 			);
 		}
 		if (removed > 0) {
-			this.log.info(`Removed ${removed} old log files during 1.2.0 migration.`);
+			log.info(`Removed ${removed} old log files during migration.`);
 		}
 	}
 
@@ -136,12 +170,23 @@ export class MigrationManager {
 	 * - Deletes any legacy index sqlite files except the current highlight_index.sqlite.
 	 * - Deletes probe artifacts.
 	 */
-	private async cleanupLegacyUserData(): Promise<void> {
+	private async cleanupLegacyUserData(
+		vault: Vault,
+		log: LoggingService,
+	): Promise<void> {
 		try {
-			const pluginDataDir = normalizePath(
-				`${this.vault.configDir}/plugins/${this.plugin.manifest.id}`,
-			);
-			const adapter = this.vault.adapter;
+			const adapter = (vault as any).adapter as import("obsidian").DataAdapter;
+			// Prefer FileSystemService for the correct plugin data directory.
+			const pluginDataDir = normalizePath(this.fs.getPluginDataDir());
+
+			// Determine the current database and its journal files dynamically.
+			const currentDbPath = this.fs.joinPluginDataPath("index.db");
+			const currentDbName = currentDbPath.split("/").pop()!;
+			const currentDbJournalFiles = new Set<string>([
+				`${currentDbName}-shm`,
+				`${currentDbName}-wal`,
+			]);
+
 			const exists = await adapter.exists(pluginDataDir);
 			if (!exists) return;
 
@@ -150,13 +195,14 @@ export class MigrationManager {
 
 			const isLegacySqlite = (p: string): boolean => {
 				const name = p.split("/").pop() ?? p;
-				if (name === "highlight_index.sqlite") return false; // keep current DB
-				if (
-					name === "highlight_index.sqlite-shm" ||
-					name === "highlight_index.sqlite-wal"
-				)
-					return false; // sqlite artifacts for current
-				return /index.*\.sqlite(\.(bak|old))?$/i.test(name);
+				// Keep the current DB and its journals
+				if (name === currentDbName) return false;
+				if (currentDbJournalFiles.has(name)) return false;
+				// Legacy patterns to delete (old DB names and backups)
+				return (
+					/index.*\.sqlite(\.(bak|old))?$/i.test(name) ||
+					name === "highlight_index.sqlite"
+				);
 			};
 
 			for (const f of files) {
@@ -165,12 +211,13 @@ export class MigrationManager {
 					name === "import-index.json" ||
 					name === "import-index.json.bak" ||
 					name === "highlight_index.sqlite.__probe__" ||
+					name === "index.db.__probe__" ||
 					isLegacySqlite(f)
 				) {
 					try {
 						await adapter.remove(f);
 						removed++;
-					} catch (e) {
+					} catch (_e) {
 						this.log.warn(`Could not delete legacy user data file: ${f}`);
 					}
 				}
@@ -179,8 +226,8 @@ export class MigrationManager {
 			if (removed > 0) {
 				this.log.info(`Removed ${removed} legacy files from plugin data dir.`);
 			}
-		} catch (e) {
-			this.log.warn("cleanupLegacyUserData failed", e);
+		} catch (_e) {
+			this.log.warn("cleanupLegacyUserData failed", _e);
 		}
 	}
 }

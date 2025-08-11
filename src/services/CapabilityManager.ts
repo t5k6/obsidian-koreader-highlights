@@ -49,9 +49,9 @@ export class CapabilityManager {
 	private readonly MAX_BACKOFF_TTL = 30 * 60 * 1000; // cap at 30 minutes
 
 	constructor(
-		private app: App,
+		_app: App,
 		private fs: FileSystemService,
-		private logging: LoggingService,
+		logging: LoggingService,
 	) {
 		this.log = logging.scoped("CapabilityManager");
 
@@ -246,7 +246,7 @@ export class CapabilityManager {
 				default:
 					return false;
 			}
-		} catch (e) {
+		} catch (_e) {
 			// Defensive: treat unexpected probe errors as unavailable.
 			return false;
 		}

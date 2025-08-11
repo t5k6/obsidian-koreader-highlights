@@ -31,10 +31,11 @@ export class DuplicateHandler {
 			app: App,
 			match: DuplicateMatch,
 			message: string,
+			session: DuplicateHandlingSession,
 		) => IDuplicateHandlingModal,
 		private mergeService: MergeService,
 		private snapshotManager: SnapshotManager,
-		private fsService: FileSystemService,
+		_fsService: FileSystemService,
 		private loggingService: LoggingService,
 		private capabilities: CapabilityManager,
 	) {
@@ -52,6 +53,7 @@ export class DuplicateHandler {
 		analysis: DuplicateMatch,
 		contentProvider: () => Promise<string>,
 		session: DuplicateHandlingSession,
+		message?: string,
 	): Promise<{ status: ResolveStatus; file: TFile | null }> {
 		const autoMergeEnabled = this.plugin.settings.autoMergeOnAddition;
 		const isUpdateOnly =
@@ -70,7 +72,11 @@ export class DuplicateHandler {
 			return { status: "automerged", file: analysis.file };
 		}
 
-		const choice = await this.promptUser(analysis, session);
+		const choice = await this.promptUser(
+			analysis,
+			session,
+			message ?? "Duplicate detected – choose an action",
+		);
 
 		switch (choice) {
 			case "replace": {
@@ -129,15 +135,12 @@ export class DuplicateHandler {
 	private async promptUser(
 		analysis: DuplicateMatch,
 		session: DuplicateHandlingSession,
+		message: string,
 	): Promise<DuplicateChoice> {
 		return this.modalMutex.lock(async () => {
 			if (session.applyToAll && session.choice) return session.choice;
 
-			const modal = this.modalFactory(
-				this.app,
-				analysis,
-				"Duplicate detected – choose an action",
-			);
+			const modal = this.modalFactory(this.app, analysis, message, session);
 			const res = await modal.openAndGetChoice();
 			const choice = res.choice ?? "skip";
 

@@ -34,7 +34,7 @@ export class MetadataParser {
 
 	constructor(
 		private sdrFinder: SDRFinder,
-		private cacheManager: CacheManager,
+		cacheManager: CacheManager,
 		private loggingService: LoggingService,
 	) {
 		this.parsedMetadataCache = cacheManager.createLru("metadata.parsed", 50);

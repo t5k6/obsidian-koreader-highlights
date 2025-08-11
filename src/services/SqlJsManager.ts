@@ -41,6 +41,15 @@ export class SqlJsManager implements Disposable {
 		return this.sqlJsLazy.get();
 	}
 
+	/**
+	 * Opens a Database strictly from bytes in memory. No file path is tracked and
+	 * no persistence APIs are involved. Suitable for read-only workflows.
+	 */
+	public async openFromBytes(bytes: Uint8Array): Promise<Database> {
+		const SQL = await this.getSqlJs();
+		return new SQL.Database(bytes);
+	}
+
 	public async openDatabase(
 		filePath: string,
 		options: OpenDbOptions = {},

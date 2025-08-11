@@ -1,17 +1,24 @@
-import { type App, TFile, TFolder, type Vault } from "obsidian";
+import { type App, normalizePath, TFile, TFolder, type Vault } from "obsidian";
 import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
 import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
 import type {
 	Annotation,
 	DocProps,
 	DuplicateMatch,
+	DuplicateScanResult,
 	LuaMetadata,
 } from "src/types";
 import type { CacheManager } from "src/utils/cache/CacheManager";
+import {
+	expectedNameKeysFromDocProps,
+	keysMatchLoose,
+	nameKeyFromBasename,
+} from "src/utils/filenameMatcher";
 import { bookKeyFromDocProps, getHighlightKey } from "src/utils/formatUtils";
 import { extractHighlights } from "src/utils/highlightExtractor";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
+import type { FileNameGenerator } from "./FileNameGenerator";
 import type { LocalIndexService } from "./LocalIndexService";
 import type { SnapshotManager } from "./SnapshotManager";
 
@@ -28,6 +35,7 @@ export class DuplicateFinder {
 		private app: App,
 		private vault: Vault,
 		private plugin: KoreaderImporterPlugin,
+		private fileNameGenerator: FileNameGenerator,
 		private LocalIndexService: LocalIndexService,
 		private fmService: FrontmatterService,
 		private snapshotManager: SnapshotManager,
@@ -45,11 +53,41 @@ export class DuplicateFinder {
 
 	public async findBestMatch(
 		luaMetadata: LuaMetadata,
-	): Promise<{ match: DuplicateMatch | null; timedOut: boolean }> {
+	): Promise<DuplicateScanResult> {
+		// Step 1: Instant probe for exact expected filename
+		try {
+			const expectedFileName = this.fileNameGenerator.generate(
+				{
+					useCustomTemplate: this.plugin.settings.useCustomFileNameTemplate,
+					template: this.plugin.settings.fileNameTemplate,
+					highlightsFolder: this.plugin.settings.highlightsFolder,
+				},
+				luaMetadata.docProps,
+				luaMetadata.originalFilePath,
+			);
+			const expectedPath = normalizePath(
+				`${this.plugin.settings.highlightsFolder}/${expectedFileName}`,
+			);
+			const direct = this.app.vault.getAbstractFileByPath(expectedPath);
+			if (direct instanceof TFile) {
+				const analysis = await this.analyzeDuplicate(
+					direct,
+					luaMetadata.annotations,
+					luaMetadata,
+				);
+				this.log.info(
+					`Found instant duplicate match via expected filename: ${expectedPath}`,
+				);
+				return { match: analysis, confidence: "full" };
+			}
+		} catch (e) {
+			this.log.warn("Instant filename probe failed (continuing with scan)", e);
+		}
+
 		const { files: potentialDuplicates, timedOut } =
 			await this.findPotentialDuplicates(luaMetadata.docProps);
 		if (potentialDuplicates.length === 0) {
-			return { match: null, timedOut };
+			return { match: null, confidence: timedOut ? "partial" : "full" };
 		}
 
 		const analyses: DuplicateMatch[] = await Promise.all(
@@ -66,7 +104,10 @@ export class DuplicateFinder {
 				(b.newHighlights + b.modifiedHighlights),
 		);
 
-		return { match: analyses[0], timedOut };
+		return {
+			match: analyses[0],
+			confidence: timedOut ? "partial" : "full",
+		};
 	}
 
 	private async findPotentialDuplicates(
@@ -79,25 +120,35 @@ export class DuplicateFinder {
 			return { files: cached, timedOut: false };
 		}
 
-		// If the index is persistent, use the fast path (existing behavior).
-		if (this.LocalIndexService.isIndexPersistent()) {
-			this.log.info(
-				`Querying index for existing files with book key: ${bookKey}`,
-			);
-			const paths = await this.LocalIndexService.findExistingBookFiles(bookKey);
-			const files = paths
-				.map((p) => this.vault.getAbstractFileByPath(p))
-				.filter((f): f is TFile => f instanceof TFile);
+		// Wait for the index to be minimally ready to avoid race conditions.
+		await this.LocalIndexService.whenReady();
 
-			this.potentialDuplicatesCache.set(bookKey, files);
-			return { files, timedOut: false };
+		// Always query the index first.
+		this.log.info(
+			`Querying index for existing files with book key: ${bookKey}`,
+		);
+		const paths = await this.LocalIndexService.findExistingBookFiles(bookKey);
+		const filesFromIndex = paths
+			.map((p) => this.vault.getAbstractFileByPath(p))
+			.filter((f): f is TFile => f instanceof TFile);
+
+		// If persistent, trust results fully.
+		if (this.LocalIndexService.isIndexPersistent()) {
+			this.potentialDuplicatesCache.set(bookKey, filesFromIndex);
+			return { files: filesFromIndex, timedOut: false };
 		}
 
-		// Degraded mode: no persistent index. Progressive scan:
+		// If in-memory and we found candidates, return them.
+		if (filesFromIndex.length > 0) {
+			this.potentialDuplicatesCache.set(bookKey, filesFromIndex);
+			return { files: filesFromIndex, timedOut: false };
+		}
+
+		// Degraded mode fallback scan:
 		// Phase 1: scan using metadataCache.frontmatter (no file I/O)
 		// Phase 2: for uncached candidates, targeted file reads within time budget
 		this.log.info(
-			`Degraded mode: scanning vault for potential duplicates of key: ${bookKey}`,
+			`Index is in-memory and yielded no results for key ${bookKey}. Falling back to vault scan.`,
 		);
 
 		const settingsFolder = this.plugin.settings.highlightsFolder ?? "";
@@ -127,6 +178,13 @@ export class DuplicateFinder {
 			return { files: [], timedOut: true };
 		}
 
+		// Prepare fuzzy expected keys from intended filename composition
+		const expectedKeys = expectedNameKeysFromDocProps(
+			docProps,
+			this.plugin.settings.useCustomFileNameTemplate,
+			this.plugin.settings.fileNameTemplate,
+		);
+
 		for (const file of files) {
 			if (Date.now() - startTime > SCAN_TIMEOUT_MS) {
 				timedOut = true;
@@ -155,8 +213,15 @@ export class DuplicateFinder {
 					title: title ?? "",
 					authors: authors ?? "",
 				});
-				if (fileKey === bookKey) {
+				const matchedByFrontmatter = fileKey === bookKey;
+				if (matchedByFrontmatter) {
 					results.push(file);
+				} else {
+					// Fallback: fuzzy match by filename key if frontmatter didn't match
+					const fileStemKey = nameKeyFromBasename(file.basename);
+					if (expectedKeys.some((ek) => keysMatchLoose(ek, fileStemKey))) {
+						results.push(file);
+					}
 				}
 			} catch (e) {
 				this.log.warn(
@@ -272,5 +337,21 @@ export class DuplicateFinder {
 		};
 		this.fmCache.set(file.path, curr);
 		return curr;
+	}
+
+	/**
+	 * Public wrapper to analyze a known existing file against provided lua metadata.
+	 * Reuses the internal analyzeDuplicate logic so the modal shows accurate stats
+	 * and merge capability.
+	 */
+	public async analyzeExistingFile(
+		existingFile: TFile,
+		luaMetadata: LuaMetadata,
+	): Promise<DuplicateMatch> {
+		return this.analyzeDuplicate(
+			existingFile,
+			luaMetadata.annotations,
+			luaMetadata,
+		);
 	}
 }

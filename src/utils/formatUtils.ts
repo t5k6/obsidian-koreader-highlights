@@ -145,7 +145,6 @@ function isPositionObject(obj: any): obj is PositionObject {
  * @param pos - Position data as string or coordinate object
  * @returns Parsed position with node and offset, or null if invalid
  */
-const positionCache = new Map<string, { node: string; offset: number }>();
 export function parsePosition(
 	pos: string | PositionObject | undefined,
 ): { node: string; offset: number } | null {
@@ -291,7 +290,7 @@ export function compareAnnotations(a: Annotation, b: Annotation): number {
 		if (!Number.isNaN(dateA) && !Number.isNaN(dateB)) {
 			return dateA - dateB;
 		}
-	} catch (e) {
+	} catch (_e) {
 		// ignore invalid date formats
 	}
 

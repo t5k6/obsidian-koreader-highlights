@@ -1,6 +1,7 @@
 import { type App, Modal, Notice, Plugin } from "obsidian";
 import { BookRefreshOrchestrator } from "src/services/BookRefreshOrchestrator";
 import { CommandManager } from "src/services/command/CommandManager";
+import { FileSystemService } from "src/services/FileSystemService";
 import { LoggingService } from "src/services/LoggingService";
 import { TemplateManager } from "src/services/parsing/TemplateManager";
 import { LocalIndexService } from "src/services/vault/LocalIndexService";
@@ -9,7 +10,7 @@ import { StatusBarManager } from "src/ui/StatusBarManager";
 import type { KoreaderHighlightImporterSettings } from "../types";
 import { DIContainer } from "./DIContainer";
 import { MigrationManager } from "./MigrationManager";
-import { PluginSettings } from "./PluginSettings";
+import { PluginDataStore } from "./PluginDataStore";
 import { registerServices } from "./registerServices";
 
 /** Confirmation modal for destructive reset */
@@ -55,11 +56,11 @@ class ResetConfirmationModal extends Modal {
 export default class KoreaderImporterPlugin extends Plugin {
 	public settings!: KoreaderHighlightImporterSettings;
 	public settingTab!: SettingsTab;
-	private pluginSettings!: PluginSettings;
 	public loggingService!: LoggingService;
 	private diContainer!: DIContainer;
 	private servicesInitialized = false;
 	private migrationManager!: MigrationManager;
+	private dataStore!: PluginDataStore;
 	public templateManager!: TemplateManager;
 	public localIndexService!: LocalIndexService;
 	private statusBarManager!: StatusBarManager;
@@ -89,45 +90,23 @@ export default class KoreaderImporterPlugin extends Plugin {
 		try {
 			this.servicesInitialized = false;
 
-			// Step 1: Settings
-			this.pluginSettings = new PluginSettings(this);
-			this.settings = await this.pluginSettings.loadSettings();
+			await this.phase("Logging & DI", async () => {
+				this.initLogging();
+				this.initDI();
+				this.registerCoreServices();
+			});
 
-			// Step 2: Logging
-			this.loggingService = new LoggingService(this.app.vault);
-			this.loggingService.onSettingsChanged(this.settings);
+			await this.phase("Persistence & Migrations", async () => {
+				await this.initPersistenceAndMigrations();
+			});
 
-			// Step 3: DI Container
-			this.diContainer = new DIContainer(this.loggingService);
-			this.diContainer.registerValue(LoggingService, this.loggingService);
+			await this.phase("Core Services", async () => {
+				await this.initCoreServices();
+			});
 
-			// Step 4: Register services
-			registerServices(this.diContainer, this, this.app);
-
-			// Step 5: Migrations (run before services are used)
-			this.migrationManager = new MigrationManager(this, this.loggingService);
-			await this.migrationManager.run();
-			this.loggingService.info("KoreaderImporterPlugin", "Migrations checked.");
-
-			// Step 6: Initialize services that read files/state
-			this.localIndexService =
-				this.diContainer.resolve<LocalIndexService>(LocalIndexService);
-			await this.localIndexService.initialize();
-
-			// Step 7: Critical Service Post-Init
-			this.templateManager =
-				this.diContainer.resolve<TemplateManager>(TemplateManager);
-			await this.templateManager.loadBuiltInTemplates();
-			await this.templateManager.ensureTemplates();
-			this.loggingService.info(
-				"KoreaderImporterPlugin",
-				"Templates initialized.",
-			);
-
-			// Step 8: UI Managers
-			this.statusBarManager =
-				this.diContainer.resolve<StatusBarManager>(StatusBarManager);
-			this.addChild(this.statusBarManager);
+			await this.phase("UI Managers", async () => {
+				this.initUIManagers();
+			});
 
 			this.servicesInitialized = true;
 			this.loggingService.info(
@@ -141,6 +120,88 @@ export default class KoreaderImporterPlugin extends Plugin {
 			console.error("KOReader Importer: CRITICAL BOOTSTRAP ERROR", error);
 			new Notice(errorMessage, 0); // Display notice indefinitely until dismissed
 		}
+	}
+
+	private async phase<T>(name: string, fn: () => Promise<T> | T): Promise<T> {
+		const t0 = (globalThis as any).performance?.now?.() ?? Date.now();
+		try {
+			const result = await Promise.resolve(fn());
+			const t1 = (globalThis as any).performance?.now?.() ?? Date.now();
+			this.loggingService?.info(
+				"KoreaderImporterPlugin",
+				`Phase "${name}" completed in ${(t1 - t0).toFixed(1)}ms`,
+			);
+			return result;
+		} catch (e) {
+			this.loggingService?.error(
+				"KoreaderImporterPlugin",
+				`Phase "${name}" failed`,
+				e,
+			);
+			throw e;
+		}
+	}
+
+	private initLogging(): void {
+		this.loggingService = new LoggingService(this.app.vault);
+	}
+
+	private initDI(): void {
+		this.diContainer = new DIContainer(this.loggingService);
+		this.diContainer.registerValue(LoggingService, this.loggingService);
+	}
+
+	private registerCoreServices(): void {
+		registerServices(this.diContainer, this, this.app);
+	}
+
+	private async initPersistenceAndMigrations(): Promise<void> {
+		const fs = this.diContainer.resolve<FileSystemService>(FileSystemService);
+		this.dataStore = new PluginDataStore(this, fs, this.loggingService);
+
+		this.migrationManager = new MigrationManager(
+			this.app.vault,
+			fs,
+			this.loggingService,
+			this.manifest.version,
+		);
+
+		await this.migrationManager.migrateLegacySettingsIfNeeded(
+			this,
+			this.dataStore,
+		);
+
+		const loadedData = await this.dataStore.load();
+		const migratedData = await this.migrationManager.runAll(loadedData);
+		if (migratedData !== loadedData) {
+			await this.dataStore.save(migratedData);
+		}
+
+		this.settings = migratedData.settings;
+		this.loggingService.onSettingsChanged(this.settings);
+		this.diContainer.notifySettingsChanged(this.settings, this.settings);
+		this.loggingService.info("KoreaderImporterPlugin", "Migrations checked.");
+	}
+
+	private async initCoreServices(): Promise<void> {
+		this.localIndexService =
+			this.diContainer.resolve<LocalIndexService>(LocalIndexService);
+		await this.localIndexService.initialize();
+
+		this.templateManager =
+			this.diContainer.resolve<TemplateManager>(TemplateManager);
+		await this.templateManager.loadBuiltInTemplates();
+		await this.templateManager.ensureTemplates();
+		this.loggingService.info(
+			"KoreaderImporterPlugin",
+			"Templates initialized.",
+		);
+	}
+
+	private initUIManagers(): void {
+		this.statusBarManager =
+			this.diContainer.resolve<StatusBarManager>(StatusBarManager);
+		this.addChild(this.statusBarManager);
 	}
 
 	async onunload() {
@@ -314,17 +375,11 @@ export default class KoreaderImporterPlugin extends Plugin {
 	}
 
 	async saveSettings(forceUpdate: boolean = false): Promise<void> {
-		if (!this.pluginSettings) {
-			this.loggingService.error(
-				"KoreaderImporterPlugin",
-				"Cannot save settings: PluginSettings helper not initialized.",
-			);
-			return;
-		}
-
 		const oldSettings = { ...this.settings };
-		await this.pluginSettings.saveSettings(this.settings);
-
+		const updatedData = await this.dataStore.updateSettings(
+			() => this.settings,
+		);
+		this.settings = updatedData.settings;
 		this.diContainer.notifySettingsChanged(this.settings, oldSettings);
 
 		if (forceUpdate && this.settingTab) {

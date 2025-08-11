@@ -1,79 +1,75 @@
-import { type App, Modal, Setting, type TextComponent } from "obsidian";
+import { type App, Setting, type TextComponent } from "obsidian";
+import { BaseModal } from "./BaseModal";
 
-export class PromptModal extends Modal {
+export class PromptModal extends BaseModal<string> {
 	private value: string;
-	private resolvePromise!: (value: string | null) => void;
 	private inputComponent!: TextComponent;
-	private didSubmit = false;
 
 	constructor(
 		app: App,
-		private readonly title: string,
+		title: string,
 		private readonly placeholder: string,
 		private readonly defaultValue: string = "",
 	) {
-		super(app);
+		super(app, {
+			title,
+			className: "prompt-modal",
+			enableEscape: true,
+			enableEnter: true,
+			focusOnOpen: true,
+		});
 		this.value = this.defaultValue;
 	}
 
 	public async openAndGetValue(): Promise<string | null> {
-		return new Promise((resolve) => {
-			this.resolvePromise = resolve;
-			this.open();
-		});
+		return this.openAndAwaitResult();
 	}
 
-	onOpen() {
-		this.contentEl.empty();
-		this.titleEl.setText(this.title);
+	protected renderContent(contentEl: HTMLElement): void {
+		const { placeholder } = this;
 
-		new Setting(this.contentEl).addText((text) => {
+		new Setting(contentEl).addText((text) => {
 			this.inputComponent = text;
 			text
-				.setPlaceholder(this.placeholder)
+				.setPlaceholder(placeholder)
 				.setValue(this.value)
 				.onChange((value) => {
 					this.value = value;
 				});
 
-			text.inputEl.focus();
-			text.inputEl.select();
+			// Select all on focus for quick overwrite
+			text.inputEl.addEventListener("focus", () => {
+				text.inputEl.select();
+			});
 		});
 
-		this.scope.register([], "Enter", (e: KeyboardEvent) => {
-			e.preventDefault();
-			this.handleSubmit();
-		});
-
-		this.scope.register([], "Escape", () => {
-			this.close();
-		});
-
-		new Setting(this.contentEl)
+		new Setting(contentEl)
 			.addButton((btn) =>
 				btn.setButtonText("Cancel").onClick(() => {
-					this.close();
+					this.cancel();
 				}),
 			)
 			.addButton((btn) =>
-				btn.setButtonText("Create").setCta().onClick(this.handleSubmit),
+				btn
+					.setButtonText("Create")
+					.setCta()
+					.onClick(() => this.submit()),
 			);
 	}
 
-	onClose() {
-		if (!this.didSubmit) {
-			this.resolvePromise(null);
-		}
-		this.contentEl.empty();
+	protected handleEnter(): void {
+		this.submit();
 	}
 
-	private handleSubmit = (): void => {
+	protected getFocusElement(): HTMLElement | null {
+		return this.inputComponent?.inputEl ?? null;
+	}
+
+	private submit(): void {
 		const trimmedValue = this.value.trim();
 		if (!trimmedValue) {
 			return;
 		}
-		this.didSubmit = true;
-		this.resolvePromise(trimmedValue);
-		this.close();
-	};
+		this.resolveAndClose(trimmedValue);
+	}
 }

@@ -1,7 +1,15 @@
+/* Ensure the modal itself cannot horizontally overflow viewport */
+.duplicate-modal,
+.duplicate-modal .modal-content {
+	max-width: 100vw;
+	overflow-x: hidden;
+}
+
 /* ─────────────────────────────────────────────────────────────────── */
 /* 0 ▸ KOReader RAW  (do NOT override – used as reference only)       */
 /* ─────────────────────────────────────────────────────────────────── */
 :root {
+	/* Raw KOReader colours */
 	--khl-red-raw: #ff3300;
 	--khl-orange-raw: #ff8800;
 	--khl-yellow-raw: #ffff33;
@@ -11,45 +19,51 @@
 	--khl-blue-raw: #0066ff;
 	--khl-purple-raw: #ee00ff;
 	--khl-gray-raw: #808080;
-}
 
-/* ─────────────────────────────────────────────────────────────────── */
-/* 1 ▸ DISPLAY palette                                                */
-/*    Dark & light themes can override only this block!               */
-/* ─────────────────────────────────────────────────────────────────── */
-:root {
+	/* Display palette (theme-overridable) */
 	--khl-red: var(--khl-red-raw);
 	--khl-orange: var(--khl-orange-raw);
 	--khl-yellow: var(--khl-yellow-raw);
-	--khl-green: #28c828;
-	/* softened green for light mode   */
+	--khl-green: #28c828; /* softened green for light mode */
 	--khl-olive: var(--khl-olive-raw);
 	--khl-cyan: var(--khl-cyan-raw);
 	--khl-blue: var(--khl-blue-raw);
 	--khl-purple: var(--khl-purple-raw);
 	--khl-gray: var(--khl-gray-raw);
+
+	/* Foreground helpers (contrast colours) */
+	--on-khl-red: #ffffff;
+	--on-khl-orange: #000000;
+	--on-khl-yellow: #000000;
+	--on-khl-green: #ffffff; /* light & dark share the same by default */
+	--on-khl-olive: #000000;
+	--on-khl-cyan: #000000;
+	--on-khl-blue: #ffffff;
+	--on-khl-purple: #ffffff;
+	--on-khl-gray: #000000;
+
+	/* Layout tokens */
+	--spacing-xs: 4px;
+	--spacing-sm: 8px;
+	--spacing-md: 12px;
+	--spacing-lg: 20px;
+	--radius-sm: 4px;
+	--radius-md: 6px;
+	--radius-lg: var(--radius-m, 8px);
+	--transition: 0.15s ease;
+	--max-modal-w: clamp(300px, 90vw, 600px);
+	--max-modal-h: 80vh;
+	--max-preview-h: 40vh;
 }
+
+/* 1 ▸ Display palette is now part of the single :root token block above */
 
 body.theme-dark {
 	--khl-green: #19b219;
 	/* bit darker & more saturated     */
 }
 
-/* ─────────────────────────────────────────────────────────────────── */
-/* 2 ▸ Foreground helpers                                             */
-/* ─────────────────────────────────────────────────────────────────── */
-:root {
-	--on-khl-red: #ffffff;
-	--on-khl-orange: #000000;
-	--on-khl-yellow: #000000;
-	--on-khl-green: #ffffff;
-	/* light & dark share the same   */
-	--on-khl-olive: #000000;
-	--on-khl-cyan: #000000;
-	--on-khl-blue: #ffffff;
-	--on-khl-purple: #ffffff;
-	--on-khl-gray: #000000;
-}
+/* 2 ▸ Foreground helpers are part of the token block; dark theme can override selectively */
 
 body.theme-dark {
 	--on-khl-green: #e8ffe8;
@@ -63,24 +77,118 @@ mark[style*="#00ff00"] {
 }
 
 /* ─────────────────────────────────────────────────────────────────── */
+/*  Helpers: scrollable panel, badges, buttons, focus & motion         */
+/* ─────────────────────────────────────────────────────────────────── */
+
+/* Scrollable panel (used in stats & template preview) */
+.scrollable-panel {
+	max-height: var(--max-preview-h);
+	overflow-y: auto;
+	overflow-x: hidden;
+	padding: var(--spacing-sm) var(--spacing-md);
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-md);
+}
+
+/* Badge component (colour via specific class or data-attr) */
+.badge {
+	font-size: 0.75rem;
+	font-weight: 500;
+	padding: var(--spacing-xs) var(--spacing-sm);
+	border-radius: var(--radius-sm);
+	display: inline-block;
+}
+.badge[data-type="exact"] {
+	background: var(--khl-green);
+	color: var(--on-khl-green);
+}
+.badge[data-type="updated"] {
+	background: var(--khl-yellow);
+	color: var(--on-khl-yellow);
+}
+.badge[data-type="divergent"] {
+	background: var(--khl-orange);
+	color: var(--on-khl-orange);
+}
+
+/* Button base */
+.btn {
+	padding: var(--spacing-sm);
+	border-radius: var(--radius-md);
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: var(--spacing-xs);
+	width: 100%;
+	transition:
+		transform var(--transition),
+		filter var(--transition);
+	box-sizing: border-box;
+}
+.btn:hover:not(.disabled) {
+	transform: translateY(-1px);
+	filter: brightness(1.1);
+}
+.btn.cta {
+	background: var(--color-accent);
+	color: var(--color-base-100);
+}
+.btn.warn {
+	background: var(--khl-red);
+	color: var(--on-khl-red);
+}
+.btn.disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+/* Focus only for keyboard navigation */
+:focus-visible {
+	outline: 2px solid var(--color-accent);
+	outline-offset: 2px;
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+	.btn,
+	.badge,
+	.scrollable-panel,
+	.duplicate-modal-container {
+		transition: none !important;
+	}
+}
+
+/* ─────────────────────────────────────────────────────────────────── */
 /*  Duplicate-Finder modal                                             */
 /* ─────────────────────────────────────────────────────────────────── */
 .duplicate-modal-container {
-	max-width: 600px;
-	margin: auto;
-	padding: 20px;
+	width: 100%; /* occupy available space from modal-content */
+	max-width: 100%; /* do not exceed modal-content */
+	max-height: var(--max-modal-h);
+	margin: 0; /* avoid extra horizontal margins */
+	padding: var(--spacing-lg);
+	position: relative; /* allows sidebar positioning */
+	overflow: hidden; /* prevent any scrollbars in container; inner panes can scroll */
+	box-sizing: border-box; /* include padding in width */
 }
 
-.duplicate-modal-container:focus {
-	outline: 2px solid var(--color-accent);
-	outline-offset: 2px;
+/* Ensure children don't exceed container width */
+.duplicate-modal-container > * {
+	max-width: 100%;
+	box-sizing: border-box;
+}
+
+/* Ensure no child forces horizontal overflow */
+.duplicate-modal-container * {
+	min-width: 0;
 }
 
 .duplicate-modal-header {
 	display: flex;
 	align-items: center;
-	gap: 12px;
-	margin-bottom: 20px;
+	gap: var(--spacing-md);
+	margin-bottom: var(--spacing-md);
 }
 
 .duplicate-modal-header h2 {
@@ -91,9 +199,10 @@ mark[style*="#00ff00"] {
 /*  badges */
 .duplicate-badge {
 	font-size: 0.75rem;
-	padding: 4px 8px;
-	border-radius: 4px;
+	padding: var(--spacing-xs) var(--spacing-sm);
+	border-radius: var(--radius-sm);
 	font-weight: 500;
+	display: inline-block;
 }
 
 .duplicate-badge-exact {
@@ -112,22 +221,106 @@ mark[style*="#00ff00"] {
 }
 
 /*  buttons */
-.duplicate-buttons {
-	display: grid;
-	grid-template-columns: repeat(4, minmax(0, 1fr));
-	gap: 12px;
-	margin-top: 24px;
+.duplicate-modal .duplicate-buttons {
+	display: grid; /* Use CSS Grid for robust columns */
+	grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); /* Allow shrink to container width */
+	gap: var(--spacing-md); /* Consistent spacing between all buttons */
+	margin-top: var(--spacing-lg);
+	width: 100%;
+	box-sizing: border-box;
+	min-width: 0;
+	justify-items: stretch;
+}
+
+.duplicate-modal .duplicate-buttons .btn {
+	/* Ensure buttons fill their grid cell and lay out content horizontally */
+	flex-direction: row !important; /* beat generic .btn rules */
+	justify-content: center;
+	align-items: center;
+	gap: var(--spacing-sm);
+	width: 100%;
+	padding: var(--spacing-sm) var(--spacing-md);
+	min-width: 0; /* allow content to shrink to avoid overflow */
+	max-width: 100%;
+}
+
+.duplicate-modal .koreader-modal-action-button {
+	display: flex; /* make sure it's flex even if theme overrides .btn */
+	flex-direction: row !important; /* ensure text appears next to icon */
+	justify-content: center;
+	align-items: center;
+	gap: var(--spacing-sm);
+	width: 100%;
+	padding: var(--spacing-sm) var(--spacing-md);
+	min-width: 0; /* allow content to shrink to avoid overflow */
+}
+
+/* Ensure icon/text layout inside the button is stable */
+.duplicate-modal .koreader-modal-action-button svg,
+.duplicate-modal .koreader-modal-action-button .button-icon {
+	flex: 0 0 auto;
+}
+.duplicate-modal .koreader-modal-action-button .button-text {
+	display: inline-block !important;
+	white-space: normal; /* allow wrapping to avoid overflow */
+	color: inherit; /* inherit color so warn/cta are readable */
+	flex: 1 1 auto;
+	min-width: 0;
+	text-align: center;
+}
+
+/* On very narrow widths, allow wrapping of the button label to avoid overflow */
+@media (max-width: 420px) {
+	.duplicate-modal .koreader-modal-action-button .button-text {
+		white-space: normal;
+	}
+}
+
+/* Slightly reduce lateral padding on very small viewports to prevent overflow */
+@media (max-width: 420px) {
+	.duplicate-modal-container {
+		padding-left: var(--spacing-md);
+		padding-right: var(--spacing-md);
+		width: min(96vw, 100vw - 16px);
+		max-width: min(var(--max-modal-w), 100vw - 16px);
+	}
+}
+
+/* Ensure the ButtonComponent's text node is visible */
+.koreader-modal-action-button .button-text {
+	display: inline-block !important;
+	white-space: nowrap;
+	color: inherit; /* inherit color so warn/cta are readable */
+}
+
+/* Make sure the CTA stands out and warning is clear but secondary */
+.duplicate-buttons .btn.cta {
+	background: var(--color-accent);
+	color: var(--text-on-accent);
+	border: 1px solid var(--color-accent);
+}
+
+.duplicate-buttons .btn.warn {
+	background: var(--khl-red); /* strong, consistent red */
+	color: var(--on-khl-red); /* readable on red */
+	border: 1px solid var(--khl-red);
+}
+
+.duplicate-buttons .btn.warn:hover {
+	background: var(--background-modifier-error-hover);
 }
 
 .mod-button {
-	padding: 12px;
-	border-radius: 6px;
+	padding: var(--spacing-sm);
+	border-radius: var(--radius-md);
 	display: flex;
 	flex-direction: column;
 	align-items: center;
-	gap: 8px;
+	gap: var(--spacing-xs);
 	width: 100%;
-	transition: transform 0.15s;
+	transition:
+		transform var(--transition),
+		filter var(--transition);
 }
 
 .mod-button:hover:not(.mod-disabled) {
@@ -152,35 +345,47 @@ mark[style*="#00ff00"] {
 
 /* Message and File Path */
 .duplicate-message {
-	margin-bottom: 20px;
+	margin-bottom: var(--spacing-lg);
 }
 
 .duplicate-file-path {
 	display: flex;
 	align-items: center;
-	gap: 8px;
-	padding: 8px 12px;
+	gap: var(--spacing-sm);
+	padding: var(--spacing-xs) var(--spacing-sm);
 	background-color: var(--color-base-20);
-	border-radius: 4px;
+	border-radius: var(--radius-sm);
 	font-family: var(--font-monospace);
 	font-size: 0.9em;
+	overflow-wrap: break-word; /* Wrap long paths */
+	word-break: break-all; /* Aggressive breaking if needed */
+}
+
+/* Ensure the path text span can shrink and wrap within the container */
+.duplicate-file-path span:last-child {
+	min-width: 0;
+	flex: 1 1 auto;
+	word-break: break-all;
+	overflow-wrap: anywhere;
+}
+/* Keep the leading icon from shrinking/growing */
+.duplicate-file-path span:first-child {
+	flex: 0 0 auto;
 }
 
 /* Statistics Section */
 .duplicate-stats {
-	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-	gap: 16px;
+	display: block; /* simple flow for consistent alignment */
 	background: var(--color-base-20);
-	padding: 16px;
-	border-radius: 6px;
-	margin: 20px 0;
+	padding: var(--spacing-md);
+	border-radius: var(--radius-md);
+	margin: var(--spacing-lg) 0;
 }
 
 .stat-item {
 	display: flex;
 	align-items: center;
-	gap: 8px;
+	gap: var(--spacing-xs);
 }
 
 .stat-icon {
@@ -192,12 +397,29 @@ mark[style*="#00ff00"] {
 	margin-left: auto;
 }
 
+/* Prominent stats section styling */
+.duplicate-stats h4 {
+	margin-top: 0;
+	margin-bottom: var(--spacing-sm);
+	border-bottom: 1px solid var(--background-modifier-border);
+	padding-bottom: var(--spacing-sm);
+}
+
+.duplicate-stats ul {
+	margin: 0;
+	padding-inline-start: 20px;
+}
+
+.duplicate-stats li {
+	margin-bottom: var(--spacing-xs);
+}
+
 /* Settings Section */
 .duplicate-settings {
-	margin: 20px 0;
-	padding: 12px;
+	margin: var(--spacing-lg) 0;
+	padding: var(--spacing-sm);
 	background: var(--color-base-20);
-	border-radius: 6px;
+	border-radius: var(--radius-md);
 }
 
 .button-container {
@@ -212,57 +434,52 @@ mark[style*="#00ff00"] {
 	box-shadow: 0 0 0 2px var(--color-accent);
 }
 
-.duplicate-buttons .mod-button {
-	width: 100%;
-	padding: 12px;
-	border-radius: 6px;
-	display: flex;
-	flex-direction: column;
-	align-items: center;
-	gap: 8px;
-	transition: all 0.2s ease;
-	box-sizing: border-box;
-}
-
 .button-icon {
 	display: flex;
 	align-items: center;
 	justify-content: center;
 }
 
-.duplicate-buttons .mod-cta {
-	background-color: var(--color-accent);
-	color: var(--color-base-100);
-}
-
-.duplicate-buttons .mod-warning {
-	background-color: var(--color-red);
-	color: var(--color-base-100);
-}
-
-.duplicate-buttons .mod-button:hover:not(.mod-disabled) {
-	transform: translateY(-1px);
-	filter: brightness(1.1);
-}
-
-.duplicate-buttons .mod-disabled {
-	opacity: 0.5;
-	cursor: not-allowed;
-}
-
 /* Keyboard Shortcuts */
 .duplicate-shortcuts {
-	margin-top: 20px;
+	margin-top: var(--spacing-lg);
 	text-align: center;
 	font-size: 0.9em;
 	color: var(--color-base-70);
 }
 
 .duplicate-shortcuts kbd {
-	background: var(--color-base-30);
-	padding: 2px 6px;
-	border-radius: 4px;
+	background: var(--background-modifier-hover);
+	padding: var(--spacing-xs) var(--spacing-sm);
+	border-radius: var(--radius-sm);
 	font-size: 0.9em;
+}
+
+/* Sidebar indicating match type */
+.duplicate-modal-sidebar {
+	position: absolute;
+	left: 0;
+	top: 0;
+	bottom: 0;
+	width: 6px;
+	border-top-left-radius: var(--radius-lg);
+	border-bottom-left-radius: var(--radius-lg);
+}
+.duplicate-modal-sidebar[data-type="exact"] {
+	background: var(--khl-green);
+}
+.duplicate-modal-sidebar[data-type="updated"] {
+	background: var(--khl-yellow);
+}
+.duplicate-modal-sidebar[data-type="divergent"] {
+	background: var(--khl-orange);
+}
+
+/* Helper actions row */
+.duplicate-modal-helpers {
+	display: flex;
+	gap: var(--spacing-sm);
+	margin: var(--spacing-sm) 0 var(--spacing-md);
 }
 
 /* ─────────────────────────────────────────────────────────────────── */
@@ -271,22 +488,24 @@ mark[style*="#00ff00"] {
 
 /* Style for the rendered output */
 .koreader-template-preview-modal .template-preview-rendered {
-	max-height: 40vh;
-	overflow: auto;
-	padding: 0.75rem 1rem;
+	max-height: var(--max-preview-h);
+	overflow-y: auto;
+	overflow-x: hidden;
+	width: 100%;
+	padding: var(--spacing-sm) var(--spacing-md);
 	background-color: var(--background-secondary);
 	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--radius-m);
-	margin-top: 0.5rem;
+	border-radius: var(--radius-md);
+	margin-top: var(--spacing-sm);
 }
 
 /* Style for the code block container rendered by MarkdownRenderer */
 .koreader-template-preview-modal .template-preview-code-block
 	.markdown-rendered
 	pre {
-	max-height: 40vh;
+	max-height: var(--max-preview-h);
 	overflow: auto;
-	margin-top: 0.5rem;
+	margin-top: var(--spacing-sm);
 	/* Padding and other styles are usually handled by the theme's pre/code styling */
 }
 
@@ -307,11 +526,10 @@ mark[style*="#00ff00"] {
 	margin-block-start: var(--p-spacing);
 }
 
-/* Make all text inputs and textareas in our settings panel have a consistent width */
-.koreader-importer-settings .setting-item-control:has(input[type="text"]),
-.koreader-importer-settings .search-input-container,
-.koreader-importer-settings .setting-item-control:has(textarea) {
-	max-width: 450px;
+/* Make all text inputs and textareas in our settings panel have a responsive consistent width */
+.koreader-importer-settings .setting-item-control,
+.koreader-importer-settings .search-input-container {
+	max-width: clamp(260px, 90vw, 450px);
 	width: 100%;
 	flex: 1 1 auto;
 	justify-content: flex-end;
@@ -329,12 +547,26 @@ mark[style*="#00ff00"] {
 	justify-content: flex-end;
 	/* Align to the right side */
 	align-items: center;
-	gap: 8px;
+	gap: var(--spacing-sm);
 	width: 100%;
-	max-width: 450px;
+	max-width: clamp(260px, 90vw, 450px);
 }
 
 .koreader-template-selector .setting-item-control .dropdown {
 	flex-grow: 1;
 	/* Allow dropdown to take up available space */
+}
+
+/* ─────────────────────────────────────────────────────────────────── */
+/*  Suggestion highlight (FolderSuggester)                             */
+/* ─────────────────────────────────────────────────────────────────── */
+.suggestion-highlight {
+	color: var(--text-accent);
+	font-weight: 600;
+}
+
+.suggestion-score {
+	opacity: 0.6;
+	font-size: 0.9em;
+	margin-left: 0.5em;
 }

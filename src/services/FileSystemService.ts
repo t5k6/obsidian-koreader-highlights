@@ -11,6 +11,7 @@ import {
 import type { Cache } from "src/types";
 import type { CacheManager } from "src/utils/cache/CacheManager";
 import { KeyedQueue } from "src/utils/concurrency";
+import { normalizeFileNamePiece } from "src/utils/formatUtils";
 
 /* ------------------------------------------------------------------ */
 /*                              TYPES                                 */
@@ -36,6 +37,7 @@ export class FileSystemError extends Error {
 		super(message || `${operation} failed on ${path}: ${code}`);
 		this.name = "FileSystemError";
 	}
+
 	get isNotFound(): boolean {
 		return this.code === FileSystemErrorCode.NotFound;
 	}
@@ -54,6 +56,7 @@ interface CacheEntry<T> {
 interface FileCreationOptions {
 	maxAttempts?: number;
 	useTimestampFallback?: boolean;
+	failOnFirstCollision?: boolean;
 }
 
 export interface FolderScanResult {
@@ -71,6 +74,8 @@ export class FileSystemService {
 	private readonly CACHE_TTL = 5000;
 	private readonly keyedQueue = new KeyedQueue();
 	private readonly recentNotices = new Map<string, number>();
+	private renameReplaceSupported: boolean | null = null;
+	private loggedCapabilityOnce = false;
 	private folderScanCache!: import("src/utils/cache/LruCache").LruCache<
 		string,
 		FolderScanResult
@@ -294,6 +299,39 @@ export class FileSystemService {
 		return FileSystemService.toVaultPath(rel);
 	}
 
+	private async probeRenameReplaceSupport(): Promise<boolean> {
+		if (this.renameReplaceSupported !== null)
+			return this.renameReplaceSupported;
+
+		const dir = this.getPluginDataDir();
+		const a = `${dir}/.__probe_a__${Date.now()}`;
+		const b = `${dir}/.__probe_b__${Date.now()}`;
+		try {
+			await this.vault.adapter.write(a, "a");
+			await this.vault.adapter.write(b, "b");
+			try {
+				await this.vault.adapter.rename(a, b);
+				this.renameReplaceSupported = true;
+			} catch {
+				this.renameReplaceSupported = false;
+			}
+		} finally {
+			try {
+				await this.vault.adapter.remove(a);
+			} catch {}
+			try {
+				await this.vault.adapter.remove(b);
+			} catch {}
+		}
+		if (this.renameReplaceSupported === false && !this.loggedCapabilityOnce) {
+			console.info(
+				`${this.LOG_PREFIX} Adapter does not support rename-over-existing; using fallback swap for atomic writes.`,
+			);
+			this.loggedCapabilityOnce = true;
+		}
+		return this.renameReplaceSupported!;
+	}
+
 	/**
 	 * Read binary file via the vault adapter using a vault-relative path.
 	 */
@@ -324,31 +362,124 @@ export class FileSystemService {
 		vaultPath: string,
 		data: ArrayBuffer,
 	): Promise<void> {
-		const normalizedPath = FileSystemService.toVaultPath(vaultPath);
-		const parentDir = FileSystemService.getVaultParent(normalizedPath);
-		await this.ensureVaultFolder(parentDir);
+		const dst = FileSystemService.toVaultPath(vaultPath);
+		await this.ensureParentDirectory(dst);
 
-		const tempPath = `${normalizedPath}.__tmp__${Date.now()}`;
-		await this.vault.adapter.writeBinary(tempPath, data);
+		// Serialize writes to the same destination path
+		await this.keyedQueue.run(`atomic:${dst}`, async () => {
+			const tmp = `${dst}.__tmp__${Date.now()}-${Math.random()
+				.toString(36)
+				.slice(2)}`;
+			await this.vault.adapter.writeBinary(tmp, data);
 
-		try {
-			await this.vault.adapter.rename(tempPath, normalizedPath);
-		} catch (renameError) {
-			console.warn(
-				`Atomic rename failed for ${normalizedPath}, falling back to remove-then-rename.`,
-			);
-			try {
-				await this.vault.adapter.remove(normalizedPath);
-			} catch (removeError) {
-				if (!(removeError as any)?.message?.includes("no such file")) {
-					console.error(
-						`Failed to remove target for atomic write fallback: ${normalizedPath}`,
-						removeError,
-					);
+			const replaceSupported = await this.probeRenameReplaceSupport();
+			if (replaceSupported) {
+				// Try direct replace with small retries (transient locks)
+				const delays = [10, 25, 50];
+				for (let i = 0; i <= delays.length; i++) {
+					try {
+						await this.vault.adapter.rename(tmp, dst);
+						return; // success
+					} catch (e) {
+						if (i === delays.length) {
+							// degrade capability: some adapters claim support but fail; fall back
+							console.info(
+								`${this.LOG_PREFIX} rename-over-existing failed; falling back to backup-swap for ${dst}.`,
+							);
+							break;
+						}
+						await new Promise((r) => setTimeout(r, delays[i]));
+					}
 				}
 			}
-			await this.vault.adapter.rename(tempPath, normalizedPath);
+
+			// Fallback: backup-swap with rollback
+			await this.replaceViaBackupSwap(dst, tmp);
+		});
+	}
+
+	private async replaceViaBackupSwap(dst: string, tmp: string): Promise<void> {
+		const bak = `${dst}.__bak__`;
+		// Clean stale artifacts best-effort
+		try {
+			await this.vault.adapter.remove(bak);
+		} catch {}
+		// If destination exists, rename it to backup with retries
+		const exists = await this.vault.adapter.exists(dst);
+		const delays = [10, 25, 50, 80];
+		if (exists) {
+			for (let i = 0; i <= delays.length; i++) {
+				try {
+					await this.vault.adapter.rename(dst, bak);
+					break;
+				} catch (e) {
+					if (i === delays.length) {
+						// As a last resort, try remove (may briefly drop the file)
+						try {
+							await this.vault.adapter.remove(dst);
+						} catch {}
+						break;
+					}
+					await new Promise((r) => setTimeout(r, delays[i]));
+				}
+			}
 		}
+
+		// Now place tmp as dst (with retries)
+		try {
+			for (let i = 0; i <= delays.length; i++) {
+				try {
+					await this.vault.adapter.rename(tmp, dst);
+					// success: cleanup backup
+					try {
+						await this.vault.adapter.remove(bak);
+					} catch {}
+					return;
+				} catch (e) {
+					if (i === delays.length) {
+						// rollback if possible
+						if (await this.vault.adapter.exists(bak)) {
+							try {
+								await this.vault.adapter.rename(bak, dst);
+							} catch (restoreErr) {
+								console.error(
+									`${this.LOG_PREFIX} CRITICAL: failed to restore backup for ${dst}`,
+									restoreErr,
+								);
+							}
+						}
+						throw e;
+					}
+					await new Promise((r) => setTimeout(r, delays[i]));
+				}
+			}
+		} finally {
+			// Ensure temp is removed if still around
+			try {
+				await this.vault.adapter.remove(tmp);
+			} catch {}
+		}
+	}
+
+	/**
+	 * Write UTF-8 text atomically using the vault adapter. Ensures parent folder exists.
+	 */
+	public async writeVaultTextAtomic(
+		vaultPath: string,
+		content: string,
+	): Promise<void> {
+		const normalizedPath = FileSystemService.toVaultPath(vaultPath);
+		await this.ensureParentDirectory(normalizedPath);
+		const buffer = new TextEncoder().encode(content).buffer;
+		await this.writeVaultBinaryAtomic(normalizedPath, buffer);
+	}
+
+	/**
+	 * Read UTF-8 text using the vault adapter.
+	 */
+	public async readVaultText(vaultPath: string): Promise<string> {
+		const buffer = await this.readVaultBinary(vaultPath);
+		return new TextDecoder().decode(buffer);
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -515,72 +646,137 @@ export class FileSystemService {
 		if (parentDir) await this.ensureVaultFolder(parentDir);
 	}
 
+	/**
+	 * @deprecated Backwards-compatible helper used in tests and some code paths.
+	 * Prefer createVaultFileUnique().
+	 *
+	 * Behavior:
+	 * - If failOnFirstCollision=true, throws AlreadyExists when the base name exists.
+	 * - Otherwise tries numbered suffixes " (n)" up to maxAttempts.
+	 * - If exhausted and useTimestampFallback=true, creates a "-<ts>" filename.
+	 * - Else throws AlreadyExists.
+	 */
 	public async createVaultFileSafely(
 		baseDir: string,
 		filenameStem: string,
 		content: string,
-		options: FileCreationOptions = {},
+		options?: {
+			ext?: string;
+			failOnFirstCollision?: boolean;
+			maxAttempts?: number;
+			useTimestampFallback?: boolean;
+		},
+	): Promise<TFile> {
+		const ext = (options?.ext ?? "md").replace(/^\./, "");
+		const dir = FileSystemService.toVaultPath(baseDir);
+		const stem = normalizeFileNamePiece(filenameStem);
+		const maxAttempts = Math.max(1, options?.maxAttempts ?? 10);
+		const useTs = !!options?.useTimestampFallback;
+
+		await this.ensureVaultFolder(dir);
+
+		const basePath = normalizePath(`${dir}/${stem}.${ext}`);
+		if (options?.failOnFirstCollision) {
+			if (await this.vaultExists(basePath)) {
+				throw new FileSystemError(
+					"createFile",
+					basePath,
+					FileSystemErrorCode.AlreadyExists,
+					"File already exists",
+				);
+			}
+			return this.vault.create(basePath, content);
+		}
+
+		for (let i = 0; i < maxAttempts; i++) {
+			const suffix = i === 0 ? "" : ` (${i})`;
+			const candidate = normalizePath(`${dir}/${stem}${suffix}.${ext}`);
+			// eslint-disable-next-line no-await-in-loop
+			const exists = await this.vaultExists(candidate);
+			if (!exists) {
+				// eslint-disable-next-line no-await-in-loop
+				return this.vault.create(candidate, content);
+			}
+		}
+
+		if (useTs) {
+			const ts = Date.now().toString(36);
+			const candidate = normalizePath(`${dir}/${stem}-${ts}.${ext}`);
+			return this.vault.create(candidate, content);
+		}
+
+		throw new FileSystemError(
+			"createFile",
+			basePath,
+			FileSystemErrorCode.AlreadyExists,
+			"All candidate filenames already exist",
+		);
+	}
+
+	public async createVaultFileUnique(
+		baseDir: string,
+		desiredStem: string,
+		content: string,
+		ext: string = "md",
 	): Promise<TFile> {
 		const normalizedDir = FileSystemService.toVaultPath(baseDir);
-		const lockKey = `${normalizedDir}/${filenameStem}`;
-		return this.keyedQueue.run(`file:${lockKey}`, async () => {
-			await this.ensureVaultFolder(normalizedDir);
-			const { maxAttempts = 1000, useTimestampFallback = true } = options;
+		const sanitizedStem = normalizeFileNamePiece(desiredStem);
 
-			for (let attempt = 0; attempt < maxAttempts; attempt++) {
-				const suffix = attempt === 0 ? "" : ` (${attempt})`;
-				const candidate = normalizePath(
-					`${normalizedDir}/${filenameStem}${suffix}.md`,
+		return this.keyedQueue.run(
+			`file:${normalizedDir}/${sanitizedStem}`,
+			async () => {
+				await this.ensureVaultFolder(normalizedDir);
+				const finalStem = await this.generateUniqueStem(
+					normalizedDir,
+					sanitizedStem,
+					ext,
 				);
-				if (!(await this.vaultExists(candidate))) {
-					try {
-						return await this.vault.create(candidate, content);
-					} catch (error) {
-						const code = (error as NodeJS.ErrnoException)?.code;
-						// Handle races robustly across different adapters/messages
-						if (
-							code === "EEXIST" ||
-							(error instanceof Error && /already exists/i.test(error.message))
-						) {
-							continue;
-						}
-						throw error;
-					}
-				}
-			}
+				const finalPath = normalizePath(`${normalizedDir}/${finalStem}.${ext}`);
+				// Within keyedQueue, check-then-create is effectively atomic for a given stem.
+				return this.vault.create(finalPath, content);
+			},
+		);
+	}
 
-			if (useTimestampFallback) {
-				// Guard against extremely rare collisions on timestamp by checking and retrying once.
-				for (let i = 0; i < 2; i++) {
-					const ts = `${Date.now().toString(36)}${i ? `-${i}` : ""}`;
-					const fallback = normalizePath(
-						`${normalizedDir}/${filenameStem}-${ts}.md`,
-					);
-					if (!(await this.vaultExists(fallback))) {
-						try {
-							return await this.vault.create(fallback, content);
-						} catch (error) {
-							const code = (error as NodeJS.ErrnoException)?.code;
-							if (
-								code === "EEXIST" ||
-								(error instanceof Error &&
-									/already exists/i.test(error.message))
-							) {
-								continue; // try the next fallback
-							}
-							throw error;
-						}
-					}
-				}
-			}
+	/**
+	 * Generates a suggestion for a unique filename stem.
+	 * WARNING: This method is for UI previews only. Do NOT use its return value
+	 * to create a file directly, as a race condition could occur.
+	 * Use createVaultFileUnique() for safe file creation.
+	 */
+	public async previewUniqueStem(
+		baseDir: string,
+		desiredStem: string,
+	): Promise<string> {
+		const dir = FileSystemService.toVaultPath(baseDir);
+		return this.generateUniqueStem(
+			dir,
+			normalizeFileNamePiece(desiredStem),
+			"md",
+		);
+	}
 
-			throw new FileSystemError(
-				"createFile",
-				`${normalizedDir}/${filenameStem}`,
-				FileSystemErrorCode.AlreadyExists,
-				`Could not create unique filename after ${maxAttempts} attempts`,
-			);
-		});
+	/**
+	 * Core unique-stem generator. Private to enforce atomic creation pattern via keyedQueue.
+	 */
+	private async generateUniqueStem(
+		dir: string,
+		stem: string,
+		ext: string,
+		maxAttempts: number = 1000,
+	): Promise<string> {
+		for (let i = 0; i < maxAttempts; i++) {
+			const suffix = i === 0 ? "" : ` (${i})`;
+			const candidateStem = `${stem}${suffix}`;
+			const candidatePath = normalizePath(`${dir}/${candidateStem}.${ext}`);
+			// eslint-disable-next-line no-await-in-loop
+			if (!(await this.vaultExists(candidatePath))) {
+				return candidateStem;
+			}
+		}
+		// Fallback to timestamp if all attempts fail
+		const ts = Date.now().toString(36);
+		return `${stem}-${ts}`;
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -801,7 +997,7 @@ export class FileSystemService {
 			await this.vault.adapter.write(probePath, "");
 			await this.vault.adapter.remove(probePath);
 			return true;
-		} catch (e) {
+		} catch (_e) {
 			return false;
 		}
 	}

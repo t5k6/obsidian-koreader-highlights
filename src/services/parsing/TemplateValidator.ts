@@ -8,8 +8,6 @@ export interface ValidationResult {
 export class TemplateValidator {
 	// Match simple variables like {{pageno}}, excluding control tags (#,/)
 	private static readonly SIMPLE_VAR_REGEX = /\{\{((?!#|\/)[\w]+)\}\}/g;
-	private static readonly CONDITIONAL_OPEN = /\{\{#([\w]+)\}\}/g;
-	private static readonly CONDITIONAL_CLOSE = /\{\{\/([\w]+)\}\}/g;
 	private static readonly ANY_TAG = /\{\{([^}]+)?\}\}/g;
 
 	validate(template: string): ValidationResult {

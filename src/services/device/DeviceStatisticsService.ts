@@ -27,7 +27,6 @@ export interface BookStatisticsBundle {
 
 // --- Constants ---
 const MAX_ROOT_SEARCH_DEPTH = 25;
-const DB_SCHEMA_VERSION = 1;
 
 const BOOK_COLUMNS =
 	`id, md5, last_open, pages, total_read_time, total_read_pages, title, authors, series, language`
@@ -44,13 +43,15 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 	private readonly log;
 	private settings: KoreaderHighlightImporterSettings;
 	private dbFilePath: string | null = null;
+	private inMemoryDb: Database | null = null;
+	private dbFileMtimeMs: number | null = null;
 	private cdbLazy: AsyncLazy<ConcurrentDatabase | null>;
 
 	private statsCache: LruCache<string, BookStatisticsBundle | null>;
 	private deviceRootCache = new Map<string, string | null>();
 
 	constructor(
-		private plugin: KoreaderImporterPlugin,
+		plugin: KoreaderImporterPlugin,
 		private fsService: FileSystemService,
 		private sqlJsManager: SqlJsManager,
 		private loggingService: LoggingService,
@@ -68,18 +69,32 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 				return null;
 			}
 
-			let schemaUpgraded = false;
-			const cdb = new ConcurrentDatabase(async () => {
-				const db = await this.sqlJsManager.openDatabase(filePath);
-				if (!schemaUpgraded) {
-					this.upgradeSchema(db);
-					schemaUpgraded = true;
-				}
-				return db;
+			const bytes = await this.fsService.readBinaryAuto(filePath).catch((e) => {
+				this.log.error(
+					`Failed to read KOReader stats DB bytes: ${filePath}`,
+					e,
+				);
+				return null;
 			});
+			if (!bytes) return null;
 
+			const SQL = await this.sqlJsManager.getSqlJs();
+			const db = new SQL.Database(bytes); // strictly in-memory
+			this.prepareSessionIndexes(db); // only in-memory changes
+
+			this.inMemoryDb = db;
 			this.dbFilePath = filePath;
-			this.log.info(`Stats DB is ready: ${filePath}`);
+
+			// capture mtime to support hot-reload if file changes
+			try {
+				const st = await this.fsService.getNodeStats(filePath);
+				this.dbFileMtimeMs = st?.mtimeMs ?? null;
+			} catch {
+				/* ignore */
+			}
+
+			const cdb = new ConcurrentDatabase(async () => db);
+			this.log.info(`Loaded KOReader stats DB into memory: ${filePath}`);
 			return cdb;
 		});
 	}
@@ -144,18 +159,20 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 		return row ?? null;
 	}
 
-	private upgradeSchema(db: Database): void {
-		const res = db.exec("PRAGMA user_version;");
-		const currentVersion = Number(res[0]?.values[0]?.[0] ?? 0);
-
-		if (currentVersion < DB_SCHEMA_VERSION) {
-			this.log.info(
-				`Upgrading stats DB schema v${currentVersion} -> v${DB_SCHEMA_VERSION}`,
-			);
+	private prepareSessionIndexes(db: Database): void {
+		// Build performance indexes only for the in-memory session
+		try {
 			db.exec(
 				"CREATE INDEX IF NOT EXISTS idx_page_stat_book ON page_stat_data(id_book);",
 			);
-			db.exec(`PRAGMA user_version = ${DB_SCHEMA_VERSION};`);
+			db.exec(
+				"CREATE INDEX IF NOT EXISTS idx_page_stat_start_time ON page_stat_data(start_time);",
+			);
+		} catch (e) {
+			this.log.warn(
+				"Failed to create session indexes (continuing without them).",
+				e,
+			);
 		}
 	}
 
@@ -168,10 +185,15 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 	}
 
 	dispose(): void {
-		if (this.dbFilePath) {
-			this.sqlJsManager.closeDatabase(this.dbFilePath);
+		// We never write back to device; just free memory
+		try {
+			this.inMemoryDb?.close?.();
+		} catch {
+			/* noop */
 		}
+		this.inMemoryDb = null;
 		this.dbFilePath = null;
+		this.dbFileMtimeMs = null;
 		this.cdbLazy.reset();
 		this.statsCache.clear();
 	}
@@ -240,7 +262,25 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 	 * Gets the concurrent database instance.
 	 * @returns Concurrent database instance or null if not available
 	 */
+	private async refreshIfDeviceDbChanged(): Promise<void> {
+		if (!this.dbFilePath) return;
+		try {
+			const st = await this.fsService.getNodeStats(this.dbFilePath);
+			const mtime = st?.mtimeMs ?? null;
+			if (mtime && this.dbFileMtimeMs && mtime > this.dbFileMtimeMs) {
+				this.log.info(
+					"KOReader stats DB changed on device. Reloading in-memory DB.",
+				);
+				this.dispose(); // clears caches and closes in-memory DB
+				// Recreate lazily on next getConcurrentDb()
+			}
+		} catch {
+			/* ignore */
+		}
+	}
+
 	private async getConcurrentDb(): Promise<ConcurrentDatabase | null> {
+		await this.refreshIfDeviceDbChanged().catch(() => {});
 		return this.cdbLazy.get();
 	}
 

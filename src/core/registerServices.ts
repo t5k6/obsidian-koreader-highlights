@@ -13,6 +13,7 @@ import { FrontmatterService } from "src/services/parsing/FrontmatterService";
 import { MetadataParser } from "src/services/parsing/MetadataParser";
 import { TemplateManager } from "src/services/parsing/TemplateManager";
 import { SqlJsManager } from "src/services/SqlJsManager";
+import { ObsidianPromptService } from "src/services/ui/ObsidianPromptService";
 import { ContentGenerator } from "src/services/vault/ContentGenerator";
 import { DuplicateFinder } from "src/services/vault/DuplicateFinder";
 import { DuplicateHandler } from "src/services/vault/DuplicateHandler";
@@ -20,7 +21,7 @@ import { FileNameGenerator } from "src/services/vault/FileNameGenerator";
 import { LocalIndexService } from "src/services/vault/LocalIndexService";
 import { MergeService } from "src/services/vault/MergeService";
 import { SnapshotManager } from "src/services/vault/SnapshotManager";
-import type { DuplicateMatch } from "src/types";
+import type { DuplicateHandlingSession, DuplicateMatch } from "src/types";
 import { DuplicateHandlingModal } from "src/ui/DuplicateModal";
 import { StatusBarManager } from "src/ui/StatusBarManager";
 import { CacheManager } from "src/utils/cache/CacheManager";
@@ -30,6 +31,7 @@ import {
 	APP_TOKEN,
 	DUPLICATE_MODAL_FACTORY_TOKEN,
 	PLUGIN_TOKEN,
+	PROMPT_SERVICE_TOKEN,
 	VAULT_TOKEN,
 } from "./tokens";
 
@@ -44,8 +46,12 @@ export function registerServices(
 	container.registerValue(PLUGIN_TOKEN, plugin);
 	container.registerValue(
 		DUPLICATE_MODAL_FACTORY_TOKEN,
-		(app: App, match: DuplicateMatch, message: string) =>
-			new DuplicateHandlingModal(app, match, message),
+		(
+			app: App,
+			match: DuplicateMatch,
+			message: string,
+			session: DuplicateHandlingSession,
+		) => new DuplicateHandlingModal(app, match, message, session),
 	);
 
 	// --- Level 0: Foundational (No internal dependencies) ---
@@ -106,6 +112,13 @@ export function registerServices(
 		BookRefreshOrchestrator,
 	]);
 
+	// Prompt/Interaction service
+	container.register(ObsidianPromptService, [APP_TOKEN]);
+	container.registerValue(
+		PROMPT_SERVICE_TOKEN,
+		container.resolve(ObsidianPromptService),
+	);
+
 	// --- Level 2: Depends on Level 1 ---
 	container.register(ContentGenerator, [TemplateManager, PLUGIN_TOKEN]);
 	container.register(MetadataParser, [SDRFinder, CacheManager, LoggingService]);
@@ -152,6 +165,7 @@ export function registerServices(
 		APP_TOKEN,
 		VAULT_TOKEN,
 		PLUGIN_TOKEN,
+		FileNameGenerator,
 		LocalIndexService,
 		FrontmatterService,
 		SnapshotManager,
@@ -177,6 +191,7 @@ export function registerServices(
 		LoggingService,
 		FileSystemService,
 		FrontmatterService,
+		PROMPT_SERVICE_TOKEN,
 	]);
 	container.register(CommandManager, [
 		PLUGIN_TOKEN,

@@ -3,10 +3,6 @@ import { FileSystemService } from "src/services/FileSystemService";
 import { FolderSuggest } from "src/ui/settings/suggesters/FolderSuggester";
 import { pickDirectory } from "src/ui/settings/utils";
 
-interface IComponent {
-	destroy(): void;
-}
-
 export function booleanSetting(
 	container: HTMLElement,
 	name: string,

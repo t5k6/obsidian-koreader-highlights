@@ -9,6 +9,7 @@
 		"build": "cross-env NODE_ENV=production  node esbuild.config.cjs",
 		"lint": "biome check --write",
 		"test": "vitest",
+		"test:coverage": "vitest run --coverage",
 		"prepare": "husky"
 	},
 	"keywords": [
@@ -26,7 +27,8 @@
 		"node-diff3": "^3.1.2",
 		"obsidian": "^1.8.7",
 		"pako": "^2.1.0",
-		"sql.js": "^1.13.0"
+		"sql.js": "^1.13.0",
+		"zod": "^4.0.17"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.1.4",

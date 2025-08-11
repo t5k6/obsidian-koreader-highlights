@@ -74,6 +74,75 @@ END;
 
 const CURRENT_DB_VERSION = INDEX_DB_VERSION;
 
+// Centralized SQL statements used by methods in this service
+const SQL_GET_IMPORT_SOURCE_BY_PATH = /*sql*/ `
+  SELECT source_path,last_processed_mtime,last_processed_size,newest_annotation_ts,last_success_ts,last_error,book_key,md5
+  FROM import_source
+  WHERE source_path = ?
+`;
+
+const SQL_UPSERT_IMPORT_SOURCE_SUCCESS = /*sql*/ `
+  INSERT INTO import_source(source_path,last_processed_mtime,last_processed_size,newest_annotation_ts,last_success_ts,last_error,book_key,md5)
+  VALUES(?,?,?,?,?,?,?,?)
+  ON CONFLICT(source_path) DO UPDATE SET
+    last_processed_mtime=excluded.last_processed_mtime,
+    last_processed_size=excluded.last_processed_size,
+    newest_annotation_ts=excluded.newest_annotation_ts,
+    last_success_ts=excluded.last_success_ts,
+    last_error=NULL,
+    book_key=COALESCE(excluded.book_key, import_source.book_key),
+    md5=COALESCE(excluded.md5, import_source.md5)
+`;
+
+const SQL_INSERT_BOOK_IF_NOT_EXISTS = /*sql*/ `
+  INSERT OR IGNORE INTO book(key) VALUES (?)
+`;
+
+const SQL_UPSERT_BOOK_INSTANCE_BY_PATH = /*sql*/ `
+  INSERT INTO book_instances(book_key, vault_path) VALUES(?,?)
+  ON CONFLICT(vault_path) DO UPDATE SET book_key = excluded.book_key
+`;
+
+const SQL_UPSERT_IMPORT_SOURCE_FAILURE = /*sql*/ `
+  INSERT INTO import_source(source_path,last_processed_mtime,last_processed_size,last_error)
+  VALUES(?,?,?,?)
+  ON CONFLICT(source_path) DO UPDATE SET last_error = excluded.last_error, last_success_ts = NULL
+`;
+
+const SQL_DELETE_IMPORT_SOURCE_BY_PATH = /*sql*/ `
+  DELETE FROM import_source WHERE source_path = ?
+`;
+
+const SQL_CLEAR_IMPORT_SOURCE = /*sql*/ `
+  DELETE FROM import_source
+`;
+
+const SQL_SELECT_PATHS_BY_BOOK_KEY = /*sql*/ `
+  SELECT vault_path FROM book_instances WHERE book_key = ?
+`;
+
+const SQL_UPSERT_BOOK = /*sql*/ `
+  INSERT INTO book(key,id,title,authors) VALUES(?,?,?,?)
+  ON CONFLICT(key) DO UPDATE SET
+    id=COALESCE(excluded.id, book.id),
+    title=excluded.title,
+    authors=excluded.authors
+`;
+
+const SQL_SELECT_BOOK_KEY_BY_PATH = /*sql*/ `
+  SELECT book_key FROM book_instances WHERE vault_path = ?
+`;
+
+const SQL_LATEST_SOURCE_FOR_BOOK = /*sql*/ `
+  SELECT source_path, newest_annotation_ts, last_success_ts, last_processed_mtime
+  FROM import_source
+  WHERE book_key = ? AND source_path IS NOT NULL
+  ORDER BY COALESCE(newest_annotation_ts, '') DESC,
+           COALESCE(last_success_ts, 0) DESC,
+           COALESCE(last_processed_mtime, 0) DESC
+  LIMIT 1
+`;
+
 function tableHasColumn(db: Database, table: string, column: string): boolean {
 	try {
 		const res = db.exec(`PRAGMA table_info(${table});`);
@@ -351,10 +420,6 @@ async function backfillImportIndexJsonIfPresent(
 	}
 }
 
-interface DebouncedMetadataChangeHandler extends DebouncedFn {
-	(file: TFile, data: string, cache: CachedMetadata): void;
-}
-
 export class LocalIndexService implements Disposable, SettingsObserver {
 	private settings!: KoreaderHighlightImporterSettings;
 	private readonly log!: ReturnType<LoggingService["scoped"]>;
@@ -378,8 +443,13 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 	private rebuildAbortController: AbortController | null = null;
 	private rebuildNotice: Notice | null = null;
 	private rebuildProgress: { current: number; total: number } | null = null;
-	private processedDuringRebuild: Set<string> | null = null;
 	private isRebuildingFlag = false;
+
+	// Readiness gate
+	private isReadyFlag = false;
+	private readyResolve!: () => void;
+	private readonly readyP: Promise<void>;
+	private rebuildP: Promise<any> | null = null;
 
 	// Injected dependencies
 	private readonly plugin!: KoreaderImporterPlugin;
@@ -431,14 +501,27 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 			400,
 			true,
 		);
+
+		// Initialize readiness promise
+		this.readyP = new Promise<void>((resolve) => {
+			this.readyResolve = () => {
+				this.isReadyFlag = true;
+				resolve();
+			};
+		});
 	}
 
 	public async initialize(): Promise<void> {
 		await this.ensureIndexReady();
 		this.registerVaultEvents();
 		if (this.indexState === "in_memory") {
-			// kick off async rebuild to speed up duplicate detection
-			void this.startBackgroundRebuild();
+			// Kick off async rebuild once and gate readiness on its completion
+			if (!this.rebuildP) {
+				this.rebuildP = this.startBackgroundRebuild().finally(() => {
+					// Signal readiness regardless of rebuild success
+					this.readyResolve();
+				});
+			}
 		}
 	}
 
@@ -452,6 +535,31 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 
 	public getIndexState(): "persistent" | "in_memory" | "unavailable" {
 		return this.indexState;
+	}
+
+	/**
+	 * Returns a promise that resolves when the index is in a minimally consistent state
+	 * (either loaded from disk or after the initial in-memory rebuild is complete).
+	 * Includes a fail-safe timeout to prevent indefinite blocking.
+	 */
+	public async whenReady(): Promise<void> {
+		const READY_TIMEOUT_MS = 15_000;
+		const timeoutPromise = new Promise<void>((resolve) => {
+			setTimeout(() => {
+				this.log.warn(
+					`Index readiness check timed out after ${READY_TIMEOUT_MS}ms.`,
+				);
+				resolve();
+			}, READY_TIMEOUT_MS);
+		});
+		return Promise.race([this.readyP, timeoutPromise]);
+	}
+
+	/**
+	 * Synchronous check whether the readiness gate has been passed.
+	 */
+	public isReady(): boolean {
+		return this.isReadyFlag;
 	}
 
 	/**
@@ -469,9 +577,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 	} | null> {
 		const db = await this.getConcurrentDb();
 		return db.execute((database) => {
-			const stmt = database.prepare(
-				"SELECT source_path,last_processed_mtime,last_processed_size,newest_annotation_ts,last_success_ts,last_error,book_key,md5 FROM import_source WHERE source_path = ?",
-			);
+			const stmt = database.prepare(SQL_GET_IMPORT_SOURCE_BY_PATH);
 			try {
 				stmt.bind([path]);
 				if (!stmt.step()) return null;
@@ -528,42 +634,26 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		const db = await this.getConcurrentDb();
 		await db.writeTx((database) => {
 			// Upsert per-source row
-			database.run(
-				`INSERT INTO import_source(source_path,last_processed_mtime,last_processed_size,newest_annotation_ts,last_success_ts,last_error,book_key,md5)
-				 VALUES(?,?,?,?,?,?,?,?)
-				 ON CONFLICT(source_path) DO UPDATE SET
-				  last_processed_mtime=excluded.last_processed_mtime,
-				  last_processed_size=excluded.last_processed_size,
-				  newest_annotation_ts=excluded.newest_annotation_ts,
-				  last_success_ts=excluded.last_success_ts,
-				  last_error=NULL,
-				  book_key=COALESCE(excluded.book_key, import_source.book_key),
-				  md5=COALESCE(excluded.md5, import_source.md5)
-				 `,
-				[
-					params.path,
-					params.mtime,
-					params.size,
-					params.newestAnnotationTs ?? null,
-					Date.now(),
-					null,
-					params.bookKey ?? null,
-					params.md5 ?? null,
-				],
-			);
+			database.run(SQL_UPSERT_IMPORT_SOURCE_SUCCESS, [
+				params.path,
+				params.mtime,
+				params.size,
+				params.newestAnnotationTs ?? null,
+				Date.now(),
+				null,
+				params.bookKey ?? null,
+				params.md5 ?? null,
+			]);
 
 			// Best-effort: ensure conceptual row then upsert instance mapping
 			if (params.vaultPath && params.bookKey) {
 				// Create a minimal book row if not exists
-				database.run(`INSERT OR IGNORE INTO book(key) VALUES (?)`, [
-					params.bookKey,
-				]);
+				database.run(SQL_INSERT_BOOK_IF_NOT_EXISTS, [params.bookKey]);
 				// Upsert instance by path
-				database.run(
-					`INSERT INTO book_instances(book_key, vault_path) VALUES(?,?)
-					 ON CONFLICT(vault_path) DO UPDATE SET book_key = excluded.book_key`,
-					[params.bookKey, params.vaultPath],
-				);
+				database.run(SQL_UPSERT_BOOK_INSTANCE_BY_PATH, [
+					params.bookKey,
+					params.vaultPath,
+				]);
 			}
 			return undefined;
 		});
@@ -580,12 +670,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 				typeof error === "string"
 					? error
 					: ((error as any)?.message ?? JSON.stringify(error ?? "error"));
-			database.run(
-				`INSERT INTO import_source(source_path,last_processed_mtime,last_processed_size,last_error)
-				 VALUES(?,?,?,?)
-				 ON CONFLICT(source_path) DO UPDATE SET last_error = excluded.last_error, last_success_ts = NULL`,
-				[path, 0, 0, message],
-			);
+			database.run(SQL_UPSERT_IMPORT_SOURCE_FAILURE, [path, 0, 0, message]);
 			return undefined;
 		});
 		this.persistIndexDebounced();
@@ -594,7 +679,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 	public async deleteImportSource(path: string): Promise<void> {
 		const db = await this.getConcurrentDb();
 		const changed = await db.writeTx((database) => {
-			database.run("DELETE FROM import_source WHERE source_path = ?", [path]);
+			database.run(SQL_DELETE_IMPORT_SOURCE_BY_PATH, [path]);
 			return database.getRowsModified() > 0;
 		});
 		if (changed) {
@@ -608,7 +693,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 	public async clearImportSource(): Promise<void> {
 		const db = await this.getConcurrentDb();
 		await db.writeTx((database) => {
-			database.run("DELETE FROM import_source");
+			database.run(SQL_CLEAR_IMPORT_SOURCE);
 			return undefined;
 		});
 		this.persistIndexDebounced();
@@ -626,9 +711,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 
 		const db = await this.getConcurrentDb();
 		return db.execute((database) => {
-			const stmt = database.prepare(
-				"SELECT vault_path FROM book_instances WHERE book_key = ?",
-			);
+			const stmt = database.prepare(SQL_SELECT_PATHS_BY_BOOK_KEY);
 			const paths: string[] = [];
 			try {
 				stmt.bind([bookKey]);
@@ -663,21 +746,10 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		const db = await this.getConcurrentDb();
 		await db.writeTx((database) => {
 			// Upsert conceptual book
-			database.run(
-				`INSERT INTO book(key,id,title,authors) VALUES(?,?,?,?)
-         ON CONFLICT(key) DO UPDATE SET
-           id=COALESCE(excluded.id, book.id),
-           title=excluded.title,
-           authors=excluded.authors`,
-				[key, id, title, authors],
-			);
+			database.run(SQL_UPSERT_BOOK, [key, id, title, authors]);
 			// Upsert instance if provided
 			if (vaultPath) {
-				database.run(
-					`INSERT INTO book_instances(book_key, vault_path) VALUES(?,?)
-           ON CONFLICT(vault_path) DO UPDATE SET book_key = excluded.book_key`,
-					[key, vaultPath],
-				);
+				database.run(SQL_UPSERT_BOOK_INSTANCE_BY_PATH, [key, vaultPath]);
 			}
 			return undefined;
 		});
@@ -696,7 +768,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 	 */
 	public async findKeyByVaultPath(vaultPath: string): Promise<string | null> {
 		const row = await this.queryOne<{ book_key: string }>(
-			"SELECT book_key FROM book_instances WHERE vault_path = ?",
+			SQL_SELECT_BOOK_KEY_BY_PATH,
 			[vaultPath],
 		);
 		return row?.book_key ?? null;
@@ -710,15 +782,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 	public async latestSourceForBook(bookKey: string): Promise<string | null> {
 		const db = await this.getConcurrentDb();
 		const raw = await db.execute((database) => {
-			const stmt = database.prepare(
-				`SELECT source_path, newest_annotation_ts, last_success_ts, last_processed_mtime
-         FROM import_source
-         WHERE book_key = ? AND source_path IS NOT NULL
-         ORDER BY COALESCE(newest_annotation_ts, '') DESC,
-                  COALESCE(last_success_ts, 0) DESC,
-                  COALESCE(last_processed_mtime, 0) DESC
-         LIMIT 1`,
-			);
+			const stmt = database.prepare(SQL_LATEST_SOURCE_FOR_BOOK);
 			try {
 				stmt.bind([bookKey]);
 				if (!stmt.step()) return null as string | null;
@@ -806,6 +870,8 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 				// Ensure the brand-new DB is flushed at least once to disk
 				await this.sqlJsManager.persistDatabase(this.idxPath);
 				this.capabilities.reportOutcome("indexPersistenceLikely", true);
+				// Persistent path is ready immediately
+				this.readyResolve();
 			} catch (error) {
 				this.log.warn(
 					"Persistent index unavailable; falling back to in-memory...",
@@ -842,6 +908,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 				},
 				undefined, // in-memory persistence handled separately
 			);
+			// Rebuild will be started in initialize(); readiness gated there.
 		} catch (memErr) {
 			this.log.error(
 				"Failed to initialize in-memory index database.",

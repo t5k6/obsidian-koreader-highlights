@@ -54,28 +54,19 @@ export class ConcurrentDatabase {
 	}
 
 	/**
-	 * Convenience method for write transactions that supports safe nesting via SAVEPOINT.
-	 * The callback MUST be synchronous (no awaits) to avoid holding the lock while pending.
+	 * Safe-by-default write transaction.
+	 * - Supports sync and async callbacks.
+	 * - Keeps the SAVEPOINT and the mutex held until the callback finishes.
+	 * - Supports nesting via SAVEPOINT.
 	 */
-	public async writeTx<T>(fn: (db: Database) => T): Promise<T> {
-		return this.execute((database) => {
-			// Use a SAVEPOINT so nested calls do not error and can be composed.
+	public async writeTx<T>(fn: (db: Database) => T | Promise<T>): Promise<T> {
+		return this.execute(async (database) => {
 			database.run("SAVEPOINT ko_tx;");
 			try {
-				const result = fn(database);
-				// Enforce synchronous callbacks: if a Promise/thenable is returned, instruct caller to use writeTxAsync
-				if (result && typeof (result as any).then === "function") {
-					try {
-						database.run("ROLLBACK TO SAVEPOINT ko_tx;");
-						database.run("RELEASE SAVEPOINT ko_tx;");
-					} catch {}
-					throw new Error(
-						"ConcurrentDatabase.writeTx callback must be synchronous. Use writeTxAsync for async operations.",
-					);
-				}
+				const result = await fn(database); // awaits if Promise
 				database.run("RELEASE SAVEPOINT ko_tx;");
 				this.markDirty?.(true);
-				return result as T;
+				return result;
 			} catch (e) {
 				try {
 					database.run("ROLLBACK TO SAVEPOINT ko_tx;");
@@ -89,24 +80,9 @@ export class ConcurrentDatabase {
 	}
 
 	/**
-	 * Async variant of writeTx that keeps the SAVEPOINT active until the async body resolves.
-	 * This prevents releasing the SAVEPOINT before the async operations complete.
+	 * @deprecated Use writeTx instead. This is now an alias that behaves identically.
 	 */
-	public async writeTxAsync<T>(fn: (db: Database) => Promise<T>): Promise<T> {
-		return this.execute(async (database) => {
-			database.run("SAVEPOINT ko_tx;");
-			try {
-				const result = await fn(database);
-				database.run("RELEASE SAVEPOINT ko_tx;");
-				this.markDirty?.(true);
-				return result;
-			} catch (e) {
-				try {
-					database.run("ROLLBACK TO SAVEPOINT ko_tx;");
-					database.run("RELEASE SAVEPOINT ko_tx;");
-				} catch {}
-				throw e;
-			}
-		}, false);
+	public writeTxAsync<T>(fn: (db: Database) => Promise<T>): Promise<T> {
+		return this.writeTx(fn);
 	}
 }

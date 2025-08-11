@@ -1,47 +1,50 @@
-import { type App, ButtonComponent, Modal } from "obsidian";
+import { type App, ButtonComponent } from "obsidian";
+import { BaseModal } from "./BaseModal";
 
-export class ConfirmModal extends Modal {
-	private confirmed = false;
-	private resolvePromise!: (value: boolean) => void;
+export class ConfirmModal extends BaseModal<boolean> {
+	private confirmBtn: ButtonComponent | null = null;
 
 	constructor(
 		app: App,
-		private titleText: string,
+		titleText: string,
 		private bodyText: string,
 	) {
-		super(app);
+		super(app, {
+			title: titleText,
+			className: "confirm-modal",
+			enableEscape: true,
+			enableEnter: true,
+			focusOnOpen: true,
+		});
 	}
 
 	async openAndConfirm(): Promise<boolean> {
-		return new Promise((resolve) => {
-			this.resolvePromise = resolve;
-			this.open();
-		});
+		const res = await this.openAndAwaitResult();
+		return res ?? false;
 	}
 
-	onOpen() {
-		this.titleEl.setText(this.titleText);
-		this.contentEl.createEl("p", { text: this.bodyText });
+	protected renderContent(contentEl: HTMLElement): void {
+		contentEl.createEl("p", { text: this.bodyText });
 
-		const buttonContainer = this.contentEl.createDiv({
+		const buttonContainer = contentEl.createDiv({
 			cls: "modal-button-container",
 		});
 
-		new ButtonComponent(buttonContainer)
+		this.confirmBtn = new ButtonComponent(buttonContainer)
 			.setButtonText("Proceed")
 			.setWarning()
-			.onClick(() => {
-				this.confirmed = true;
-				this.close();
-			});
+			.onClick(() => this.resolveAndClose(true));
 
-		new ButtonComponent(buttonContainer).setButtonText("Cancel").onClick(() => {
-			this.confirmed = false;
-			this.close();
-		});
+		new ButtonComponent(buttonContainer)
+			.setButtonText("Cancel")
+			.onClick(() => this.cancel());
 	}
 
-	onClose() {
-		this.resolvePromise(this.confirmed);
+	protected handleEnter(): void {
+		this.resolveAndClose(true);
+	}
+
+	protected getFocusElement(): HTMLElement | null {
+		return this.confirmBtn?.buttonEl ?? null;
 	}
 }

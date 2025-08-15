@@ -1,8 +1,8 @@
 import { type App, Component, Notice, setIcon, type TFile } from "obsidian";
-import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import { runPluginAction } from "src/lib/ui/actionUtils";
+import type KoreaderImporterPlugin from "src/main";
 import type { BookRefreshOrchestrator } from "src/services/BookRefreshOrchestrator";
 import type { LocalIndexService } from "src/services/vault/LocalIndexService";
-import { runPluginAction } from "src/utils/actionUtils";
 
 /**
  * Manages the status bar item to refresh the current KOReader note.

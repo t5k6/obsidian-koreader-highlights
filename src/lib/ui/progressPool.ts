@@ -1,6 +1,6 @@
 import type { App } from "obsidian";
-import { asyncPool } from "src/utils/concurrency";
-import { withProgress } from "src/utils/progress";
+import { asyncPool } from "src/lib/concurrency/concurrency";
+import { withProgress } from "src/lib/ui/progress";
 
 export async function runPoolWithProgress<T, R>(
 	app: App,

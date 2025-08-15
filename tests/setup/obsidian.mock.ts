@@ -38,7 +38,9 @@ export class Component {
 		this.domUnsub.push(() => el.removeEventListener(evt, handler));
 	}
 	onunload() {
-		this.domUnsub.forEach((fn) => fn());
+		this.domUnsub.forEach((fn) => {
+			fn();
+		});
 		this.domUnsub = [];
 	}
 }

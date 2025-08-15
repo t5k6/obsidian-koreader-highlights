@@ -1,5 +1,12 @@
 import { type App, normalizePath, TFile, TFolder, type Vault } from "obsidian";
-import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import type { CacheManager } from "src/lib/cache/CacheManager";
+import { toMatchKey } from "src/lib/core/slug";
+import {
+	bookKeyFromDocProps,
+	getHighlightKey,
+} from "src/lib/formatting/formatUtils";
+import { extractHighlights } from "src/lib/parsing/highlightExtractor";
+import type KoreaderImporterPlugin from "src/main";
 import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
 import type {
 	Annotation,
@@ -8,14 +15,6 @@ import type {
 	DuplicateScanResult,
 	LuaMetadata,
 } from "src/types";
-import type { CacheManager } from "src/utils/cache/CacheManager";
-import {
-	expectedNameKeysFromDocProps,
-	keysMatchLoose,
-	nameKeyFromBasename,
-} from "src/utils/filenameMatcher";
-import { bookKeyFromDocProps, getHighlightKey } from "src/utils/formatUtils";
-import { extractHighlights } from "src/utils/highlightExtractor";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 import type { FileNameGenerator } from "./FileNameGenerator";
@@ -26,7 +25,7 @@ export class DuplicateFinder {
 	private readonly log;
 	private potentialDuplicatesCache: Map<string, TFile[]>;
 	// Cache frontmatter during a session to avoid reparsing on fallback scans
-	private fmCache: import("src/utils/cache/LruCache").LruCache<
+	private fmCache: import("src/lib/cache/LruCache").LruCache<
 		string,
 		{ mtime: number; title?: string; authors?: string }
 	>;
@@ -120,10 +119,10 @@ export class DuplicateFinder {
 			return { files: cached, timedOut: false };
 		}
 
-		// Wait for the index to be minimally ready to avoid race conditions.
 		await this.LocalIndexService.whenReady();
 
-		// Always query the index first.
+		// Strategy 1: The Index is the Source of Truth.
+		// The index is significantly faster and more accurate than a vault scan. We always query it first.
 		this.log.info(
 			`Querying index for existing files with book key: ${bookKey}`,
 		);
@@ -132,21 +131,19 @@ export class DuplicateFinder {
 			.map((p) => this.vault.getAbstractFileByPath(p))
 			.filter((f): f is TFile => f instanceof TFile);
 
-		// If persistent, trust results fully.
 		if (this.LocalIndexService.isIndexPersistent()) {
 			this.potentialDuplicatesCache.set(bookKey, filesFromIndex);
 			return { files: filesFromIndex, timedOut: false };
 		}
 
-		// If in-memory and we found candidates, return them.
+		// If the index is in-memory but found candidates, we trust them. An in-memory index
+		// that has been rebuilt is still a far better signal than a slow, heuristic-based filename scan.
 		if (filesFromIndex.length > 0) {
 			this.potentialDuplicatesCache.set(bookKey, filesFromIndex);
 			return { files: filesFromIndex, timedOut: false };
 		}
 
-		// Degraded mode fallback scan:
-		// Phase 1: scan using metadataCache.frontmatter (no file I/O)
-		// Phase 2: for uncached candidates, targeted file reads within time budget
+		// Strategy 2: Degraded Mode Fallback Scan (In-memory index found nothing).
 		this.log.info(
 			`Index is in-memory and yielded no results for key ${bookKey}. Falling back to vault scan.`,
 		);
@@ -160,72 +157,80 @@ export class DuplicateFinder {
 			return { files: [], timedOut: false };
 		}
 
-		const results: TFile[] = [];
-		const startTime = Date.now();
-		const SCAN_TIMEOUT_MS =
-			(this.plugin.settings.scanTimeoutSeconds ?? 8) * 1000;
-		let timedOut = false;
-
 		const { files, aborted } = await this.fs.getFilesInFolder(root, {
 			extensions: ["md"],
 			recursive: true,
-			signal: undefined,
 		});
-		if (aborted || Date.now() - startTime > SCAN_TIMEOUT_MS) {
+
+		const startTime = Date.now();
+		const SCAN_TIMEOUT_MS =
+			(this.plugin.settings.scanTimeoutSeconds ?? 8) * 1000;
+
+		if (aborted) {
 			this.log.warn(
-				`Degraded duplicate scan timed out after ${SCAN_TIMEOUT_MS}ms.`,
+				`Degraded duplicate scan was aborted during file collection.`,
 			);
 			return { files: [], timedOut: true };
 		}
 
-		// Prepare fuzzy expected keys from intended filename composition
-		const expectedKeys = expectedNameKeysFromDocProps(
-			docProps,
-			this.plugin.settings.useCustomFileNameTemplate,
-			this.plugin.settings.fileNameTemplate,
-		);
+		const docTitleKey = toMatchKey(docProps.title);
+		const docAuthorsKey = toMatchKey(docProps.authors);
+		const expectedFilenameKeys = new Set<string>();
+		if (docTitleKey && docAuthorsKey) {
+			expectedFilenameKeys.add(`${docTitleKey} ${docAuthorsKey}`);
+			expectedFilenameKeys.add(`${docAuthorsKey} ${docTitleKey}`);
+		}
+		if (docTitleKey) {
+			expectedFilenameKeys.add(docTitleKey);
+		}
 
+		if (docAuthorsKey) {
+			expectedFilenameKeys.add(docAuthorsKey);
+		}
+
+		const results: TFile[] = [];
+		let timedOut = false;
 		for (const file of files) {
 			if (Date.now() - startTime > SCAN_TIMEOUT_MS) {
 				timedOut = true;
 				break;
 			}
+
 			try {
-				// Phase 1: try metadataCache (no disk I/O)
-				const md = this.app.metadataCache.getFileCache(file);
-				const fm = md?.frontmatter as any | undefined;
-				let title: string | undefined;
-				let authors: string | undefined;
-				if (fm) {
-					title = typeof fm.title === "string" ? fm.title : undefined;
-					if (typeof fm.authors === "string") authors = fm.authors;
-					else if (Array.isArray(fm.authors)) authors = fm.authors.join(", ");
-				}
+				// Step A: Prioritize matching via cached frontmatter (cheap).
+				const cachedMetadata = this.app.metadataCache.getFileCache(file);
+				const fm = cachedMetadata?.frontmatter;
 
-				// If metadataCache lacks needed fields, fall back to targeted file read
-				if (!title && !authors) {
-					const cachedFm = await this.getFmCached(file);
-					title = cachedFm.title;
-					authors = cachedFm.authors;
-				}
+				if (fm?.title || fm?.authors) {
+					const fmTitle = typeof fm.title === "string" ? fm.title : undefined;
+					let fmAuthors: string | undefined;
+					if (typeof fm.authors === "string") fmAuthors = fm.authors;
+					else if (Array.isArray(fm.authors)) fmAuthors = fm.authors.join(", ");
 
-				const fileKey = bookKeyFromDocProps({
-					title: title ?? "",
-					authors: authors ?? "",
-				});
-				const matchedByFrontmatter = fileKey === bookKey;
-				if (matchedByFrontmatter) {
-					results.push(file);
-				} else {
-					// Fallback: fuzzy match by filename key if frontmatter didn't match
-					const fileStemKey = nameKeyFromBasename(file.basename);
-					if (expectedKeys.some((ek) => keysMatchLoose(ek, fileStemKey))) {
+					const frontmatterBookKey = bookKeyFromDocProps({
+						title: fmTitle ?? "",
+						authors: fmAuthors ?? "",
+					});
+
+					if (frontmatterBookKey === bookKey) {
 						results.push(file);
+						continue; // Match found, no need to check filename.
 					}
+				}
+
+				// Step B: Fallback to matching via filename.
+				const stem = file.basename
+					.replace(/\s*[[(].*?[\])]\s*$/g, "") // strip [pdf]
+					.replace(/\s*\(\d+\)\s*$/g, ""); // strip (1)
+
+				const fileStemKey = toMatchKey(stem);
+
+				if (expectedFilenameKeys.has(fileStemKey)) {
+					results.push(file);
 				}
 			} catch (e) {
 				this.log.warn(
-					`Frontmatter parse failed for ${file.path} during duplicate scan.`,
+					`Error processing ${file.path} during duplicate scan.`,
 					e,
 				);
 			}
@@ -234,6 +239,7 @@ export class DuplicateFinder {
 		if (!timedOut) {
 			this.potentialDuplicatesCache.set(bookKey, results);
 		}
+
 		return { files: results, timedOut };
 	}
 

@@ -1,6 +1,14 @@
 import { debounce, Notice, normalizePath, TFile, type Vault } from "obsidian";
 import { DEFAULT_TEMPLATES_FOLDER } from "src/constants";
-import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import type { CacheManager } from "src/lib/cache/CacheManager";
+import type { LruCache } from "src/lib/cache/LruCache";
+import {
+	formatDate,
+	formatDateAsDailyNote,
+	formatDateLocale,
+} from "src/lib/formatting/dateUtils";
+import { styleHighlight } from "src/lib/formatting/highlightStyle";
+import type KoreaderImporterPlugin from "src/main";
 import type {
 	Annotation,
 	KoreaderHighlightImporterSettings,
@@ -9,14 +17,6 @@ import type {
 	TemplateData,
 	TemplateDefinition,
 } from "src/types";
-import type { CacheManager } from "src/utils/cache/CacheManager";
-import type { LruCache } from "src/utils/cache/LruCache";
-import {
-	formatDate,
-	formatDateAsDailyNote,
-	formatDateLocale,
-} from "src/utils/dateUtils";
-import { styleHighlight } from "src/utils/highlightStyle";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 import { TemplateValidator } from "./TemplateValidator";

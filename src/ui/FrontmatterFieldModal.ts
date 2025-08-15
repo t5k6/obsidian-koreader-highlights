@@ -107,9 +107,9 @@ export class FrontmatterFieldModal extends Modal {
 		input.setAttribute("list", "field-suggestions");
 		const datalist = contentEl.createEl("datalist");
 		datalist.id = "field-suggestions";
-		suggestedFields.forEach((field) =>
-			datalist.createEl("option", { value: field }),
-		);
+		suggestedFields.forEach((field) => {
+			datalist.createEl("option", { value: field });
+		});
 
 		addFieldSetting.addButton((button) =>
 			button

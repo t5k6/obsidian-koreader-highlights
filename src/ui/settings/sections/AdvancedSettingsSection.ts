@@ -1,8 +1,8 @@
 import { Notice, Setting, setIcon } from "obsidian";
 import { DEFAULT_LOGS_FOLDER } from "src/constants";
+import { runPluginAction } from "src/lib/ui/actionUtils";
 import { LogLevel } from "src/services/LoggingService";
 import type { KoreaderHighlightImporterSettings } from "src/types";
-import { runPluginAction } from "src/utils/actionUtils";
 import {
 	booleanSetting,
 	dropdownSetting,

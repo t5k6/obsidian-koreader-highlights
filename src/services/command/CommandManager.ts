@@ -1,7 +1,7 @@
 import { Notice } from "obsidian";
-import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import type { CacheManager } from "src/lib/cache/CacheManager";
+import type KoreaderImporterPlugin from "src/main";
 import type { ScanManager } from "src/services/device/ScanManager";
-import type { CacheManager } from "src/utils/cache/CacheManager";
 import type { CapabilityManager } from "../CapabilityManager";
 import type { SDRFinder } from "../device/SDRFinder";
 import { FileSystemService } from "../FileSystemService";

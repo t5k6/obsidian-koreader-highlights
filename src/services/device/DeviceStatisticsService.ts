@@ -1,6 +1,11 @@
 import path from "node:path";
 import type { Database, SqlValue } from "sql.js";
-import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import type { CacheManager } from "src/lib/cache/CacheManager";
+import type { LruCache } from "src/lib/cache/LruCache";
+import { AsyncLazy } from "src/lib/concurrency/asyncLazy";
+import { ConcurrentDatabase } from "src/lib/concurrency/ConcurrentDatabase";
+import { isErr } from "src/lib/core/result";
+import type KoreaderImporterPlugin from "src/main";
 import type {
 	BookStatistics,
 	Disposable,
@@ -10,10 +15,6 @@ import type {
 	ReadingStatus,
 	SettingsObserver,
 } from "src/types";
-import { AsyncLazy } from "src/utils/asyncLazy";
-import { ConcurrentDatabase } from "src/utils/ConcurrentDatabase";
-import type { CacheManager } from "src/utils/cache/CacheManager";
-import type { LruCache } from "src/utils/cache/LruCache";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 import type { SqlJsManager } from "../SqlJsManager";
@@ -69,14 +70,15 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 				return null;
 			}
 
-			const bytes = await this.fsService.readBinaryAuto(filePath).catch((e) => {
+			const bytesRes = await this.fsService.readBinaryAuto(filePath);
+			if (isErr(bytesRes)) {
 				this.log.error(
 					`Failed to read KOReader stats DB bytes: ${filePath}`,
-					e,
+					(bytesRes as any).error ?? bytesRes,
 				);
 				return null;
-			});
-			if (!bytes) return null;
+			}
+			const bytes = bytesRes.value;
 
 			const SQL = await this.sqlJsManager.getSqlJs();
 			const db = new SQL.Database(bytes); // strictly in-memory
@@ -86,12 +88,8 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 			this.dbFilePath = filePath;
 
 			// capture mtime to support hot-reload if file changes
-			try {
-				const st = await this.fsService.getNodeStats(filePath);
-				this.dbFileMtimeMs = st?.mtimeMs ?? null;
-			} catch {
-				/* ignore */
-			}
+			const stRes = await this.fsService.getNodeStats(filePath);
+			this.dbFileMtimeMs = isErr(stRes) ? null : stRes.value.mtimeMs;
 
 			const cdb = new ConcurrentDatabase(async () => db);
 			this.log.info(`Loaded KOReader stats DB into memory: ${filePath}`);
@@ -210,13 +208,10 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 
 		let p = path.resolve(mountPoint);
 		for (let i = 0; i < MAX_ROOT_SEARCH_DEPTH; i++) {
-			try {
-				if (await this.fsService.getNodeStats(path.join(p, ".adds"))) {
-					this.deviceRootCache.set(mountPoint, p);
-					return p;
-				}
-			} catch {
-				/* no-op */
+			const stRes = await this.fsService.getNodeStats(path.join(p, ".adds"));
+			if (!isErr(stRes)) {
+				this.deviceRootCache.set(mountPoint, p);
+				return p;
 			}
 			const parent = path.dirname(p);
 			if (parent === p) break;
@@ -264,18 +259,14 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 	 */
 	private async refreshIfDeviceDbChanged(): Promise<void> {
 		if (!this.dbFilePath) return;
-		try {
-			const st = await this.fsService.getNodeStats(this.dbFilePath);
-			const mtime = st?.mtimeMs ?? null;
-			if (mtime && this.dbFileMtimeMs && mtime > this.dbFileMtimeMs) {
-				this.log.info(
-					"KOReader stats DB changed on device. Reloading in-memory DB.",
-				);
-				this.dispose(); // clears caches and closes in-memory DB
-				// Recreate lazily on next getConcurrentDb()
-			}
-		} catch {
-			/* ignore */
+		const stRes = await this.fsService.getNodeStats(this.dbFilePath);
+		const mtime = isErr(stRes) ? null : stRes.value.mtimeMs;
+		if (mtime && this.dbFileMtimeMs && mtime > this.dbFileMtimeMs) {
+			this.log.info(
+				"KOReader stats DB changed on device. Reloading in-memory DB.",
+			);
+			this.dispose(); // clears caches and closes in-memory DB
+			// Recreate lazily on next getConcurrentDb()
 		}
 	}
 

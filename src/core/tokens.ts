@@ -1,11 +1,11 @@
 import type { App, Vault } from "obsidian";
+import type KoreaderImporterPlugin from "src/main";
 import type { PromptService } from "src/services/ui/PromptService";
 import type {
 	DuplicateHandlingSession,
 	DuplicateMatch,
 	IDuplicateHandlingModal,
 } from "src/types";
-import type KoreaderImporterPlugin from "./KoreaderImporterPlugin";
 
 export const APP_TOKEN = Symbol("App");
 export const VAULT_TOKEN = Symbol("Vault");

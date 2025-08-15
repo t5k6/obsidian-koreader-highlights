@@ -1,12 +1,12 @@
 import path from "node:path";
 import { type App, Notice, type TFile, type TFolder } from "obsidian";
-import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
-import type { PromptService } from "src/services/ui/PromptService";
 import {
 	convertCommentStyle,
 	extractHighlightsWithStyle,
-} from "src/utils/highlightExtractor";
-import { runPoolWithProgress } from "src/utils/progressPool";
+} from "src/lib/parsing/highlightExtractor";
+import { runPoolWithProgress } from "src/lib/ui/progressPool";
+import type KoreaderImporterPlugin from "src/main";
+import type { PromptService } from "src/services/ui/PromptService";
 import {
 	addSummary,
 	blankSummary,

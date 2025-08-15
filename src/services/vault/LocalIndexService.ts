@@ -10,7 +10,11 @@ import {
 } from "obsidian";
 import type { Database } from "sql.js";
 import { INDEX_DB_VERSION } from "src/constants";
-import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import type { CacheManager } from "src/lib/cache/CacheManager";
+import type { LruCache } from "src/lib/cache/LruCache";
+import { ConcurrentDatabase } from "src/lib/concurrency/ConcurrentDatabase";
+import { isErr } from "src/lib/core/result";
+import type KoreaderImporterPlugin from "src/main";
 import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
 import type {
 	DebouncedFn,
@@ -18,9 +22,6 @@ import type {
 	KoreaderHighlightImporterSettings,
 	SettingsObserver,
 } from "src/types";
-import { ConcurrentDatabase } from "src/utils/ConcurrentDatabase";
-import type { CacheManager } from "src/utils/cache/CacheManager";
-import type { LruCache } from "src/utils/cache/LruCache";
 import { CapabilityManager } from "../CapabilityManager";
 import { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
@@ -850,11 +851,15 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 			}
 
 			try {
-				// Open or create persistent DB
-				const db = await this.sqlJsManager.openDatabase(this.idxPath, {
+				// Open or create persistent DB (Result-based)
+				const dbRes = await this.sqlJsManager.openDatabase(this.idxPath, {
 					schemaSql: INDEX_DB_SCHEMA,
 					validate: true,
 				});
+				if (isErr(dbRes)) {
+					throw dbRes.error;
+				}
+				const db = dbRes.value;
 				this.idxDb = db;
 				// Run migrations and one-time backfill
 				migrateDb(db);
@@ -868,7 +873,12 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 				}
 				this.indexState = "persistent";
 				// Ensure the brand-new DB is flushed at least once to disk
-				await this.sqlJsManager.persistDatabase(this.idxPath);
+				const persistRes = await this.sqlJsManager.persistDatabase(
+					this.idxPath,
+				);
+				if (isErr(persistRes)) {
+					this.log.warn("Persisting index database failed", persistRes.error);
+				}
 				this.capabilities.reportOutcome("indexPersistenceLikely", true);
 				// Persistent path is ready immediately
 				this.readyResolve();
@@ -1248,11 +1258,13 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		const dbPath = this.idxPath;
 		this.concurrentDb = new ConcurrentDatabase(
 			async () => {
-				// openDatabase will return cached DB
-				const db = await this.sqlJsManager.openDatabase(dbPath, {
+				// openDatabase will return cached DB (Result-based)
+				const dbRes = await this.sqlJsManager.openDatabase(dbPath, {
 					schemaSql: INDEX_DB_SCHEMA,
 					validate: true,
 				});
+				if (isErr(dbRes)) throw dbRes.error;
+				const db = dbRes.value;
 				this.idxDb = db;
 				return db;
 			},

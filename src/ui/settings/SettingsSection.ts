@@ -1,5 +1,5 @@
 import { type App, Component } from "obsidian";
-import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import type KoreaderImporterPlugin from "src/main";
 import type { DebouncedFn } from "src/types";
 
 export abstract class SettingsSection extends Component {

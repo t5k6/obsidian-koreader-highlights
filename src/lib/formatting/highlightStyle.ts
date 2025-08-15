@@ -3,7 +3,7 @@
  * Guarantees at least 4.5:1 contrast for any generated mark element.  *
  ***********************************************************************/
 
-import type { Annotation } from "../types";
+import type { Annotation } from "src/types";
 
 /* ------------------------------------------------------------------ */
 /* 1 ▸ names & helpers                                                */

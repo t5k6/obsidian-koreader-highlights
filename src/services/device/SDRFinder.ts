@@ -1,12 +1,13 @@
 import { platform } from "node:os";
 import path, { join as joinPath } from "node:path";
-import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import { type CacheManager, memoizeAsync } from "src/lib/cache/CacheManager";
+import { ConcurrencyLimiter } from "src/lib/concurrency/concurrency";
+import { isErr } from "src/lib/core/result";
+import type KoreaderImporterPlugin from "src/main";
 import type {
 	KoreaderHighlightImporterSettings,
 	SettingsObserver,
 } from "src/types";
-import { type CacheManager, memoizeAsync } from "src/utils/cache/CacheManager";
-import { ConcurrencyLimiter } from "src/utils/concurrency";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 
@@ -91,13 +92,17 @@ export class SDRFinder implements SettingsObserver {
 		if (!name) return null;
 
 		const fullPath = joinPath(sdrDir, name);
-		try {
-			this.log.info("Reading metadata:", fullPath);
-			return await this.fs.readNodeFile(fullPath);
-		} catch (err) {
-			this.log.error(`Failed to read metadata file: ${fullPath}`, err);
+		this.log.info("Reading metadata:", fullPath);
+		const res = await this.fs.readNodeFile(fullPath, false);
+		if (isErr(res)) {
+			this.log.error(
+				`Failed to read metadata file: ${fullPath}`,
+				(res as any).error ?? res,
+			);
 			return null;
 		}
+		const v = res.value;
+		return typeof v === "string" ? v : new TextDecoder().decode(v);
 	}
 
 	public onSettingsChanged(
@@ -150,8 +155,8 @@ export class SDRFinder implements SettingsObserver {
 
 		const { excludedFolders } = this.plugin.settings;
 		const root = mountPoint;
-		const excluded = new Set(
-			excludedFolders.map((e) => e.trim().toLowerCase()),
+		const excluded = new Set<string>(
+			excludedFolders.map((e: string) => e.trim().toLowerCase()),
 		);
 
 		const results: string[] = [];
@@ -208,8 +213,10 @@ export class SDRFinder implements SettingsObserver {
 		if (cached !== undefined) return cached;
 
 		const { allowedFileTypes } = this.plugin.settings;
-		const allow = new Set(
-			allowedFileTypes.map((t) => t.trim().toLowerCase()).filter(Boolean),
+		const allow = new Set<string>(
+			allowedFileTypes
+				.map((t: string) => t.trim().toLowerCase())
+				.filter(Boolean),
 		);
 		const allowAll = allow.size === 0;
 
@@ -255,8 +262,8 @@ export class SDRFinder implements SettingsObserver {
 	 * @returns True if path is a usable directory
 	 */
 	private async isUsableDir(p: string): Promise<boolean> {
-		const stats = await this.fs.getNodeStats(p);
-		return stats?.isDirectory() ?? false;
+		const stRes = await this.fs.getNodeStats(p);
+		return !isErr(stRes) && stRes.value.isDirectory();
 	}
 
 	/**

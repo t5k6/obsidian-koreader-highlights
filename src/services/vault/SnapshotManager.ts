@@ -1,15 +1,12 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { type App, Notice, TFile } from "obsidian";
-import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
-import { KeyedQueue } from "src/utils/concurrency";
-import { normalizeFileNamePiece } from "src/utils/formatUtils";
+import { KeyedQueue } from "src/lib/concurrency/concurrency";
+import { err, isErr } from "src/lib/core/result";
+import { normalizeFileNamePiece } from "src/lib/pathing/fileNaming";
+import type KoreaderImporterPlugin from "src/main";
 import type { CapabilityManager } from "../CapabilityManager";
-import {
-	FileSystemError,
-	FileSystemErrorCode,
-	type FileSystemService,
-} from "../FileSystemService";
+import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 
 export class SnapshotManager {
@@ -60,13 +57,12 @@ export class SnapshotManager {
 				);
 				return;
 			}
-			const content = await this.readWithRetry(targetFile);
-			try {
-				await this.writeSnapshot(targetFile, content);
-			} catch (error) {
+			const content = await this.app.vault.read(targetFile);
+			const writeRes = await this.writeSnapshot(targetFile, content);
+			if (isErr(writeRes)) {
 				this.log.warn(
 					`[SnapshotManager] Snapshot write failed for ${targetFile.path}; continuing without snapshot`,
-					error,
+					writeRes.error,
 				);
 				new Notice(
 					`Warning: Could not update snapshot for ${targetFile.basename}. Future merges may be less accurate.`,
@@ -87,12 +83,11 @@ export class SnapshotManager {
 		});
 		if (!ok) return;
 		await this.withSnapshotLock(targetFile.path, async () => {
-			try {
-				await this.writeSnapshot(targetFile, content);
-			} catch (error) {
+			const writeRes = await this.writeSnapshot(targetFile, content);
+			if (isErr(writeRes)) {
 				this.log.warn(
 					`[SnapshotManager] Snapshot write failed for ${targetFile.path}; continuing without snapshot`,
-					error,
+					writeRes.error,
 				);
 				new Notice(
 					`Warning: Could not update snapshot for ${targetFile.basename}. Future merges may be less accurate.`,
@@ -134,10 +129,11 @@ export class SnapshotManager {
 		let deletedCount = 0;
 
 		try {
-			const { files } = await this.fs.getFilesInFolder(this.backupDir, {
+			const scan = await this.fs.getFilesInFolder(this.backupDir, {
 				extensions: ["md"],
 				recursive: true,
 			});
+			const { files } = scan; // getFilesInFolder returns FolderScanResult directly
 			for (const file of files) {
 				const statsTime = file.stat.mtime;
 				if (statsTime < cutoffTime) {
@@ -174,20 +170,26 @@ export class SnapshotManager {
 		const ok = await this.capabilities.ensure("snapshotsWritable");
 		if (!ok) return null;
 		const snapshotPath = this.getSnapshotPath(targetFile);
-		try {
-			// Prefer reading via vault if a TFile exists, to align with tests that spy on vault.read
-			const abs = this.app.vault.getAbstractFileByPath(snapshotPath);
-			if (abs instanceof TFile) {
+		// Prefer reading via vault if a TFile exists, to align with tests that spy on vault.read
+		const abs = this.app.vault.getAbstractFileByPath(snapshotPath);
+		if (abs instanceof TFile) {
+			try {
 				return await this.app.vault.read(abs);
+			} catch (error) {
+				this.log.error(
+					`Failed to read snapshot via vault for ${targetFile.path}`,
+					error,
+				);
+				return null;
 			}
-			return await this.fs.readVaultText(snapshotPath);
-		} catch (error) {
-			if (error instanceof FileSystemError && error.isNotFound) {
-				return null; // missing snapshot is OK
-			}
-			this.log.error(`Failed to read snapshot for ${targetFile.path}`, error);
+		}
+		const r = await this.fs.readVaultText(snapshotPath);
+		if (isErr(r)) {
+			if (r.error.kind === "NotFound") return null;
+			this.log.error(`Failed to read snapshot for ${targetFile.path}`, r.error);
 			return null;
 		}
+		return r.value;
 	}
 
 	/**
@@ -237,17 +239,30 @@ export class SnapshotManager {
 		if (!ok) return;
 
 		const versionPath = getPath(targetFile);
+		// Ensure the file still exists right before reading to avoid race conditions
+		const abs = this.app.vault.getAbstractFileByPath(targetFile.path);
+		if (!(abs instanceof TFile)) {
+			this.log.warn(
+				`File ${targetFile.path} was deleted before ${purpose} could be created.`,
+			);
+			return;
+		}
 		try {
-			// Ensure the file still exists right before reading to avoid race conditions
-			const abs = this.app.vault.getAbstractFileByPath(targetFile.path);
-			if (!(abs instanceof TFile)) {
-				this.log.warn(
-					`File ${targetFile.path} was deleted before ${purpose} could be created.`,
-				);
-				return;
-			}
 			const content = await this.app.vault.read(targetFile);
-			await this.writeText(versionPath, content);
+			const w = await this.writeText(versionPath, content);
+			if (isErr(w)) {
+				this.log.error(
+					`Failed to create ${purpose} for ${targetFile.path}`,
+					w.error,
+				);
+				if (purpose === "snapshot") {
+					new Notice(
+						`Warning: Could not update snapshot for ${targetFile.basename}. Future merges may be less accurate.`,
+					);
+					return;
+				}
+				throw w.error as any;
+			}
 			this.log.info(
 				`Created ${purpose} for ${targetFile.path} at ${versionPath}`,
 			);
@@ -256,7 +271,6 @@ export class SnapshotManager {
 				`Failed to create ${purpose} for ${targetFile.path}`,
 				error,
 			);
-			// Snapshot failures should not block import; backups are stricter
 			if (purpose === "snapshot") {
 				new Notice(
 					`Warning: Could not update snapshot for ${targetFile.basename}. Future merges may be less accurate.`,
@@ -276,48 +290,14 @@ export class SnapshotManager {
 		return this.queue.run(key, task);
 	}
 
-	private async readWithRetry(file: TFile): Promise<string> {
-		const maxAttempts = 5;
-		for (let attempt = 0; attempt < maxAttempts; attempt++) {
-			try {
-				return await this.app.vault.read(file);
-			} catch (e) {
-				const msg = String((e as Error)?.message || "");
-				const transient = /ENOENT|busy|locked|EPERM|EACCES/i.test(msg);
-				if (!transient || attempt === maxAttempts - 1) throw e;
-				await this.backoff(attempt);
-			}
-		}
-		return ""; // unreachable
-	}
-
-	private async writeSnapshot(file: TFile, content: string): Promise<void> {
+	private async writeSnapshot(file: TFile, content: string) {
 		const target = this.getSnapshotPath(file);
-		const maxAttempts = 6;
-		for (let attempt = 0; attempt < maxAttempts; attempt++) {
-			try {
-				await this.writeText(target, content);
-				return;
-			} catch (e) {
-				const code = e instanceof FileSystemError ? e.code : undefined;
-				const transient =
-					code === FileSystemErrorCode.AlreadyExists ||
-					code === FileSystemErrorCode.NotFound ||
-					code === FileSystemErrorCode.Permission;
-				if (!transient || attempt === maxAttempts - 1) {
-					this.log.error(
-						`[SnapshotManager] Failed to write snapshot ${target}`,
-						e,
-					);
-					throw e;
-				}
-				await this.backoff(attempt);
-			}
-		}
+		return this.writeText(target, content);
 	}
 
 	// Write UTF-8 text via FileSystemService. Prefer atomic method; fall back for tests/mocks.
-	private async writeText(vaultPath: string, content: string): Promise<void> {
+	private async writeText(vaultPath: string, content: string) {
+		// Prefer atomic write. Fallback to writeVaultFile if needed.
 		const fsAny = this.fs as any;
 		if (typeof fsAny.writeVaultTextAtomic === "function") {
 			return fsAny.writeVaultTextAtomic(vaultPath, content);
@@ -325,15 +305,13 @@ export class SnapshotManager {
 		if (typeof fsAny.writeVaultFile === "function") {
 			return fsAny.writeVaultFile(vaultPath, content);
 		}
-		throw new Error(
-			"FileSystemService missing write method (writeVaultTextAtomic or writeVaultFile)",
-		);
+		// If the service lacks write methods (tests), return an AppFailure Result
+		return err({
+			kind: "WriteFailed",
+			path: vaultPath,
+			cause: new Error("FileSystemService missing write method"),
+		} as any);
 	}
 
-	private async backoff(attempt: number): Promise<void> {
-		const base = 50; // ms
-		const delay =
-			Math.min(1000, base * 2 ** attempt) + Math.floor(Math.random() * 50);
-		await new Promise((resolve) => setTimeout(resolve, delay));
-	}
+	// Backoff removed; retry logic centralized in FileSystemService
 }

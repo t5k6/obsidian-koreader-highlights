@@ -1,21 +1,37 @@
-import { promises as fsp } from "node:fs";
-import path, { posix as posixPath } from "node:path";
+import { promises as fsp } from "fs";
 import {
-	Notice,
 	normalizePath,
 	type Plugin,
-	TFile,
-	TFolder,
+	type TFile,
+	type TFolder,
 	type Vault,
 } from "obsidian";
+import path, { posix as posixPath } from "path";
+import type { CacheManager } from "src/lib/cache";
+import {
+	KeyedQueue,
+	readWithRetry,
+	removeWithRetry,
+	renameWithRetry,
+	writeBinaryWithRetry,
+} from "src/lib/concurrency";
+import { withFsRetry } from "src/lib/concurrency/fsRetry";
+import { err, isErr, ok, type Result } from "src/lib/core/result";
+import type { AppFailure, FileSystemFailure } from "src/lib/errors/resultTypes";
+import { isTFile, isTFolder } from "src/lib/obsidian/typeguards";
+import { normalizeFileNamePiece } from "src/lib/pathing/fileNaming";
 import type { Cache } from "src/types";
-import type { CacheManager } from "src/utils/cache/CacheManager";
-import { KeyedQueue } from "src/utils/concurrency";
-import { normalizeFileNamePiece } from "src/utils/formatUtils";
 
 /* ------------------------------------------------------------------ */
 /*                              TYPES                                 */
 /* ------------------------------------------------------------------ */
+
+// Branded types to distinguish vault vs system paths at compile time.
+export type VaultPath = string & { __vault: true };
+export type SystemPath = string & { __system: true };
+
+const brandVault = (p: string): VaultPath => p as VaultPath;
+const brandSystem = (p: string): SystemPath => p as SystemPath;
 
 export enum FileSystemErrorCode {
 	NotFound = "ENOENT",
@@ -27,6 +43,20 @@ export enum FileSystemErrorCode {
 	Unknown = "UNKNOWN",
 }
 
+// Structural guard to avoid relying on instanceof across modules
+function looksLikeFileSystemError(e: unknown): e is {
+	code?: string | FileSystemErrorCode;
+	isNotFound?: boolean;
+	name?: string;
+} {
+	if (!e || typeof e !== "object") return false;
+	const anyE = e as any;
+	const hasCode = typeof anyE.code === "string";
+	const hasIsNotFound = typeof anyE.isNotFound === "boolean";
+	const hasName = anyE.name === "FileSystemError";
+	return (hasCode || hasIsNotFound) && hasName;
+}
+
 export class FileSystemError extends Error {
 	constructor(
 		public readonly operation: string,
@@ -36,6 +66,8 @@ export class FileSystemError extends Error {
 	) {
 		super(message || `${operation} failed on ${path}: ${code}`);
 		this.name = "FileSystemError";
+		// Ensure proper prototype chain for robust instanceof behavior across modules
+		Object.setPrototypeOf(this, new.target.prototype);
 	}
 
 	get isNotFound(): boolean {
@@ -49,16 +81,13 @@ export class FileSystemError extends Error {
 	}
 }
 
+// Local cache entry wrapper for typed caches managed via CacheManager
 interface CacheEntry<T> {
 	value: T;
 	timestamp: number;
 }
-interface FileCreationOptions {
-	maxAttempts?: number;
-	useTimestampFallback?: boolean;
-	failOnFirstCollision?: boolean;
-}
 
+// Result of folder scans used by walkFolder/getFilesInFolder
 export interface FolderScanResult {
 	files: TFile[];
 	aborted: boolean;
@@ -69,14 +98,13 @@ export class FileSystemService {
 	private readonly folderExistsCache!: Cache<string, CacheEntry<boolean>>;
 	private readonly nodeStatsCache!: Cache<
 		string,
-		CacheEntry<import("node:fs").Stats | null>
+		CacheEntry<Result<import("node:fs").Stats, FileSystemFailure>>
 	>;
 	private readonly CACHE_TTL = 5000;
 	private readonly keyedQueue = new KeyedQueue();
-	private readonly recentNotices = new Map<string, number>();
 	private renameReplaceSupported: boolean | null = null;
 	private loggedCapabilityOnce = false;
-	private folderScanCache!: import("src/utils/cache/LruCache").LruCache<
+	private folderScanCache!: import("src/lib/cache").LruCache<
 		string,
 		FolderScanResult
 	>;
@@ -96,29 +124,130 @@ export class FileSystemService {
 	/*                        STATIC HELPERS & UTILS                      */
 	/* ------------------------------------------------------------------ */
 
-	public static normalizeSystemPath(p: string | null | undefined): string {
-		if (!p) return "";
+	public static normalizeSystemPath(p: string | null | undefined): SystemPath {
+		if (!p) return brandSystem("");
 		let s = p.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
 		if (s.length > 1 && s.endsWith("/")) {
 			s = s.slice(0, -1);
 		}
-		return s;
+		return brandSystem(s);
 	}
 
 	/**
 	 * Converts a path to a canonical, vault-relative format.
 	 * This is the single source of truth for path normalization.
 	 */
-	public static toVaultPath(rawPath: string | null | undefined): string {
-		if (!rawPath) return "";
+	public static toVaultPath(rawPath: string | null | undefined): VaultPath {
+		if (!rawPath) return brandVault("");
 		const p = normalizePath(rawPath.trim());
-		if (p === "/" || p === "." || p === "") return "";
-		return p.replace(/^\/+/, "").replace(/\/+$/, "");
+		if (p === "/" || p === "." || p === "") return brandVault("");
+		return brandVault(p.replace(/^\/+/, "").replace(/\/+$/, ""));
+	}
+
+	/**
+	 * Returns the basename (final segment) of a vault path string without requiring an instance.
+	 */
+	public static vaultBasenameOf(p: string): string {
+		const norm = FileSystemService.toVaultPath(p) as unknown as string;
+		const parts = norm.split("/");
+		return parts[parts.length - 1] ?? "";
+	}
+
+	/**
+	 * Returns the extension (including the dot) of a vault path's basename, or empty string.
+	 */
+	public static vaultExtnameOf(p: string): string {
+		const base = FileSystemService.vaultBasenameOf(p);
+		const idx = base.lastIndexOf(".");
+		return idx >= 0 ? base.slice(idx) : "";
+	}
+
+	/**
+	 * Normalize adapter/Node error shapes to a stable not-found predicate.
+	 */
+	public static isNotFound(err: unknown): boolean {
+		const e: any = err as any;
+		// Prefer structural detection over instanceof for robustness
+		if (looksLikeFileSystemError(e)) {
+			const c: string | FileSystemErrorCode | undefined = (e as any).code as
+				| string
+				| FileSystemErrorCode
+				| undefined;
+			return c === FileSystemErrorCode.NotFound || e.isNotFound === true;
+		}
+		// Fallback to common Node/adapter code shapes
+		const code = (
+			typeof (e as any)?.code === "string"
+				? (e as any).code
+				: typeof (e as any)?.Code === "string"
+					? (e as any).Code
+					: undefined
+		) as string | undefined;
+		return code === "ENOENT";
 	}
 
 	public static getVaultParent(vaultPath: string): string {
 		const parent = posixPath.dirname(vaultPath);
 		return parent === "." ? "" : parent;
+	}
+
+	/**
+	 * Join path segments using POSIX semantics (for vaults) and normalize.
+	 * Returns a vault-relative path without a leading slash.
+	 */
+	public joinVaultPath(...segments: string[]): VaultPath {
+		const joined = posixPath.join(
+			...segments.map((s) => FileSystemService.toVaultPath(s)),
+		);
+		return FileSystemService.toVaultPath(joined);
+	}
+
+	/** Get the normalized parent directory of a vault path. */
+	public vaultDirname(p: string): VaultPath {
+		return brandVault(posixPath.dirname(FileSystemService.toVaultPath(p)));
+	}
+
+	/** Get the basename (final segment) of a vault path. */
+	public vaultBasename(p: string): string {
+		return FileSystemService.vaultBasenameOf(p);
+	}
+
+	/** Get the extension (including the dot) of a vault path's basename, or empty string. */
+	public vaultExtname(p: string): string {
+		return FileSystemService.vaultExtnameOf(p);
+	}
+
+	/** Cheap dev-time check for a correctly normalized vault path. */
+	public isNormalizedVaultPath(p: string): boolean {
+		return p === (FileSystemService.toVaultPath(p) as unknown as string);
+	}
+
+	/** Join OS-native system path segments. */
+	public joinSystemPath(...segments: string[]): SystemPath {
+		return brandSystem(path.join(...segments));
+	}
+
+	/** Get dirname of an OS-native system path. */
+	public systemDirname(p: string): SystemPath {
+		return brandSystem(path.dirname(p));
+	}
+
+	/** Get basename of an OS-native system path. */
+	public systemBasename(p: string): string {
+		return path.basename(p);
+	}
+
+	/** Dev-only assertion for vault paths (no-op in production builds). */
+	public assertVaultPath(p: string, ctx?: string): void {
+		if (process.env.NODE_ENV === "development") {
+			const ok = this.isNormalizedVaultPath(p);
+			if (!ok) {
+				console.warn(
+					`[Path] Non-normalized vault path${ctx ? ` (${ctx})` : ""}:`,
+					p,
+				);
+			}
+		}
 	}
 
 	private parseFolderScanKey(key: string): {
@@ -132,7 +261,7 @@ export class FileSystemService {
 	public static isAncestor(ancestor: string, child: string): boolean {
 		if (ancestor === "") return true; // vault root is ancestor of everything
 		if (ancestor === child) return true;
-		return child.startsWith(ancestor + "/");
+		return child.startsWith(`${ancestor}/`);
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -179,7 +308,7 @@ export class FileSystemService {
 				? this.vault.getAbstractFileByPath(folderPath)
 				: folderVaultPathOrFolder;
 
-		if (!(root instanceof TFolder)) {
+		if (!isTFolder(root)) {
 			return { files: [], aborted: false };
 		}
 
@@ -195,7 +324,7 @@ export class FileSystemService {
 				aborted = true;
 				return;
 			}
-			if (entry instanceof TFile) {
+			if (isTFile(entry)) {
 				const ext = entry.extension?.toLowerCase();
 				if (ext && extensions.includes(ext)) out.push(entry);
 				return;
@@ -207,7 +336,7 @@ export class FileSystemService {
 					aborted = true;
 					return;
 				}
-				if (child instanceof TFile) {
+				if (isTFile(child)) {
 					const ext = child.extension?.toLowerCase();
 					if (ext && extensions.includes(ext)) out.push(child);
 				} else if (recursive) {
@@ -256,7 +385,7 @@ export class FileSystemService {
 				changed,
 			);
 			const rootUnderChangedSubtree =
-				changed !== "" && rootPath.startsWith(changed + "/");
+				changed !== "" && rootPath.startsWith(`${changed}/`);
 
 			if (recursive) {
 				// Recursive scans are affected by any change under their root, and by subtree moves.
@@ -334,185 +463,237 @@ export class FileSystemService {
 
 	/**
 	 * Read binary file via the vault adapter using a vault-relative path.
+	 * Result-based API.
 	 */
-	public async readVaultBinary(vaultPath: string): Promise<ArrayBuffer> {
-		const normalizedPath = FileSystemService.toVaultPath(vaultPath);
-		return this.vault.adapter.readBinary(normalizedPath);
+	public async readVaultBinary(
+		vaultPath: string,
+	): Promise<Result<ArrayBuffer, AppFailure>> {
+		const p = FileSystemService.toVaultPath(vaultPath) as unknown as string;
+		try {
+			const data = await readWithRetry(this.vault.adapter, p, {
+				maxAttempts: 5,
+				baseDelayMs: 30,
+			});
+			return ok(data);
+		} catch (e: any) {
+			const code = e?.code ?? e?.Code;
+			if (code === "ENOENT") return err({ kind: "NotFound", path: p });
+			if (code === "EACCES" || code === "EPERM")
+				return err({ kind: "PermissionDenied", path: p });
+			return err({ kind: "ReadFailed", path: p, cause: e });
+		}
 	}
 
 	/**
 	 * Write binary file via the vault adapter using a vault-relative path.
-	 * Ensures parent directory exists using adapter/vault APIs.
+	 * Result-based API. Ensures parent directory exists.
 	 */
 	public async writeVaultBinary(
 		vaultPath: string,
 		data: ArrayBuffer,
-	): Promise<void> {
-		const normalizedPath = FileSystemService.toVaultPath(vaultPath);
-		await this.ensureParentDirectory(normalizedPath);
-		return this.vault.adapter.writeBinary(normalizedPath, data);
+	): Promise<Result<void, AppFailure>> {
+		const p = FileSystemService.toVaultPath(vaultPath) as unknown as string;
+		const ensured = await this.ensureParentDirectory(p);
+		if (isErr(ensured)) return ensured;
+		try {
+			await writeBinaryWithRetry(this.vault.adapter, p, data, {
+				maxAttempts: 4,
+				baseDelayMs: 30,
+			});
+			return ok(void 0);
+		} catch (e: any) {
+			const code = e?.code ?? e?.Code;
+			if (code === "EACCES" || code === "EPERM")
+				return err({ kind: "PermissionDenied", path: p });
+			if (code === "ENOTDIR") return err({ kind: "NotADirectory", path: p });
+			if (code === "EISDIR") return err({ kind: "IsADirectory", path: p });
+			return err({ kind: "WriteFailed", path: p, cause: e });
+		}
 	}
 
 	/**
-	 * Atomically write a binary file in the vault by writing to a temporary file
-	 * and then renaming it over the target. Falls back to remove-then-rename
-	 * when the adapter does not support rename-over-existing.
+	 * Atomically write a binary file. Result-based.
 	 */
 	public async writeVaultBinaryAtomic(
 		vaultPath: string,
 		data: ArrayBuffer,
-	): Promise<void> {
-		const dst = FileSystemService.toVaultPath(vaultPath);
-		await this.ensureParentDirectory(dst);
+	): Promise<Result<void, AppFailure>> {
+		const dst = FileSystemService.toVaultPath(vaultPath) as unknown as string;
+		const ensured = await this.ensureParentDirectory(dst);
+		if (isErr(ensured)) return ensured;
 
-		// Serialize writes to the same destination path
-		await this.keyedQueue.run(`atomic:${dst}`, async () => {
+		return this.keyedQueue.run(`atomic:${dst}`, async () => {
 			const tmp = `${dst}.__tmp__${Date.now()}-${Math.random()
 				.toString(36)
 				.slice(2)}`;
-			await this.vault.adapter.writeBinary(tmp, data);
-
-			const replaceSupported = await this.probeRenameReplaceSupport();
-			if (replaceSupported) {
-				// Try direct replace with small retries (transient locks)
-				const delays = [10, 25, 50];
-				for (let i = 0; i <= delays.length; i++) {
+			try {
+				await writeBinaryWithRetry(this.vault.adapter, tmp, data, {
+					maxAttempts: 4,
+					baseDelayMs: 30,
+				});
+				const replaceSupported = await this.probeRenameReplaceSupport();
+				if (replaceSupported) {
 					try {
-						await this.vault.adapter.rename(tmp, dst);
-						return; // success
-					} catch (e) {
-						if (i === delays.length) {
-							// degrade capability: some adapters claim support but fail; fall back
-							console.info(
-								`${this.LOG_PREFIX} rename-over-existing failed; falling back to backup-swap for ${dst}.`,
-							);
-							break;
-						}
-						await new Promise((r) => setTimeout(r, delays[i]));
+						await renameWithRetry(this.vault.adapter, tmp, dst, {
+							maxAttempts: 6,
+							baseDelayMs: 30,
+						});
+						return ok(void 0);
+					} catch {
+						// fall through to backup-swap
 					}
 				}
+				return await this.replaceViaBackupSwapResult(dst, tmp);
+			} catch (e: any) {
+				const code = e?.code ?? e?.Code;
+				if (code === "EACCES" || code === "EPERM")
+					return err({ kind: "PermissionDenied", path: dst });
+				if (code === "ENOTDIR")
+					return err({ kind: "NotADirectory", path: dst });
+				if (code === "EISDIR") return err({ kind: "IsADirectory", path: dst });
+				return err({ kind: "WriteFailed", path: dst, cause: e });
+			} finally {
+				try {
+					await this.vault.adapter.remove(tmp);
+				} catch {}
 			}
-
-			// Fallback: backup-swap with rollback
-			await this.replaceViaBackupSwap(dst, tmp);
 		});
 	}
 
-	private async replaceViaBackupSwap(dst: string, tmp: string): Promise<void> {
+	private async replaceViaBackupSwapResult(
+		dst: string,
+		tmp: string,
+	): Promise<Result<void, AppFailure>> {
 		const bak = `${dst}.__bak__`;
-		// Clean stale artifacts best-effort
 		try {
 			await this.vault.adapter.remove(bak);
 		} catch {}
-		// If destination exists, rename it to backup with retries
-		const exists = await this.vault.adapter.exists(dst);
-		const delays = [10, 25, 50, 80];
-		if (exists) {
-			for (let i = 0; i <= delays.length; i++) {
+		if (await this.vault.adapter.exists(dst)) {
+			try {
+				await renameWithRetry(this.vault.adapter, dst, bak, {
+					maxAttempts: 6,
+					baseDelayMs: 30,
+				});
+			} catch {
 				try {
-					await this.vault.adapter.rename(dst, bak);
-					break;
-				} catch (e) {
-					if (i === delays.length) {
-						// As a last resort, try remove (may briefly drop the file)
-						try {
-							await this.vault.adapter.remove(dst);
-						} catch {}
-						break;
-					}
-					await new Promise((r) => setTimeout(r, delays[i]));
-				}
+					await removeWithRetry(this.vault.adapter, dst, {
+						maxAttempts: 3,
+						baseDelayMs: 25,
+					});
+				} catch {}
 			}
 		}
-
-		// Now place tmp as dst (with retries)
 		try {
-			for (let i = 0; i <= delays.length; i++) {
+			await renameWithRetry(this.vault.adapter, tmp, dst, {
+				maxAttempts: 6,
+				baseDelayMs: 30,
+			});
+			try {
+				await this.vault.adapter.remove(bak);
+			} catch {}
+			return ok(void 0);
+		} catch (placeErr: any) {
+			if (await this.vault.adapter.exists(bak)) {
 				try {
-					await this.vault.adapter.rename(tmp, dst);
-					// success: cleanup backup
-					try {
-						await this.vault.adapter.remove(bak);
-					} catch {}
-					return;
-				} catch (e) {
-					if (i === delays.length) {
-						// rollback if possible
-						if (await this.vault.adapter.exists(bak)) {
-							try {
-								await this.vault.adapter.rename(bak, dst);
-							} catch (restoreErr) {
-								console.error(
-									`${this.LOG_PREFIX} CRITICAL: failed to restore backup for ${dst}`,
-									restoreErr,
-								);
-							}
-						}
-						throw e;
-					}
-					await new Promise((r) => setTimeout(r, delays[i]));
-				}
+					await renameWithRetry(this.vault.adapter, bak, dst, {
+						maxAttempts: 6,
+						baseDelayMs: 30,
+					});
+				} catch {}
 			}
+			const code = placeErr?.code ?? placeErr?.Code;
+			if (code === "EACCES" || code === "EPERM")
+				return err({ kind: "PermissionDenied", path: dst });
+			if (code === "ENOTDIR") return err({ kind: "NotADirectory", path: dst });
+			if (code === "EISDIR") return err({ kind: "IsADirectory", path: dst });
+			return err({ kind: "WriteFailed", path: dst, cause: placeErr });
 		} finally {
-			// Ensure temp is removed if still around
 			try {
 				await this.vault.adapter.remove(tmp);
 			} catch {}
 		}
 	}
 
-	/**
-	 * Write UTF-8 text atomically using the vault adapter. Ensures parent folder exists.
-	 */
+	/** Result-based write of UTF-8 text atomically. */
 	public async writeVaultTextAtomic(
 		vaultPath: string,
 		content: string,
-	): Promise<void> {
-		const normalizedPath = FileSystemService.toVaultPath(vaultPath);
-		await this.ensureParentDirectory(normalizedPath);
+	): Promise<Result<void, AppFailure>> {
 		const buffer = new TextEncoder().encode(content).buffer;
-		await this.writeVaultBinaryAtomic(normalizedPath, buffer);
+		return this.writeVaultBinaryAtomic(vaultPath, buffer);
 	}
 
-	/**
-	 * Read UTF-8 text using the vault adapter.
-	 */
-	public async readVaultText(vaultPath: string): Promise<string> {
-		const buffer = await this.readVaultBinary(vaultPath);
-		return new TextDecoder().decode(buffer);
+	/** Result-based append of UTF-8 text to an existing vault file (creates parent dirs if needed). */
+	public async appendVaultText(
+		vaultPath: string,
+		text: string,
+	): Promise<Result<void, AppFailure>> {
+		const p = FileSystemService.toVaultPath(vaultPath) as unknown as string;
+		const ensured = await this.ensureParentDirectory(p);
+		if (isErr(ensured)) return ensured;
+		try {
+			await withFsRetry(() => this.vault.adapter.append(p, text), {
+				maxAttempts: 6,
+				baseDelayMs: 40,
+			});
+			return ok(void 0);
+		} catch (e: any) {
+			const code = e?.code ?? e?.Code;
+			if (code === "ENOENT") return err({ kind: "NotFound", path: p });
+			if (code === "EACCES" || code === "EPERM")
+				return err({ kind: "PermissionDenied", path: p });
+			if (code === "ENOTDIR") return err({ kind: "NotADirectory", path: p });
+			if (code === "EISDIR") return err({ kind: "IsADirectory", path: p });
+			return err({ kind: "WriteFailed", path: p, cause: e });
+		}
+	}
+
+	/** Result-based read of UTF-8 text from vault. */
+	public async readVaultText(
+		vaultPath: string,
+	): Promise<Result<string, AppFailure>> {
+		const bin = await this.readVaultBinary(vaultPath);
+		if (isErr(bin)) return bin;
+		try {
+			return ok(new TextDecoder().decode(bin.value));
+		} catch (e: any) {
+			const p = FileSystemService.toVaultPath(vaultPath) as unknown as string;
+			return err({ kind: "ReadFailed", path: p, cause: e });
+		}
 	}
 
 	/* ------------------------------------------------------------------ */
 	/*                         AUTO-ROUTING HELPERS                        */
 	/* ------------------------------------------------------------------ */
 
-	/**
-	 * Read binary content from either an absolute system path (Node fs)
-	 * or a vault-relative path (Vault adapter), based on the input path.
-	 */
-	async readBinaryAuto(filePath: string): Promise<Uint8Array> {
+	/** Result-based read of binary (auto-route vault vs node). */
+	async readBinaryAuto(
+		filePath: string,
+	): Promise<Result<Uint8Array, AppFailure>> {
 		if (path.isAbsolute(filePath)) {
-			// Node returns a Buffer (subclass of Uint8Array) with correct length
-			return (await this.readNodeFile(filePath, true)) as Uint8Array;
+			const res = await this.readNodeFile(filePath, true);
+			if (isErr(res)) return res as any;
+			return ok(res.value as Uint8Array);
 		} else {
-			// Ensure we create a view with the exact byteLength
-			const ab = await this.readVaultBinary(filePath);
-			return new Uint8Array(ab);
+			const res = await this.readVaultBinary(filePath);
+			if (isErr(res)) return res;
+			return ok(new Uint8Array(res.value));
 		}
 	}
 
-	/**
-	 * Write binary content to either an absolute system path (Node fs)
-	 * or a vault-relative path (Vault adapter), based on the input path.
-	 */
-	async writeBinaryAuto(filePath: string, data: Uint8Array): Promise<void> {
+	/** Result-based write of binary (auto-route vault vs node). */
+	async writeBinaryAuto(
+		filePath: string,
+		data: Uint8Array,
+	): Promise<Result<void, AppFailure>> {
 		if (path.isAbsolute(filePath)) {
-			await this.writeNodeFile(filePath, data);
+			return this.writeNodeFile(filePath, data) as any;
 		} else {
-			// Ensure we pass a true ArrayBuffer (not SharedArrayBuffer) to the adapter
-			// and only the valid region of the view. Creating a sliced copy guarantees ArrayBuffer.
-			const arrayBuffer: ArrayBuffer = data.slice().buffer;
-			await this.writeVaultBinary(filePath, arrayBuffer);
+			const arrayBuffer = (data.buffer as ArrayBuffer).slice(
+				data.byteOffset,
+				data.byteOffset + data.byteLength,
+			);
+			return this.writeVaultBinary(filePath, arrayBuffer);
 		}
 	}
 
@@ -520,59 +701,132 @@ export class FileSystemService {
 	/*                         VAULT OPERATIONS                           */
 	/* ------------------------------------------------------------------ */
 
+	/** Result-based write of UTF-8 text to a vault path (create or modify). */
 	public async writeVaultFile(
 		vaultPath: string,
 		content: string,
-	): Promise<TFile> {
-		const normalizedPath = FileSystemService.toVaultPath(vaultPath);
-		if (!normalizedPath) {
-			const msg = "A valid vault path must be provided.";
-			console.error(`${this.LOG_PREFIX} ${msg}`);
-			throw new Error(msg);
+	): Promise<Result<TFile, AppFailure>> {
+		const p = FileSystemService.toVaultPath(vaultPath) as unknown as string;
+		const ensured = await this.ensureParentDirectory(p);
+		if (isErr(ensured)) return ensured as any;
+		const existing = this.vault.getAbstractFileByPath(p);
+		if (isTFolder(existing)) {
+			return err({ kind: "NotADirectory", path: p });
 		}
-
-		await this.ensureParentDirectory(normalizedPath);
-
-		const existing = this.vault.getAbstractFileByPath(normalizedPath);
-		if (existing instanceof TFolder) {
-			const msg = `Path exists but is a folder: ${normalizedPath}`;
-			console.error(`${this.LOG_PREFIX} ${msg}`);
-			throw new Error(msg);
-		}
-
-		if (existing instanceof TFile) {
-			await this.vault.modify(existing, content);
-			return existing;
+		// If something exists at the path and it's not a folder, treat it as a file and modify it.
+		if (existing) {
+			try {
+				await this.vault.modify(existing as TFile, content);
+				return ok(existing as TFile);
+			} catch (e: any) {
+				const code = e?.code ?? e?.Code;
+				if (code === "EACCES" || code === "EPERM")
+					return err({ kind: "PermissionDenied", path: p });
+				if (code === "ENOTDIR") return err({ kind: "NotADirectory", path: p });
+				if (code === "EISDIR") return err({ kind: "IsADirectory", path: p });
+				return err({ kind: "WriteFailed", path: p, cause: e });
+			}
 		}
 		try {
-			return await this.vault.create(normalizedPath, content);
-		} catch (error) {
-			const code = (error as NodeJS.ErrnoException)?.code;
-			if (
-				code === "EEXIST" ||
-				(error instanceof Error && /already exists/i.test(error.message))
-			) {
-				// Another process created it between our check and create; modify instead.
-				const nowExisting = this.vault.getAbstractFileByPath(normalizedPath);
-				if (nowExisting instanceof TFile) {
-					await this.vault.modify(nowExisting, content);
-					return nowExisting;
+			const created = await this.vault.create(p, content);
+			return ok(created);
+		} catch (e: any) {
+			const code = e?.code ?? e?.Code;
+			if (code === "EEXIST") {
+				const now = this.vault.getAbstractFileByPath(p);
+				if (isTFolder(now)) return err({ kind: "NotADirectory", path: p });
+				if (now) {
+					try {
+						await this.vault.modify(now as TFile, content);
+						return ok(now as TFile);
+					} catch (m: any) {
+						const mcode = m?.code ?? m?.Code;
+						if (mcode === "EACCES" || mcode === "EPERM")
+							return err({ kind: "PermissionDenied", path: p });
+						if (mcode === "ENOTDIR")
+							return err({ kind: "NotADirectory", path: p });
+						if (mcode === "EISDIR")
+							return err({ kind: "IsADirectory", path: p });
+						return err({ kind: "WriteFailed", path: p, cause: m });
+					}
 				}
 			}
-			throw error;
+			if (code === "EACCES" || code === "EPERM")
+				return err({ kind: "PermissionDenied", path: p });
+			if (code === "ENOTDIR") return err({ kind: "NotADirectory", path: p });
+			if (code === "EISDIR") return err({ kind: "IsADirectory", path: p });
+			return err({ kind: "WriteFailed", path: p, cause: e });
 		}
 	}
 
-	public async ensurePluginDataDirExists(): Promise<void> {
-		const dir = this.getPluginDataDir(); // ".obsidian/plugins/<id>"
+	public async ensurePluginDataDirExists(): Promise<Result<void, AppFailure>> {
+		const dir = this.getPluginDataDir();
+		return this.ensureAdapterFolder(dir);
+	}
+
+	// Raw directory listing removed; use listVaultDir() which returns Result
+
+	/** Result-based list of a vault directory (canonical). */
+	public async listVaultDir(
+		vaultPath: string,
+	): Promise<Result<{ files: string[]; folders: string[] }, AppFailure>> {
+		const dir = FileSystemService.toVaultPath(vaultPath) as unknown as string;
 		try {
-			await this.ensureAdapterFolder(dir);
-		} catch (error) {
-			console.error(
-				`${this.LOG_PREFIX} Failed to ensure plugin data directory: ${dir}`,
-				error,
-			);
-			throw error;
+			const r = await this.vault.adapter.list(dir);
+			return ok(r);
+		} catch (e: any) {
+			const code = e?.code ?? e?.Code;
+			if (code === "ENOENT") return err({ kind: "NotFound", path: dir });
+			if (code === "EACCES" || code === "EPERM")
+				return err({ kind: "PermissionDenied", path: dir });
+			if (code === "ENOTDIR") return err({ kind: "NotADirectory", path: dir });
+			if (code === "EISDIR") return err({ kind: "IsADirectory", path: dir });
+			return err({ kind: "ReadFailed", path: dir, cause: e });
+		}
+	}
+
+	/** Result-based remove of a vault path (canonical). */
+	public async removeVaultPath(
+		vaultPath: string,
+	): Promise<Result<void, AppFailure>> {
+		const p = FileSystemService.toVaultPath(vaultPath) as unknown as string;
+		try {
+			await removeWithRetry(this.vault.adapter, p, {
+				maxAttempts: 3,
+				baseDelayMs: 25,
+			});
+			return ok(void 0);
+		} catch (e: any) {
+			const code = e?.code ?? e?.Code;
+			if (code === "ENOENT") return err({ kind: "NotFound", path: p });
+			if (code === "EACCES" || code === "EPERM")
+				return err({ kind: "PermissionDenied", path: p });
+			if (code === "ENOTDIR") return err({ kind: "NotADirectory", path: p });
+			return err({ kind: "WriteFailed", path: p, cause: e });
+		}
+	}
+
+	/** Result-based rename of a vault path with retry. */
+	public async renameVaultPath(
+		fromPath: string,
+		toPath: string,
+	): Promise<Result<void, AppFailure>> {
+		const from = FileSystemService.toVaultPath(fromPath) as unknown as string;
+		const to = FileSystemService.toVaultPath(toPath) as unknown as string;
+		try {
+			await renameWithRetry(this.vault.adapter, from, to, {
+				maxAttempts: 6,
+				baseDelayMs: 30,
+			});
+			return ok(void 0);
+		} catch (e: any) {
+			const code = e?.code ?? e?.Code;
+			if (code === "ENOENT") return err({ kind: "NotFound", path: from });
+			if (code === "EACCES" || code === "EPERM")
+				return err({ kind: "PermissionDenied", path: from });
+			if (code === "ENOTDIR") return err({ kind: "NotADirectory", path: from });
+			if (code === "EISDIR") return err({ kind: "IsADirectory", path: from });
+			return err({ kind: "WriteFailed", path: to, cause: e });
 		}
 	}
 
@@ -580,42 +834,100 @@ export class FileSystemService {
 		return this.vault.adapter.exists(FileSystemService.toVaultPath(vaultPath));
 	}
 
-	public async ensureVaultFolder(folderPath: string): Promise<void> {
+	/* ---------------- Plugin-data helpers (text/json, atomic) ---------------- */
+
+	public async readPluginDataText(
+		fileName: string,
+	): Promise<Result<string, AppFailure>> {
+		const p = this.joinPluginDataPath(fileName);
+		return this.readVaultText(p);
+	}
+
+	public async writePluginDataTextAtomic(
+		fileName: string,
+		content: string,
+	): Promise<Result<void, AppFailure>> {
+		const ensured = await this.ensurePluginDataDirExists();
+		if (isErr(ensured)) return ensured;
+		const p = this.joinPluginDataPath(fileName);
+		return this.writeVaultTextAtomic(p, content);
+	}
+
+	public async writePluginDataJsonAtomic(
+		fileName: string,
+		obj: unknown,
+	): Promise<Result<void, AppFailure>> {
+		const json = JSON.stringify(obj, null, 2);
+		return this.writePluginDataTextAtomic(fileName, json);
+	}
+
+	public async tryReadPluginDataJson<T = unknown>(
+		fileName: string,
+	): Promise<T | null> {
+		const r = await this.readPluginDataText(fileName);
+		if (isErr(r)) {
+			if ((r as any).error?.kind === "NotFound") return null;
+			return null;
+		}
+		try {
+			return JSON.parse(r.value) as T;
+		} catch {
+			return null;
+		}
+	}
+
+	public async existsPluginData(relPath: string): Promise<boolean> {
+		const p = this.joinPluginDataPath(relPath);
+		return this.vaultExists(p);
+	}
+
+	public async listPluginDataDir(): Promise<
+		Result<{ files: string[]; folders: string[] }, AppFailure>
+	> {
+		const dir = this.getPluginDataDir();
+		return this.listVaultDir(dir);
+	}
+
+	public async removePluginDataPath(
+		relPath: string,
+	): Promise<Result<void, AppFailure>> {
+		const p = this.joinPluginDataPath(relPath);
+		return this.removeVaultPath(p);
+	}
+
+	public async ensureVaultFolder(
+		folderPath: string,
+	): Promise<Result<void, AppFailure>> {
 		const normalized = FileSystemService.toVaultPath(folderPath);
-		if (!normalized) return;
+		if (!normalized) return ok(void 0);
 
 		// If the path is inside the hidden config dir, we must use the adapter.
 		if (normalized.startsWith(this.vault.configDir)) {
-			await this.ensureAdapterFolder(normalized);
-			return;
+			return this.ensureAdapterFolder(normalized);
 		}
 
-		await this.keyedQueue.run(`folder:${normalized}`, async () => {
+		return this.keyedQueue.run(`folder:${normalized}`, async () => {
 			const cached = this.folderExistsCache.get(normalized);
-			if (cached && this.isCacheValid(cached)) return;
+			if (cached && this.isCacheValid(cached)) return ok(void 0);
 
 			try {
 				const abstract = this.vault.getAbstractFileByPath(normalized);
-				if (abstract instanceof TFolder) {
+				if (isTFolder(abstract)) {
 					this.folderExistsCache.set(normalized, {
 						value: true,
 						timestamp: Date.now(),
 					});
-					return;
+					return ok(void 0);
 				}
 				if (abstract) {
-					throw new FileSystemError(
-						"ensureFolder",
-						normalized,
-						FileSystemErrorCode.NotDirectory,
-						"Path exists but is a file",
-					);
+					return err({ kind: "NotADirectory", path: normalized });
 				}
 				await this.vault.createFolder(normalized);
 				this.folderExistsCache.set(normalized, {
 					value: true,
 					timestamp: Date.now(),
 				});
+				return ok(void 0);
 			} catch (error) {
 				const code = (error as NodeJS.ErrnoException)?.code;
 				if (
@@ -624,93 +936,97 @@ export class FileSystemService {
 						(/already exists/i.test(error.message) ||
 							/Folder already exists/i.test(error.message)))
 				) {
-					console.log(
-						`${this.LOG_PREFIX} ensureVaultFolder: Handled race condition for '${normalized}'.`,
-					);
 					this.folderExistsCache.set(normalized, {
 						value: true,
 						timestamp: Date.now(),
 					});
-					return;
+					return ok(void 0);
 				}
-				// If the error is already a FileSystemError we produced above,
-				// rethrow it directly to avoid double-wrapping and clearer stacks.
-				if (error instanceof FileSystemError) throw error;
-				this.handleError("ensureFolder", normalized, error, true);
+				const code2 = (error as any)?.code ?? (error as any)?.Code;
+				if (code2 === "EACCES" || code2 === "EPERM")
+					return err({ kind: "PermissionDenied", path: normalized });
+				if (code2 === "ENOTDIR")
+					return err({ kind: "NotADirectory", path: normalized });
+				return err({ kind: "WriteFailed", path: normalized, cause: error });
 			}
 		});
 	}
 
-	public async ensureParentDirectory(filePath: string): Promise<void> {
+	public async ensureParentDirectory(
+		filePath: string,
+	): Promise<Result<void, AppFailure>> {
 		const parentDir = FileSystemService.getVaultParent(filePath);
-		if (parentDir) await this.ensureVaultFolder(parentDir);
+		if (!parentDir) return ok(void 0);
+		return this.ensureVaultFolder(parentDir);
 	}
 
 	/**
-	 * @deprecated Backwards-compatible helper used in tests and some code paths.
-	 * Prefer createVaultFileUnique().
-	 *
-	 * Behavior:
-	 * - If failOnFirstCollision=true, throws AlreadyExists when the base name exists.
-	 * - Otherwise tries numbered suffixes " (n)" up to maxAttempts.
-	 * - If exhausted and useTimestampFallback=true, creates a "-<ts>" filename.
-	 * - Else throws AlreadyExists.
+	 * Resolve a vault path to a TFolder with optional ensure.
+	 * - ensure = true will attempt to create the folder if missing.
 	 */
-	public async createVaultFileSafely(
-		baseDir: string,
-		filenameStem: string,
-		content: string,
-		options?: {
-			ext?: string;
-			failOnFirstCollision?: boolean;
-			maxAttempts?: number;
-			useTimestampFallback?: boolean;
-		},
-	): Promise<TFile> {
-		const ext = (options?.ext ?? "md").replace(/^\./, "");
-		const dir = FileSystemService.toVaultPath(baseDir);
-		const stem = normalizeFileNamePiece(filenameStem);
-		const maxAttempts = Math.max(1, options?.maxAttempts ?? 10);
-		const useTs = !!options?.useTimestampFallback;
+	public async resolveVaultFolder(
+		folderPath: string,
+		opts?: { ensure?: boolean },
+	): Promise<Result<TFolder, AppFailure>> {
+		const p = FileSystemService.toVaultPath(folderPath) as unknown as string;
+		if (!p) return err({ kind: "ConfigMissing", field: "folderPath" });
 
-		await this.ensureVaultFolder(dir);
+		if (opts?.ensure) {
+			const ensured = await this.ensureVaultFolder(p);
+			if (isErr(ensured)) return ensured as Result<any, AppFailure>;
+		}
 
-		const basePath = normalizePath(`${dir}/${stem}.${ext}`);
-		if (options?.failOnFirstCollision) {
-			if (await this.vaultExists(basePath)) {
-				throw new FileSystemError(
-					"createFile",
-					basePath,
-					FileSystemErrorCode.AlreadyExists,
-					"File already exists",
-				);
+		const af = this.vault.getAbstractFileByPath(p);
+		if (!af) return err({ kind: "NotFound", path: p });
+		if (!isTFolder(af)) return err({ kind: "NotADirectory", path: p });
+		return ok(af);
+	}
+
+	/** Thin wrapper that accepts either a TFolder or a path. */
+	public async listMarkdownFiles(
+		folder: string | TFolder,
+		opts?: { recursive?: boolean; signal?: AbortSignal },
+	): Promise<TFile[]> {
+		const res = await this.getFilesInFolder(folder, {
+			extensions: ["md"],
+			recursive: opts?.recursive ?? true,
+			signal: opts?.signal,
+		});
+		return res.files;
+	}
+
+	// Adapter mkdir chain as Result
+	private async ensureAdapterFolder(
+		vaultRelPath: string,
+	): Promise<Result<void, AppFailure>> {
+		const normalized = FileSystemService.toVaultPath(
+			vaultRelPath,
+		) as unknown as string;
+		if (!normalized) return ok(void 0);
+		return this.keyedQueue.run(`folder-adapter:${normalized}`, async () => {
+			try {
+				if (await this.vault.adapter.exists(normalized)) return ok(void 0);
+				const segments = normalized.split("/");
+				let current = "";
+				for (const seg of segments) {
+					current = current ? `${current}/${seg}` : seg;
+					// eslint-disable-next-line no-await-in-loop
+					if (!(await this.vault.adapter.exists(current))) {
+						// eslint-disable-next-line no-await-in-loop
+						await this.vault.adapter.mkdir(current);
+					}
+				}
+				return ok(void 0);
+			} catch (e: any) {
+				const code = e?.code ?? e?.Code;
+				if (code === "EEXIST") return ok(void 0);
+				if (code === "EACCES" || code === "EPERM")
+					return err({ kind: "PermissionDenied", path: normalized });
+				if (code === "ENOTDIR")
+					return err({ kind: "NotADirectory", path: normalized });
+				return err({ kind: "WriteFailed", path: normalized, cause: e });
 			}
-			return this.vault.create(basePath, content);
-		}
-
-		for (let i = 0; i < maxAttempts; i++) {
-			const suffix = i === 0 ? "" : ` (${i})`;
-			const candidate = normalizePath(`${dir}/${stem}${suffix}.${ext}`);
-			// eslint-disable-next-line no-await-in-loop
-			const exists = await this.vaultExists(candidate);
-			if (!exists) {
-				// eslint-disable-next-line no-await-in-loop
-				return this.vault.create(candidate, content);
-			}
-		}
-
-		if (useTs) {
-			const ts = Date.now().toString(36);
-			const candidate = normalizePath(`${dir}/${stem}-${ts}.${ext}`);
-			return this.vault.create(candidate, content);
-		}
-
-		throw new FileSystemError(
-			"createFile",
-			basePath,
-			FileSystemErrorCode.AlreadyExists,
-			"All candidate filenames already exist",
-		);
+		});
 	}
 
 	public async createVaultFileUnique(
@@ -719,23 +1035,54 @@ export class FileSystemService {
 		content: string,
 		ext: string = "md",
 	): Promise<TFile> {
-		const normalizedDir = FileSystemService.toVaultPath(baseDir);
-		const sanitizedStem = normalizeFileNamePiece(desiredStem);
+		const dir = FileSystemService.toVaultPath(baseDir);
+		const stem = normalizeFileNamePiece(desiredStem);
+		const e = ext.replace(/^\./, "");
 
-		return this.keyedQueue.run(
-			`file:${normalizedDir}/${sanitizedStem}`,
-			async () => {
-				await this.ensureVaultFolder(normalizedDir);
-				const finalStem = await this.generateUniqueStem(
-					normalizedDir,
-					sanitizedStem,
-					ext,
-				);
-				const finalPath = normalizePath(`${normalizedDir}/${finalStem}.${ext}`);
-				// Within keyedQueue, check-then-create is effectively atomic for a given stem.
-				return this.vault.create(finalPath, content);
-			},
-		);
+		return this.keyedQueue.run(`file:${dir}/${stem}`, async () => {
+			await this.ensureVaultFolder(dir);
+
+			for (let i = 0; i < 1000; i++) {
+				const suffix = i === 0 ? "" : ` (${i})`;
+				const candidateStem = `${stem}${suffix}`;
+				const finalPath = normalizePath(`${dir}/${candidateStem}.${e}`);
+				try {
+					return await this.vault.create(finalPath, content);
+				} catch (error) {
+					const code = (error as NodeJS.ErrnoException)?.code;
+					const exists =
+						code === "EEXIST" ||
+						(error instanceof Error && /already exists/i.test(error.message));
+					if (exists) continue; // try next suffix
+					throw error;
+				}
+			}
+
+			const ts = Date.now().toString(36);
+			const fallback = normalizePath(`${dir}/${stem}-${ts}.${e}`);
+			return this.vault.create(fallback, content);
+		});
+	}
+
+	/**
+	 * Atomically checks for and returns a TFile for the requested stem within a keyed lock.
+	 * Eliminates the race condition of checking for existence and then getting the file.
+	 * @returns The TFile if it exists, otherwise null.
+	 */
+	public async getFileIfExistsUnderLock(
+		baseDir: string,
+		desiredStem: string,
+		ext: string = "md",
+	): Promise<TFile | null> {
+		const dir = FileSystemService.toVaultPath(baseDir);
+		const stem = normalizeFileNamePiece(desiredStem);
+		const e = ext.replace(/^\./, "");
+
+		return this.keyedQueue.run(`file:${dir}/${stem}`, async () => {
+			const candidatePath = normalizePath(`${dir}/${stem}.${e}`);
+			const abs = this.vault.getAbstractFileByPath(candidatePath);
+			return isTFile(abs) ? abs : null;
+		});
 	}
 
 	/**
@@ -792,80 +1139,153 @@ export class FileSystemService {
 		}
 	}
 
-	async readNodeFile(filePath: string, binary: true): Promise<Uint8Array>;
-	async readNodeFile(filePath: string, binary?: false): Promise<string>;
+	/** Result-based file read (replaces old readNodeFile). */
 	async readNodeFile(
 		filePath: string,
 		binary: boolean = false,
-	): Promise<string | Uint8Array> {
+	): Promise<Result<string | Uint8Array, FileSystemFailure>> {
 		try {
-			return await (binary
+			const data = await (binary
 				? fsp.readFile(filePath)
 				: fsp.readFile(filePath, "utf-8"));
-		} catch (error) {
-			this.handleError("readNodeFile", filePath, error, true);
-			throw new Error("unreachable"); // satisfy TS; handleError throws
+			return ok(data as any);
+		} catch (error: any) {
+			// Map to FileSystemFailure kinds
+			const code = (error?.code ?? error?.Code) as string | undefined;
+			switch (code) {
+				case "ENOENT":
+					return err({ kind: "NotFound", path: filePath });
+				case "EACCES":
+				case "EPERM":
+					return err({ kind: "PermissionDenied", path: filePath });
+				case "EISDIR":
+					return err({ kind: "IsADirectory", path: filePath });
+				case "ENOTDIR":
+					return err({ kind: "NotADirectory", path: filePath });
+				default:
+					return err({ kind: "ReadFailed", path: filePath, cause: error });
+			}
 		}
 	}
 
 	async writeNodeFile(
 		filePath: string,
 		data: string | Uint8Array,
-	): Promise<void> {
+	): Promise<Result<void, FileSystemFailure>> {
 		try {
 			await fsp.mkdir(path.dirname(filePath), { recursive: true });
 			await fsp.writeFile(filePath, data);
 			this.nodeStatsCache.delete(filePath);
-		} catch (error) {
-			this.handleError("writeNodeFile", filePath, error, true);
+			return ok(void 0);
+		} catch (error: any) {
+			const code = (error?.code ?? error?.Code) as string | undefined;
+			switch (code) {
+				case "EACCES":
+				case "EPERM":
+					return err({ kind: "PermissionDenied", path: filePath });
+				case "ENOTDIR":
+					return err({ kind: "NotADirectory", path: filePath });
+				case "EISDIR":
+					return err({ kind: "IsADirectory", path: filePath });
+				default:
+					return err({ kind: "WriteFailed", path: filePath, cause: error });
+			}
 		}
 	}
 
-	async deleteNodeFile(filePath: string): Promise<void> {
+	async deleteNodeFile(
+		filePath: string,
+	): Promise<Result<void, FileSystemFailure>> {
 		try {
 			await fsp.unlink(filePath);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
-				console.log(
-					`${this.LOG_PREFIX} deleteNodeFile: File not found, likely already deleted: ${filePath}`,
-				);
-				return;
+			this.nodeStatsCache.delete(filePath);
+			return ok(void 0);
+		} catch (error: any) {
+			const code = (error?.code ?? error?.Code) as string | undefined;
+			switch (code) {
+				case "ENOENT":
+					return err({ kind: "NotFound", path: filePath });
+				case "EACCES":
+				case "EPERM":
+					return err({ kind: "PermissionDenied", path: filePath });
+				case "ENOTDIR":
+					return err({ kind: "NotADirectory", path: filePath });
+				default:
+					return err({ kind: "WriteFailed", path: filePath, cause: error });
 			}
-			this.handleError("deleteNodeFile", filePath, error, true);
 		}
 	}
 
-	async getNodeStats(
+	public async getNodeStats(
 		filePath: string,
-	): Promise<import("node:fs").Stats | null> {
+	): Promise<Result<import("node:fs").Stats, FileSystemFailure>> {
 		const cached = this.nodeStatsCache.get(filePath);
 		if (cached && this.isCacheValid(cached)) return cached.value;
 
 		try {
 			const stats = await fsp.stat(filePath);
-			this.nodeStatsCache.set(filePath, {
-				value: stats,
-				timestamp: Date.now(),
-			});
-			return stats;
+			const res = ok(stats);
+			this.nodeStatsCache.set(filePath, { value: res, timestamp: Date.now() });
+			return res;
 		} catch (error: any) {
-			if (error.code === "ENOENT") {
-				this.nodeStatsCache.set(filePath, {
-					value: null,
-					timestamp: Date.now(),
-				});
-				return null;
+			const code = (error?.code ?? error?.Code) as string | undefined;
+			switch (code) {
+				case "ENOENT": {
+					const res = err({
+						kind: "NotFound",
+						path: filePath,
+					} as FileSystemFailure);
+					this.nodeStatsCache.set(filePath, {
+						value: res,
+						timestamp: Date.now(),
+					});
+					return res;
+				}
+				case "EACCES":
+				case "EPERM": {
+					const res = err({
+						kind: "PermissionDenied",
+						path: filePath,
+					} as FileSystemFailure);
+					this.nodeStatsCache.set(filePath, {
+						value: res,
+						timestamp: Date.now(),
+					});
+					return res;
+				}
+				case "ENOTDIR": {
+					const res = err({
+						kind: "NotADirectory",
+						path: filePath,
+					} as FileSystemFailure);
+					this.nodeStatsCache.set(filePath, {
+						value: res,
+						timestamp: Date.now(),
+					});
+					return res;
+				}
+				default: {
+					const res = err({
+						kind: "ReadFailed",
+						path: filePath,
+						cause: error,
+					} as FileSystemFailure);
+					this.nodeStatsCache.set(filePath, {
+						value: res,
+						timestamp: Date.now(),
+					});
+					return res;
+				}
 			}
-			console.error(
-				`${this.LOG_PREFIX} Failed to stat path: ${filePath}`,
-				error,
-			);
-			throw error;
 		}
 	}
 
 	async *iterateNodeDirectory(
 		dirPath: string,
+		opts?: {
+			continueOnError?: boolean;
+			onError?: (e: FileSystemError) => void;
+		},
 	): AsyncIterable<import("node:fs").Dirent> {
 		let dirHandle: import("node:fs").Dir | undefined;
 		try {
@@ -873,16 +1293,9 @@ export class FileSystemService {
 			for await (const dirent of dirHandle) yield dirent;
 		} catch (error) {
 			const fsError = this.asFileSystemError("readDirectory", dirPath, error);
-			if (fsError.isPermissionDenied) {
-				console.log(
-					`${this.LOG_PREFIX} Permission denied while scanning directory (skipping): ${dirPath}`,
-				);
-			} else if (!fsError.isNotFound) {
-				console.warn(
-					`${this.LOG_PREFIX} Could not fully read directory, skipping rest of its contents: ${dirPath}`,
-					error,
-				);
-			}
+			opts?.onError?.(fsError);
+			const continueOnError = opts?.continueOnError ?? true;
+			if (!continueOnError) throw fsError;
 		} finally {
 			if (dirHandle) {
 				try {
@@ -900,21 +1313,6 @@ export class FileSystemService {
 
 	private isCacheValid<T>(entry: CacheEntry<T>): boolean {
 		return Date.now() - entry.timestamp < this.CACHE_TTL;
-	}
-
-	private showNoticeThrottled(message: string): void {
-		const COOL = 5000;
-		const now = Date.now();
-		const last = this.recentNotices.get(message) ?? 0;
-		if (now - last > COOL) {
-			new Notice(message, 7000);
-			this.recentNotices.set(message, now);
-		}
-		if (this.recentNotices.size > 20) {
-			for (const [k, t] of this.recentNotices) {
-				if (now - t > COOL * 2) this.recentNotices.delete(k);
-			}
-		}
 	}
 
 	private mapCode(code?: string): FileSystemErrorCode {
@@ -944,51 +1342,6 @@ export class FileSystemService {
 		const nodeError = error as NodeJS.ErrnoException;
 		const code = this.mapCode(nodeError?.code);
 		return new FileSystemError(operation, p, code, nodeError?.message);
-	}
-
-	private handleError(
-		operation: string,
-		p: string,
-		error: unknown,
-		shouldThrow: boolean,
-	): void {
-		// Avoid double-wrapping when a FileSystemError is already provided.
-		const fsError =
-			error instanceof FileSystemError
-				? error
-				: this.asFileSystemError(operation, p, error);
-		const userMessage = this.userMsg(fsError.code, p);
-		console.error(
-			`${this.LOG_PREFIX} ${fsError.message}`,
-			(error as Error)?.stack,
-		);
-
-		if (
-			fsError.isPermissionDenied ||
-			fsError.code === FileSystemErrorCode.NotDirectory ||
-			fsError.code === FileSystemErrorCode.AlreadyExists
-		) {
-			this.showNoticeThrottled(userMessage);
-		}
-		if (shouldThrow) throw fsError;
-	}
-
-	private userMsg(code: FileSystemErrorCode, p: string): string {
-		switch (code) {
-			case FileSystemErrorCode.NotFound:
-				return `File or folder not found: ${p}`;
-			case FileSystemErrorCode.AccessDenied:
-			case FileSystemErrorCode.Permission:
-				return `Permission denied: ${p}`;
-			case FileSystemErrorCode.IsDirectory:
-				return `Expected a file, but found a directory: ${p}`;
-			case FileSystemErrorCode.NotDirectory:
-				return `Expected a directory, but found a file: ${p}`;
-			case FileSystemErrorCode.AlreadyExists:
-				return `File already exists: ${p}`;
-			default:
-				return "File operation failed. Check console for details.";
-		}
 	}
 
 	public async isPluginDirWritable(): Promise<boolean> {
@@ -1021,40 +1374,123 @@ export class FileSystemService {
 		return true;
 	}
 
-	/* Recursively mkdir using the adapter so it also works for the hidden
-	 * .obsidian folder.  The vault API cannot do that.                     */
-	private async ensureAdapterFolder(vaultRelPath: string): Promise<void> {
-		const normalized = FileSystemService.toVaultPath(vaultRelPath);
-		if (!normalized) return;
+	/**
+	 * Moves a file within the vault, preferring an atomic rename and falling back to copy+delete.
+	 * Uses retry logic for transient filesystem errors.
+	 */
+	public async moveVaultPath(
+		src: string,
+		dst: string,
+	): Promise<Result<void, AppFailure>> {
+		const s = FileSystemService.toVaultPath(src) as unknown as string;
+		const d = FileSystemService.toVaultPath(dst) as unknown as string;
+		const ensured = await this.ensureParentDirectory(d);
+		if (isErr(ensured)) return ensured;
 
-		// Use a lock to prevent race conditions on directory creation.
-		// The lock key is for the specific folder path to serialize its creation.
-		await this.keyedQueue.run(`folder-adapter:${normalized}`, async () => {
-			// Check existence *inside* the lock to ensure atomicity.
-			if (await this.vault.adapter.exists(normalized)) {
-				return;
-			}
+		try {
+			await renameWithRetry(this.vault.adapter, s, d, {
+				maxAttempts: 6,
+				baseDelayMs: 30,
+			});
+			return ok(void 0);
+		} catch (e) {
+			console.info(
+				`${this.LOG_PREFIX} rename failed for ${s} -> ${d}, falling back to copy+delete.`,
+				e,
+			);
+		}
 
-			const segments = normalized.split("/");
-			let current = "";
-			for (const seg of segments) {
-				current = current ? `${current}/${seg}` : seg;
-				try {
-					// Check existence of each segment before creating.
-					// eslint-disable-next-line no-await-in-loop
-					if (!(await this.vault.adapter.exists(current))) {
-						// eslint-disable-next-line no-await-in-loop
-						await this.vault.adapter.mkdir(current);
-					}
-				} catch (e: any) {
-					// Handle the case where another process creates the dir between our check and mkdir.
-					if (e instanceof Error && /already exists/i.test(e.message)) {
-						continue; // This is fine, we can continue to the next segment.
-					}
-					// If it's another error, re-throw it.
-					throw e;
+		const dataRes = await this.readVaultBinary(s);
+		if (isErr(dataRes)) return dataRes;
+		const writeRes = await this.writeVaultBinaryAtomic(d, dataRes.value);
+		if (isErr(writeRes)) return writeRes;
+		const rmRes = await this.removeVaultPath(s);
+		if (isErr(rmRes)) return rmRes;
+		return ok(void 0);
+	}
+
+	/**
+	 * Attempts an atomic rename only. Returns true on success, false if rename failed.
+	 * Does NOT fall back to copy+delete. Caller controls any fallback behavior.
+	 */
+	public async tryRenameVaultPath(
+		oldPath: string,
+		newPath: string,
+	): Promise<Result<boolean, AppFailure>> {
+		const s = FileSystemService.toVaultPath(oldPath) as unknown as string;
+		const d = FileSystemService.toVaultPath(newPath) as unknown as string;
+		const ensured = await this.ensureParentDirectory(d);
+		if (isErr(ensured)) return ensured as any;
+		try {
+			await renameWithRetry(this.vault.adapter, s, d, {
+				maxAttempts: 6,
+				baseDelayMs: 30,
+			});
+			return ok(true);
+		} catch (_e) {
+			return ok(false);
+		}
+	}
+
+	/**
+	 * Retrieves file stats (mtime) for a path within the vault using the adapter.
+	 * Returns null if the adapter doesn't support `stat` or the file doesn't exist.
+	 */
+	public async statVaultPath(
+		vaultPath: string,
+	): Promise<{ mtime: number } | null> {
+		const p = FileSystemService.toVaultPath(vaultPath);
+		const adapterAny = this.vault.adapter as any;
+		try {
+			if (typeof adapterAny.stat === "function") {
+				const st = await adapterAny.stat(p);
+				if (st) {
+					const mtime = Number(st.mtime ?? st.modifiedTime ?? 0);
+					return { mtime: Number.isNaN(mtime) ? 0 : mtime };
 				}
 			}
-		});
+			return null;
+		} catch {
+			return null;
+		}
+	}
+
+	/**
+	 * Recursively lists all file paths under a given vault root using the adapter.
+	 * This is safe for use in the plugin data directory.
+	 */
+	public async walkVaultDirPaths(
+		root: string,
+		opts?: { recursive?: boolean; extensions?: string[] },
+	): Promise<string[]> {
+		const rec = opts?.recursive ?? true;
+		const exts = (opts?.extensions ?? []).map((e) =>
+			e.replace(/^\./, "").toLowerCase(),
+		);
+		const out: string[] = [];
+
+		const visit = async (dir: string) => {
+			const r = await this.listVaultDir(dir);
+			if (isErr(r)) return; // swallow and skip this branch
+			const { files, folders } = r.value;
+			for (const f of files) {
+				const include =
+					exts.length === 0
+						? true
+						: (() => {
+								const ext = f.split(".").pop()?.toLowerCase();
+								return !!ext && exts.includes(ext);
+							})();
+				if (include) out.push(f); // f is already vault-relative full path
+			}
+			if (rec) {
+				for (const sub of folders) {
+					await visit(sub); // sub is already full vault-relative path
+				}
+			}
+		};
+
+		await visit(FileSystemService.toVaultPath(root));
+		return out;
 	}
 }

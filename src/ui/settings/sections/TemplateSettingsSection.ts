@@ -1,6 +1,6 @@
 import { Notice, normalizePath, Setting } from "obsidian";
 import { DEFAULT_TEMPLATES_FOLDER } from "src/constants";
-import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import type KoreaderImporterPlugin from "src/main";
 import type { TemplateManager } from "src/services/parsing/TemplateManager";
 import type { TemplateDefinition } from "src/types";
 import { PromptModal } from "src/ui/PromptModal";

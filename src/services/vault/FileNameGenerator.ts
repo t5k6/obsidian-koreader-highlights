@@ -1,10 +1,10 @@
-import type { LoggingService } from "src/services/LoggingService";
-import type { DocProps } from "src/types";
 import {
 	getFileNameWithoutExt,
 	normalizeFileNamePiece,
 	simplifySdrName,
-} from "src/utils/formatUtils";
+} from "src/lib/pathing/fileNaming";
+import type { LoggingService } from "src/services/LoggingService";
+import type { DocProps } from "src/types";
 
 const MAX_TOTAL_PATH_LENGTH = 255;
 const FILE_EXTENSION = ".md";

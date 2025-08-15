@@ -1,5 +1,5 @@
 {
-	"$schema": "https://biomejs.dev/schemas/2.0.5/schema.json",
+	"$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
 	"assist": {
 		"actions": {
 			"source": {
@@ -8,26 +8,30 @@
 		}
 	},
 	"files": {
+		"maxSize": 200000,
 		"includes": [
 			"**",
-			"!node_modules/**",
-			"!dist/**",
-			"!build/**",
-			"!coverage/**"
-		],
-		"maxSize": 200000
+			"!**/dist",
+			"!**/*.gen.ts",
+			"!./coverage.json",
+			"!./coverage",
+			"!**/.next"
+		]
 	},
 	"formatter": {
 		"enabled": true,
 		"indentStyle": "space",
 		"indentWidth": 2,
-		"lineWidth": 100
+		"lineWidth": 100,
+		"useEditorconfig": true
 	},
 	"linter": {
 		"enabled": true,
 		"rules": {
-			"typescript": {
-				"noUnsafeAny": "off"
+			"correctness": {
+				"noUnusedVariables": "error",
+				"noUnusedImports": "error",
+				"noUnusedPrivateClassMembers": "error"
 			}
 		}
 	},

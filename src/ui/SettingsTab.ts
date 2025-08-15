@@ -1,5 +1,5 @@
 import { type App, debounce, PluginSettingTab } from "obsidian";
-import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import type KoreaderImporterPlugin from "src/main";
 import type { DebouncedFn } from "src/types";
 import { SectionStateManager } from "src/ui/settings/SectionStateManager";
 import type { SettingsSection } from "src/ui/settings/SettingsSection";

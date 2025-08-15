@@ -1,5 +1,5 @@
-import type { Annotation, CommentStyle, PositionObject } from "../types";
-import { computeAnnotationId } from "./formatUtils";
+import { computeAnnotationId } from "src/lib/formatting/formatUtils";
+import type { Annotation, CommentStyle, PositionObject } from "src/types";
 
 // Regex pattern sources (no flags). Build instances with explicit flags where needed.
 const HTML_KOHL_PATTERN_SRC = "<!--\\s*KOHL\\s*({.*?})\\s*-->";

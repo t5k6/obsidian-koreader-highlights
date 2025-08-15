@@ -1,4 +1,5 @@
 import type { Plugin } from "obsidian";
+import { Mutex } from "src/lib/concurrency/concurrency";
 import type { FileSystemService } from "src/services/FileSystemService";
 import type { LoggingService } from "src/services/LoggingService";
 import {
@@ -6,7 +7,6 @@ import {
 	type KoreaderHighlightImporterSettings,
 	type PluginData,
 } from "src/types";
-import { Mutex } from "src/utils/concurrency";
 import { normalizeSettings } from "./settingsSchema";
 
 export class PluginDataStore {

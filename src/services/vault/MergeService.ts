@@ -1,12 +1,15 @@
 import type { MergeRegion } from "node-diff3";
 import { diff3Merge } from "node-diff3";
 import type { App, TFile, Vault } from "obsidian";
-import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import {
+	compareAnnotations,
+	getHighlightKey,
+} from "src/lib/formatting/formatUtils";
+import { extractHighlights } from "src/lib/parsing/highlightExtractor";
+import type KoreaderImporterPlugin from "src/main";
 import type { FrontmatterGenerator } from "src/services/parsing/FrontmatterGenerator";
 import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
 import type { Annotation, LuaMetadata } from "src/types";
-import { compareAnnotations, getHighlightKey } from "src/utils/formatUtils";
-import { extractHighlights } from "src/utils/highlightExtractor";
 import type { LoggingService } from "../LoggingService";
 import type { ContentGenerator } from "./ContentGenerator";
 import type { SnapshotManager } from "./SnapshotManager";

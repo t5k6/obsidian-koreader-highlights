@@ -1,12 +1,12 @@
 import { type App, Notice, type TFile } from "obsidian";
-import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import { Mutex } from "src/lib/concurrency/concurrency";
+import type KoreaderImporterPlugin from "src/main";
 import type {
 	DuplicateChoice,
 	DuplicateHandlingSession,
 	DuplicateMatch,
 	IDuplicateHandlingModal,
 } from "src/types";
-import { Mutex } from "src/utils/concurrency";
 import type { CapabilityManager } from "../CapabilityManager";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";

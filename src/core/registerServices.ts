@@ -1,4 +1,6 @@
 import type { App } from "obsidian";
+import { CacheManager } from "src/lib/cache/CacheManager";
+import type KoreaderImporterPlugin from "src/main";
 import { BookRefreshOrchestrator } from "src/services/BookRefreshOrchestrator";
 import { CapabilityManager } from "src/services/CapabilityManager";
 import { CommandManager } from "src/services/command/CommandManager";
@@ -24,9 +26,7 @@ import { SnapshotManager } from "src/services/vault/SnapshotManager";
 import type { DuplicateHandlingSession, DuplicateMatch } from "src/types";
 import { DuplicateHandlingModal } from "src/ui/DuplicateModal";
 import { StatusBarManager } from "src/ui/StatusBarManager";
-import { CacheManager } from "src/utils/cache/CacheManager";
 import type { DIContainer } from "./DIContainer";
-import type KoreaderImporterPlugin from "./KoreaderImporterPlugin";
 import {
 	APP_TOKEN,
 	DUPLICATE_MODAL_FACTORY_TOKEN,

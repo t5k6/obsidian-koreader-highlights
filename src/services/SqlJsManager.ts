@@ -2,8 +2,10 @@ import path from "node:path";
 import initSqlJs, { type Database, type SqlJsStatic } from "sql.js";
 import { SQLITE_WASM } from "src/binaries/sql-wasm-base64";
 import { INDEX_DB_VERSION } from "src/constants";
+import { AsyncLazy } from "src/lib/concurrency/asyncLazy";
+import { err, isErr, ok, type Result } from "src/lib/core/result";
+import type { AppFailure } from "src/lib/errors/resultTypes";
 import type { Disposable } from "src/types";
-import { AsyncLazy } from "src/utils/asyncLazy";
 import type { FileSystemService } from "./FileSystemService";
 import type { LoggingService } from "./LoggingService";
 
@@ -16,7 +18,10 @@ export class SqlJsManager implements Disposable {
 	private readonly log;
 	private sqlJsLazy: AsyncLazy<SqlJsStatic>;
 	private dbCache = new Map<string, Database>();
-	private openInFlight = new Map<string, Promise<Database>>();
+	private openInFlight = new Map<
+		string,
+		Promise<Result<Database, AppFailure>>
+	>();
 	private dbIsDirty = new Map<string, boolean>();
 
 	constructor(
@@ -53,9 +58,9 @@ export class SqlJsManager implements Disposable {
 	public async openDatabase(
 		filePath: string,
 		options: OpenDbOptions = {},
-	): Promise<Database> {
+	): Promise<Result<Database, AppFailure>> {
 		if (this.dbCache.has(filePath)) {
-			return this.dbCache.get(filePath)!;
+			return ok(this.dbCache.get(filePath)!);
 		}
 
 		// If an open is already in-flight for this path, await it
@@ -64,27 +69,24 @@ export class SqlJsManager implements Disposable {
 			return inFlight;
 		}
 
-		const openPromise = (async (): Promise<Database> => {
+		const openPromise = (async (): Promise<Result<Database, AppFailure>> => {
 			this.log.info(`Opening database: ${filePath}`);
 			const SQL = await this.getSqlJs();
 			let bytes: Uint8Array | null = null;
 
-			try {
-				// readBinaryAuto now returns a correctly-sized Uint8Array
-				bytes = await this.fsService.readBinaryAuto(filePath);
-			} catch (e: any) {
-				if (e.code === "ENOENT") {
-					// This is the expected "file not found" on first run. Log it and continue.
+			// readBinaryAuto returns Result<Uint8Array, AppFailure>
+			const readRes = await this.fsService.readBinaryAuto(filePath);
+			if (isErr(readRes)) {
+				if (readRes.error.kind === "NotFound") {
 					this.log.info(`No database file found at ${filePath}, creating new.`);
+					bytes = null;
 				} else {
-					// Any other error is unexpected and should be thrown.
-					this.log.error(
-						`Unexpected error reading database file: ${filePath}`,
-						e,
-					);
-					throw e;
+					return err(readRes.error);
 				}
+			} else {
+				bytes = readRes.value;
 			}
+
 			const db = bytes ? new SQL.Database(bytes) : new SQL.Database();
 
 			// Cache immediately so setDirty on a brand new DB marks it correctly
@@ -136,11 +138,12 @@ export class SqlJsManager implements Disposable {
 						`Database validation failed for ${filePath}. It may be corrupt.`,
 						e,
 					);
-					throw e;
+					// treat validation failure as ReadFailed for this path
+					return err({ kind: "ReadFailed", path: filePath, cause: e as any });
 				}
 			}
 
-			return db;
+			return ok(db);
 		})().finally(() => {
 			// Ensure the in-flight promise is removed on success or failure
 			this.openInFlight.delete(filePath);
@@ -150,32 +153,38 @@ export class SqlJsManager implements Disposable {
 		return openPromise;
 	}
 
-	public async persistDatabase(filePath: string): Promise<void> {
+	public async persistDatabase(
+		filePath: string,
+	): Promise<Result<void, AppFailure>> {
 		const db = this.dbCache.get(filePath);
 		if (!db || !this.dbIsDirty.get(filePath)) {
-			return;
+			return ok(void 0);
 		}
 
 		this.log.info(`Persisting database to disk: ${filePath}`);
-		try {
-			const data = db.export();
-			// Ensure we pass a concrete ArrayBuffer (not ArrayBuffer | SharedArrayBuffer)
-			// by copying the Uint8Array and using its backing buffer.
-			const copy = data.slice();
-			const buffer = copy.buffer;
+		const data = db.export();
+		const copy = data.slice();
+		const buffer = copy.buffer;
 
-			if (path.isAbsolute(filePath)) {
-				await this.fsService.writeBinaryAuto(filePath, new Uint8Array(buffer));
-			} else {
-				await this.fsService.writeVaultBinaryAtomic(filePath, buffer);
+		if (path.isAbsolute(filePath)) {
+			const w = await this.fsService.writeBinaryAuto(
+				filePath,
+				new Uint8Array(buffer),
+			);
+			if (isErr(w)) {
+				this.log.error(`Failed to persist database: ${filePath}`, w.error);
+				return err(w.error);
 			}
-
-			this.setDirty(filePath, false);
-		} catch (e: unknown) {
-			this.log.error(`Failed to persist database: ${filePath}`, e);
-			// Propagate critical I/O errors so callers can handle/notify
-			throw e;
+		} else {
+			const w = await this.fsService.writeVaultBinaryAtomic(filePath, buffer);
+			if (isErr(w)) {
+				this.log.error(`Failed to persist database: ${filePath}`, w.error);
+				return err(w.error);
+			}
 		}
+
+		this.setDirty(filePath, false);
+		return ok(void 0);
 	}
 
 	public async createInMemoryDatabase(): Promise<Database> {
@@ -210,7 +219,7 @@ export class SqlJsManager implements Disposable {
 
 	async dispose(): Promise<void> {
 		this.log.info("Disposing all managed databases...");
-		const persistPromises: Promise<void>[] = [];
+		const persistPromises: Promise<Result<void, AppFailure>>[] = [];
 		// Take a snapshot of keys to avoid mutating while iterating
 		const filePaths = Array.from(this.dbCache.keys());
 		for (const filePath of filePaths) {

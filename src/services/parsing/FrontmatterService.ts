@@ -5,13 +5,14 @@ import {
 	stringifyYaml,
 	type TFile,
 } from "obsidian";
-import type { LoggingService } from "src/services/LoggingService";
-import type { BookMetadata, FileMetadataExtractor } from "src/types";
 import {
 	formatDateWithFormat,
 	secondsToHoursMinutesSeconds,
-} from "src/utils/dateUtils";
-import { formatPercent, normalizeFileNamePiece } from "src/utils/formatUtils";
+} from "src/lib/formatting/dateUtils";
+import { formatPercent } from "src/lib/formatting/formatUtils";
+import { normalizeFileNamePiece } from "src/lib/pathing/fileNaming";
+import type { LoggingService } from "src/services/LoggingService";
+import type { BookMetadata, FileMetadataExtractor } from "src/types";
 import { FieldMappingService } from "./FieldMappingService";
 
 // --- Formatting Constants and Helpers ---

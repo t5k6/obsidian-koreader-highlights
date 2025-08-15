@@ -66,7 +66,7 @@ async function runBuild({ watch }) {
 	const templateLiteral = await embedTemplates();
 
 	const common = {
-		entryPoints: ["src/core/KoreaderImporterPlugin.ts"],
+		entryPoints: ["src/main.ts"],
 		outfile: "main.js",
 		bundle: true,
 		format: "cjs",

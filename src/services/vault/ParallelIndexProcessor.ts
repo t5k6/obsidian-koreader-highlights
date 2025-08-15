@@ -1,8 +1,8 @@
 import type { TFile } from "obsidian";
 import pLimit from "p-limit";
+import type { ConcurrentDatabase } from "src/lib/concurrency/ConcurrentDatabase";
 import type { LoggingService } from "src/services/LoggingService";
 import type { BookMetadata, FileMetadataExtractor } from "src/types";
-import type { ConcurrentDatabase } from "src/utils/ConcurrentDatabase";
 
 /**
  * Result shape after processing a batch of files.

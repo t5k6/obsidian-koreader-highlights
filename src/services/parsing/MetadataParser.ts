@@ -6,6 +6,8 @@ import type {
 	TableKeyString,
 	TableValue,
 } from "luaparse/lib/ast";
+import type { CacheManager } from "src/lib/cache/CacheManager";
+import type { LruCache } from "src/lib/cache/LruCache";
 import type { SDRFinder } from "src/services/device/SDRFinder";
 import {
 	type Annotation,
@@ -13,8 +15,6 @@ import {
 	DRAWER_TYPES,
 	type LuaMetadata,
 } from "src/types";
-import type { CacheManager } from "src/utils/cache/CacheManager";
-import type { LruCache } from "src/utils/cache/LruCache";
 import type { LoggingService } from "../LoggingService";
 import { FieldMappingService } from "./FieldMappingService";
 

@@ -1,4 +1,5 @@
 import { normalizePath, TFile } from "obsidian";
+import { isErr } from "src/lib/core/result";
 import {
 	FileSystemError,
 	FileSystemErrorCode,
@@ -189,7 +190,7 @@ async function createNewFile(
 		ctx.luaMetadata!.docProps,
 		ctx.luaMetadata!.originalFilePath,
 	);
-	const { getFileNameWithoutExt } = await import("src/utils/formatUtils");
+	const { getFileNameWithoutExt } = await import("src/lib/pathing/fileNaming");
 	const baseStem = getFileNameWithoutExt(fileNameWithExt);
 	const content = await contentProvider();
 
@@ -216,9 +217,14 @@ async function createNewFile(
 	}
 
 	try {
-		const file = await io.fs.createVaultFileSafely(folder, baseStem, content, {
-			failOnFirstCollision: true,
-		});
+		// Ensure folder exists, ignore errors here and let create() surface them
+		const ensured = await io.fs.ensureVaultFolder(folder);
+		if (isErr(ensured)) {
+			throw ensured.error ?? new Error("Failed to ensure folder");
+		}
+
+		const targetPath = normalizePath(`${folder}/${fileNameWithExt}`);
+		const file = await io.app.vault.create(targetPath, content);
 		return { success: true, file };
 	} catch (err) {
 		// Attempt rich duplicate handling on "already exists"
@@ -284,7 +290,9 @@ async function createNewFile(
 }
 
 async function afterFileWrite(ctx: ImportContext, file: TFile, io: ImportIO) {
-	const { bookKeyFromDocProps } = await import("src/utils/formatUtils");
+	const { bookKeyFromDocProps } = await import(
+		"src/lib/formatting/formatUtils"
+	);
 	await io.index.upsertBook(
 		ctx.luaMetadata!.statistics?.book.id ?? null,
 		bookKeyFromDocProps(ctx.luaMetadata!.docProps),
@@ -299,7 +307,9 @@ async function recordSuccess(
 	vaultPath: string | null,
 	io: ImportIO,
 ) {
-	const { bookKeyFromDocProps } = await import("src/utils/formatUtils");
+	const { bookKeyFromDocProps } = await import(
+		"src/lib/formatting/formatUtils"
+	);
 	await io.index.recordImportSuccess({
 		path: ctx.metadataPath,
 		mtime: ctx.stats?.mtimeMs ?? 0,

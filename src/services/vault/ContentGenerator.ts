@@ -1,12 +1,12 @@
-import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
-import type { TemplateManager } from "src/services/parsing/TemplateManager";
-import type { Annotation } from "src/types";
 import {
 	compareAnnotations,
 	distanceBetweenHighlights,
 	isWithinGap,
-} from "src/utils/formatUtils";
-import { createKohlMarkers } from "src/utils/highlightExtractor";
+} from "src/lib/formatting/formatUtils";
+import { createKohlMarkers } from "src/lib/parsing/highlightExtractor";
+import type KoreaderImporterPlugin from "src/main";
+import type { TemplateManager } from "src/services/parsing/TemplateManager";
+import type { Annotation } from "src/types";
 
 interface SuccessiveGroup {
 	annotations: Annotation[];

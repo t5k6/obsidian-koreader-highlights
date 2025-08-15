@@ -1,6 +1,6 @@
 import path from "node:path";
 import { type App, Notice } from "obsidian";
-import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import type KoreaderImporterPlugin from "src/main";
 import { ProgressModal } from "src/ui/ProgressModal";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";

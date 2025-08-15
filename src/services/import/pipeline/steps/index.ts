@@ -1,3 +1,4 @@
+import { isErr } from "src/lib/core/result";
 import type { Step } from "../runner";
 import type {
 	ImportContext,
@@ -9,12 +10,15 @@ import type {
 export const StatsStep: Step = {
 	id: "stats",
 	async run(ctx: ImportContext, io: ImportIO): Promise<StepOutcome> {
-		const stats = await io.fs.getNodeStats(ctx.metadataPath);
+		const statsRes = await io.fs.getNodeStats(ctx.metadataPath);
 		ctx = {
 			...ctx,
-			stats: stats
-				? { mtimeMs: stats.mtime.getTime(), size: stats.size }
-				: null,
+			stats: isErr(statsRes)
+				? null
+				: {
+						mtimeMs: statsRes.value.mtime.getTime(),
+						size: statsRes.value.size,
+					},
 		};
 		return { type: "continue", ctx };
 	},
@@ -73,7 +77,9 @@ export const ParseEnrichStep: Step = {
 		}
 
 		if (!luaMetadata.docProps.title) {
-			const { getFileNameWithoutExt } = await import("src/utils/formatUtils");
+			const { getFileNameWithoutExt } = await import(
+				"src/lib/pathing/fileNaming"
+			);
 			luaMetadata.docProps.title = getFileNameWithoutExt(ctx.sdrPath);
 			io.log.warn(
 				`Metadata missing title for ${ctx.sdrPath}, using filename as fallback.`,

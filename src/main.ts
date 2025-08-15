@@ -7,11 +7,11 @@ import { TemplateManager } from "src/services/parsing/TemplateManager";
 import { LocalIndexService } from "src/services/vault/LocalIndexService";
 import { SettingsTab } from "src/ui/SettingsTab";
 import { StatusBarManager } from "src/ui/StatusBarManager";
-import type { KoreaderHighlightImporterSettings } from "../types";
-import { DIContainer } from "./DIContainer";
-import { MigrationManager } from "./MigrationManager";
-import { PluginDataStore } from "./PluginDataStore";
-import { registerServices } from "./registerServices";
+import { DIContainer } from "./core/DIContainer";
+import { MigrationManager } from "./core/MigrationManager";
+import { PluginDataStore } from "./core/PluginDataStore";
+import { registerServices } from "./core/registerServices";
+import type { KoreaderHighlightImporterSettings } from "./types";
 
 /** Confirmation modal for destructive reset */
 class ResetConfirmationModal extends Modal {

@@ -1,7 +1,7 @@
 import { Setting } from "obsidian";
-import type KoreaderImporterPlugin from "src/core/KoreaderImporterPlugin";
+import { runPluginAction } from "src/lib/ui/actionUtils";
+import type KoreaderImporterPlugin from "src/main";
 import type { DebouncedFn } from "src/types";
-import { runPluginAction } from "src/utils/actionUtils";
 import { SettingsSection } from "../SettingsSection";
 
 export class ImportActionsSection extends SettingsSection {

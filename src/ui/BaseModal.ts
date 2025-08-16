@@ -1,4 +1,4 @@
-import { type App, Modal, type Scope } from "obsidian";
+import { type App, type EventRef, Modal, type Scope } from "obsidian";
 
 /**
  * Result type for modals. Each modal can define its own result shape.
@@ -35,6 +35,7 @@ export abstract class BaseModal<T = void> extends Modal {
 	private resolvePromise: ((value: ModalResult<T>) => void) | null = null;
 	private hasResolved = false;
 	private shortcuts: Map<string, () => void> = new Map();
+	private eventRefs: EventRef[] = [];
 
 	constructor(app: App, config: Partial<BaseModalConfig> = {}) {
 		super(app);
@@ -106,6 +107,16 @@ export abstract class BaseModal<T = void> extends Modal {
 
 		// Unregister shortcuts
 		this.unregisterShortcuts();
+
+		// Unregister any workspace/event listeners registered via registerAppEvent
+		for (const ref of this.eventRefs) {
+			try {
+				this.app.workspace.offref(ref);
+			} catch {
+				// ignore; defensive against API/version differences
+			}
+		}
+		this.eventRefs = [];
 
 		// Ensure promise resolves (with current result or null)
 		this.resolveIfNeeded(this.result);
@@ -262,5 +273,12 @@ export abstract class BaseModal<T = void> extends Modal {
 			this.resolvePromise = null;
 			this.hasResolved = true;
 		}
+	}
+
+	/**
+	 * Track an Obsidian EventRef for automatic cleanup on modal close.
+	 */
+	protected registerAppEvent(ref: EventRef): void {
+		this.eventRefs.push(ref);
 	}
 }

@@ -1,4 +1,9 @@
-import { type App, Setting, type TextComponent } from "obsidian";
+import {
+	type App,
+	ButtonComponent,
+	Setting,
+	type TextComponent,
+} from "obsidian";
 import { BaseModal } from "./BaseModal";
 
 export class PromptModal extends BaseModal<string> {
@@ -43,18 +48,18 @@ export class PromptModal extends BaseModal<string> {
 			});
 		});
 
-		new Setting(contentEl)
-			.addButton((btn) =>
-				btn.setButtonText("Cancel").onClick(() => {
-					this.cancel();
-				}),
-			)
-			.addButton((btn) =>
-				btn
-					.setButtonText("Create")
-					.setCta()
-					.onClick(() => this.submit()),
-			);
+		const buttonContainer = contentEl.createDiv({
+			cls: "modal-button-container",
+		});
+
+		new ButtonComponent(buttonContainer).setButtonText("Cancel").onClick(() => {
+			this.cancel();
+		});
+
+		new ButtonComponent(buttonContainer)
+			.setButtonText("Create")
+			.setCta()
+			.onClick(() => this.submit());
 	}
 
 	protected handleEnter(): void {

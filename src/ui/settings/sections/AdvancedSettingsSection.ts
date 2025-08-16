@@ -29,8 +29,8 @@ export class AdvancedSettingsSection extends SettingsSection {
 					10,
 				) as KoreaderHighlightImporterSettings["logLevel"];
 				this.plugin.settings.logLevel = level;
-				await this.plugin.saveSettings();
 			},
+			this.debouncedSave,
 		);
 
 		booleanSetting(
@@ -40,8 +40,8 @@ export class AdvancedSettingsSection extends SettingsSection {
 			() => this.plugin.settings.logToFile,
 			async (value) => {
 				this.plugin.settings.logToFile = value;
-				await this.plugin.saveSettings(true);
 			},
+			async () => this.plugin.saveSettings(true),
 		);
 
 		if (this.plugin.settings.logToFile) {
@@ -55,8 +55,8 @@ export class AdvancedSettingsSection extends SettingsSection {
 				() => this.plugin.settings.logsFolder,
 				(value) => {
 					this.plugin.settings.logsFolder = value;
-					this.debouncedSave();
 				},
+				this.debouncedSave,
 			);
 		}
 

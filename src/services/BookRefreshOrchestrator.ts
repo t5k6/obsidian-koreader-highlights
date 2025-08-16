@@ -2,7 +2,7 @@ import path from "node:path";
 import type { TFile } from "obsidian";
 import type { SDRFinder } from "./device/SDRFinder";
 import type { FileSystemService } from "./FileSystemService";
-import type { ImportManager } from "./ImportManager";
+import type { ImportPipelineService } from "./ImportPipelineService";
 import type { LoggingService } from "./LoggingService";
 import type { LocalIndexService } from "./vault/LocalIndexService";
 
@@ -11,7 +11,7 @@ export class BookRefreshOrchestrator {
 
 	constructor(
 		private readonly localIndex: LocalIndexService,
-		private readonly importManager: ImportManager,
+		private readonly importPipelineService: ImportPipelineService,
 		private readonly sdrFinder: SDRFinder,
 		private readonly fs: FileSystemService,
 		private readonly loggingService: LoggingService,
@@ -28,7 +28,7 @@ export class BookRefreshOrchestrator {
 		const src = await this.localIndex.latestSourceForBook(bookKey);
 		if (!src) throw new Error("No source metadata.lua recorded for this book");
 
-		const mount = await this.sdrFinder.findActiveMountPoint();
+		const mount = await this.sdrFinder.findActiveScanPath();
 		if (!mount) throw new Error("KOReader device not connected");
 
 		const fullSrcPath = path.join(mount, src);
@@ -36,7 +36,7 @@ export class BookRefreshOrchestrator {
 			throw new Error("metadata.lua not found on device");
 		}
 
-		const result = await this.importManager.runSingleFilePipeline({
+		const result = await this.importPipelineService.runSingleFilePipeline({
 			metadataPath: fullSrcPath,
 			existingNoteOverride: note,
 		});

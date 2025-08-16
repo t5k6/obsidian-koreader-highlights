@@ -175,8 +175,8 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 	}
 
 	onSettingsChanged(newSettings: KoreaderHighlightImporterSettings): void {
-		if (newSettings.koreaderMountPoint !== this.settings.koreaderMountPoint) {
-			this.log.info("Mount point changed, resetting stats DB connection.");
+		if (newSettings.koreaderScanPath !== this.settings.koreaderScanPath) {
+			this.log.info("Scan path changed, resetting stats DB connection.");
 			this.dispose();
 		}
 		this.settings = newSettings;
@@ -226,9 +226,9 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 	 * @returns Path to the statistics database or null if not found
 	 */
 	private async resolveStatsDbPath(): Promise<string | null> {
-		const mountPoint = this.settings.koreaderMountPoint;
+		const mountPoint = this.settings.koreaderScanPath;
 		if (!mountPoint) {
-			this.log.warn("Mount point not set, cannot resolve stats DB path.");
+			this.log.warn("Scan path not set, cannot resolve stats DB path.");
 			return null;
 		}
 

@@ -10,9 +10,9 @@ export class FilteringSettingsSection extends SettingsSection {
 			() => this.plugin.settings.excludedFolders,
 			(value) => {
 				this.plugin.settings.excludedFolders = value;
-				this.debouncedSave();
 			},
 			".git, .stfolder",
+			this.debouncedSave,
 		);
 
 		stringArraySetting(
@@ -24,9 +24,9 @@ export class FilteringSettingsSection extends SettingsSection {
 				this.plugin.settings.allowedFileTypes = value.map((v) =>
 					v.toLowerCase(),
 				);
-				this.debouncedSave();
 			},
 			"epub, pdf, mobi",
+			this.debouncedSave,
 		);
 	}
 }

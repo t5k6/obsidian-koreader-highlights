@@ -1,6 +1,7 @@
-import { type App, type EventRef, MarkdownRenderer, Modal } from "obsidian";
+import { type App, MarkdownRenderer } from "obsidian";
 import type { TemplateManager } from "src/services/parsing/TemplateManager";
 import type { Annotation, TemplateDefinition } from "../types";
+import { BaseModal } from "./BaseModal";
 
 const EXAMPLE_ANNOTATION_GROUP: Annotation[] = [
 	{
@@ -19,75 +20,61 @@ const EXAMPLE_RENDER_CONTEXT = {
 	separators: [],
 };
 
-export class TemplatePreviewModal extends Modal {
-	private unregisterThemeHandler: EventRef | null = null;
-
+export class TemplatePreviewModal extends BaseModal<void> {
 	constructor(
 		app: App,
 		private templateManager: TemplateManager,
 		private template: Omit<TemplateDefinition, "id">,
 	) {
-		super(app);
+		super(app, {
+			className: "koreader-template-preview-modal",
+			enableEscape: true,
+			enableEnter: false,
+		});
 	}
 
-	async onOpen() {
-		const { contentEl } = this;
-		contentEl.empty();
-		contentEl.addClass("koreader-template-preview-modal");
-
+	protected async renderContent(contentEl: HTMLElement): Promise<void> {
 		contentEl.createEl("h2", { text: `Preview: ${this.template.name}` });
 		contentEl.createEl("p", { text: this.template.description });
 
-		// --- Example Output Section ---
 		contentEl.createEl("h3", { text: "Example Output" });
 		const previewEl = contentEl.createDiv({ cls: "template-preview-rendered" });
-		this.refreshPreview(previewEl); // Initial render
 
-		// --- Template Code Section (Using MarkdownRenderer) ---
+		// --- Template Code Section ---
 		contentEl.createEl("h3", { text: "Template Code" });
-		const codeContainer = contentEl.createDiv();
+		const codeContainer = contentEl.createDiv({
+			cls: "template-preview-code-block",
+		});
 		const markdownCodeBlock = `\`\`\`md\n${this.template.content}\n\`\`\``;
 
 		await MarkdownRenderer.render(
 			this.app,
 			markdownCodeBlock,
 			codeContainer,
-			"", // No source path needed
+			"",
 			this.templateManager.plugin,
 		);
-		// The renderer creates its own <pre> and <code> tags.
-		// We can add a class to the container for styling.
-		codeContainer.addClass("template-preview-code-block");
 
-		// --- Event Handlers & Shortcuts ---
-		this.scope.register([], "Escape", () => {
-			this.close();
-			return false;
-		});
-		this.scope.register(["Mod"], "w", () => {
-			this.close();
-			return false;
-		});
+		// --- Event Handlers for Live Refresh ---
+		this.registerAppEvent(
+			this.app.workspace.on("css-change", () => {
+				this.refreshPreview(previewEl);
+			}),
+		);
 
-		this.unregisterThemeHandler = this.app.workspace.on("css-change", () => {
-			this.refreshPreview(previewEl);
-		});
+		// Initial render after setting up events
+		this.refreshPreview(previewEl);
 	}
 
-	onClose() {
-		super.onClose();
-		if (this.unregisterThemeHandler) {
-			this.app.workspace.offref(this.unregisterThemeHandler);
-		}
+	protected registerShortcuts(): void {
+		super.registerShortcuts(); // Handles Escape key
+		this.registerShortcut(["Mod"], "w", () => this.close());
 	}
 
-	private async refreshPreview(el: HTMLElement) {
-		el.setText("Rendering preview…"); // Placeholder text
-
-		// Give the UI a moment to update before we do the work
+	private async refreshPreview(el: HTMLElement): Promise<void> {
+		el.setText("Rendering preview…");
 		await new Promise((resolve) => setTimeout(resolve, 10));
 
-		// Re-compile the template on every refresh
 		const compiledTemplateFn = this.templateManager.compile(
 			this.template.content,
 		);
@@ -98,14 +85,12 @@ export class TemplatePreviewModal extends Modal {
 			EXAMPLE_RENDER_CONTEXT,
 		);
 
-		el.empty(); // Clear the placeholder
-
-		// Render the final HTML
+		el.empty();
 		await MarkdownRenderer.render(
 			this.app,
 			renderedOutput,
 			el,
-			this.template.name, // Use a dummy path for context
+			this.template.name,
 			this.templateManager.plugin,
 		);
 	}

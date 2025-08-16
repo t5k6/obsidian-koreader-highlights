@@ -1,39 +1,45 @@
-import type { TFile } from "obsidian";
-import type { LuaMetadata } from "src/types";
+import type { App, TFile } from "obsidian";
+import type { DeviceStatisticsService } from "src/services/device/DeviceStatisticsService";
+import type { SDRFinder } from "src/services/device/SDRFinder";
+import type { FileSystemService } from "src/services/FileSystemService";
+import type { LoggingService } from "src/services/LoggingService";
+import type { FrontmatterGenerator } from "src/services/parsing/FrontmatterGenerator";
+import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
+import type { MetadataParser } from "src/services/parsing/MetadataParser";
+import type { ContentGenerator } from "src/services/vault/ContentGenerator";
+import type { DuplicateFinder } from "src/services/vault/DuplicateFinder";
+import type { DuplicateHandler } from "src/services/vault/DuplicateHandler";
+import type { FileNameGenerator } from "src/services/vault/FileNameGenerator";
+import type { LocalIndexService } from "src/services/vault/LocalIndexService";
+import type { NoteCreationService } from "src/services/vault/NoteCreationService";
+import type { SnapshotManager } from "src/services/vault/SnapshotManager";
+import type {
+	DuplicateHandlingSession,
+	DuplicateMatch,
+	KoreaderHighlightImporterSettings,
+	LuaMetadata,
+} from "src/types";
 
 export type SkipReason = "UNCHANGED" | "NO_ANNOTATIONS" | "USER_DECISION";
 export type WarningCode = "duplicate-timeout";
 
-// Port for all user-facing decisions required by the import pipeline.
-// Removed UserInteractionService interface
-
 export interface ImportContext {
-	// inputs
 	metadataPath: string;
 	sdrPath: string;
 	forceNote?: TFile | null;
-	session: import("src/types").DuplicateHandlingSession;
 	forceReimport?: boolean;
-
-	// evolving state
 	stats: { mtimeMs: number; size: number } | null;
 	latestTs: string | null;
 	luaMetadata: LuaMetadata | null;
-	warnings: WarningCode[]; // e.g., ['duplicate-timeout']
+	warnings: WarningCode[];
+	session?: DuplicateHandlingSession;
 }
 
 export type ImportPlan =
 	| { kind: "SKIP"; reason: SkipReason }
 	| { kind: "CREATE"; withTimeoutWarning?: boolean }
-	| {
-			kind: "MERGE";
-			match: import("src/types").DuplicateMatch;
-			session: import("src/types").DuplicateHandlingSession;
-	  };
-
-export type StepOutcome =
-	| { type: "continue"; ctx: ImportContext }
-	| { type: "plan"; ctx: ImportContext; plan: ImportPlan };
+	| { kind: "MERGE"; match: DuplicateMatch; session?: DuplicateHandlingSession }
+	| { kind: "AWAIT_USER_CHOICE"; title: string; existingPath: string | null };
 
 export type ExecResult =
 	| { status: "created"; file: TFile }
@@ -42,21 +48,55 @@ export type ExecResult =
 	| { status: "skipped"; file: null };
 
 export interface ImportIO {
-	// surface all services the steps need; easy to mock in tests
-	fs: import("src/services/FileSystemService").FileSystemService;
-	index: import("src/services/vault/LocalIndexService").LocalIndexService;
-	parser: import("src/services/parsing/MetadataParser").MetadataParser;
-	statsSvc: import("src/services/device/DeviceStatisticsService").DeviceStatisticsService;
-	fmService: import("src/services/parsing/FrontmatterService").FrontmatterService;
-	fmGen: import("src/services/parsing/FrontmatterGenerator").FrontmatterGenerator;
-	contentGen: import("src/services/vault/ContentGenerator").ContentGenerator;
-	dupFinder: import("src/services/vault/DuplicateFinder").DuplicateFinder;
-	dupHandler: import("src/services/vault/DuplicateHandler").DuplicateHandler;
-	fileNameGen: import("src/services/vault/FileNameGenerator").FileNameGenerator;
-	snapshot: import("src/services/vault/SnapshotManager").SnapshotManager;
-	settings: import("src/types").KoreaderHighlightImporterSettings;
-	app: import("obsidian").App;
-	log: import("src/services/LoggingService").LoggingService;
-	// UI port for user interactions
-	ui: import("src/services/ui/PromptService").PromptService;
+	// planning + execution ports
+	fs: FileSystemService;
+	index: LocalIndexService;
+	parser: MetadataParser;
+	sdrFinder: SDRFinder;
+	statsSvc: DeviceStatisticsService;
+
+	fmService: FrontmatterService;
+	fmGen: FrontmatterGenerator;
+	contentGen: ContentGenerator;
+
+	dupFinder: DuplicateFinder;
+	dupHandler: DuplicateHandler;
+
+	fileNameGen: FileNameGenerator;
+	snapshot: SnapshotManager;
+
+	settings: KoreaderHighlightImporterSettings;
+	app: App;
+	log: LoggingService;
+
+	// executor-only helper
+	noteCreation: NoteCreationService;
 }
+
+export type PlannerIO = Pick<
+	ImportIO,
+	| "fs"
+	| "index"
+	| "parser"
+	| "sdrFinder"
+	| "statsSvc"
+	| "dupFinder"
+	| "log"
+	| "settings"
+	| "app"
+>;
+
+export type ExecutorIO = Pick<
+	ImportIO,
+	| "app"
+	| "fs"
+	| "fmService"
+	| "fmGen"
+	| "contentGen"
+	| "dupHandler"
+	| "fileNameGen"
+	| "snapshot"
+	| "settings"
+	| "log"
+	| "noteCreation"
+>;

@@ -144,7 +144,7 @@ export type CommentStyle = "html" | "md" | "none";
 
 // Main Plugin Settings Interface
 export interface KoreaderHighlightImporterSettings {
-	koreaderMountPoint: string;
+	koreaderScanPath: string;
 	excludedFolders: string[];
 	allowedFileTypes: string[];
 	highlightsFolder: string;

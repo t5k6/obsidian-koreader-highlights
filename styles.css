@@ -80,16 +80,7 @@ mark[style*="#00ff00"] {
 /*  Helpers: scrollable panel, badges, buttons, focus & motion         */
 /* ─────────────────────────────────────────────────────────────────── */
 
-/* Scrollable panel (used in stats & template preview) */
-.scrollable-panel {
-	max-height: var(--max-preview-h);
-	overflow-y: auto;
-	overflow-x: hidden;
-	padding: var(--spacing-sm) var(--spacing-md);
-	background: var(--background-secondary);
-	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--radius-md);
-}
+/* [removed] .scrollable-panel (unused) */
 
 /* Badge component (colour via specific class or data-attr) */
 .badge {
@@ -153,7 +144,6 @@ mark[style*="#00ff00"] {
 @media (prefers-reduced-motion: reduce) {
 	.btn,
 	.badge,
-	.scrollable-panel,
 	.duplicate-modal-container {
 		transition: none !important;
 	}
@@ -196,29 +186,7 @@ mark[style*="#00ff00"] {
 	flex-grow: 1;
 }
 
-/*  badges */
-.duplicate-badge {
-	font-size: 0.75rem;
-	padding: var(--spacing-xs) var(--spacing-sm);
-	border-radius: var(--radius-sm);
-	font-weight: 500;
-	display: inline-block;
-}
-
-.duplicate-badge-exact {
-	background: var(--khl-green);
-	color: var(--on-khl-green);
-}
-
-.duplicate-badge-updated {
-	background: var(--khl-yellow);
-	color: var(--on-khl-yellow);
-}
-
-.duplicate-badge-divergent {
-	background: var(--khl-orange);
-	color: var(--on-khl-orange);
-}
+/* [removed] legacy duplicate-badge classes (use .badge[data-type]) */
 
 /*  buttons */
 .duplicate-modal .duplicate-buttons {
@@ -286,12 +254,7 @@ mark[style*="#00ff00"] {
 	}
 }
 
-/* Ensure the ButtonComponent's text node is visible */
-.koreader-modal-action-button .button-text {
-	display: inline-block !important;
-	white-space: nowrap;
-	color: inherit; /* inherit color so warn/cta are readable */
-}
+/* [removed] global .koreader-modal-action-button .button-text (conflicts with modal-scoped rule) */
 
 /* Make sure the CTA stands out and warning is clear but secondary */
 .duplicate-buttons .btn.cta {
@@ -310,38 +273,7 @@ mark[style*="#00ff00"] {
 	background: var(--background-modifier-error-hover);
 }
 
-.mod-button {
-	padding: var(--spacing-sm);
-	border-radius: var(--radius-md);
-	display: flex;
-	flex-direction: column;
-	align-items: center;
-	gap: var(--spacing-xs);
-	width: 100%;
-	transition:
-		transform var(--transition),
-		filter var(--transition);
-}
-
-.mod-button:hover:not(.mod-disabled) {
-	transform: translateY(-1px);
-	filter: brightness(1.1);
-}
-
-.mod-cta {
-	background: var(--color-accent);
-	color: var(--color-base-100);
-}
-
-.mod-warning {
-	background: var(--khl-red);
-	color: var(--on-khl-red);
-}
-
-.mod-disabled {
-	opacity: 0.5;
-	cursor: not-allowed;
-}
+/* [removed] legacy .mod-* button styles (unused) */
 
 /* Message and File Path */
 .duplicate-message {

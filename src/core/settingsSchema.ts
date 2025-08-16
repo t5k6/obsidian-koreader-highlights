@@ -77,6 +77,8 @@ export const FrontmatterSchema = z
 // --- Raw/partial schema for loading ---
 export const RawSettingsSchema = z
 	.object({
+		koreaderScanPath: z.string().optional(),
+		// Legacy key accepted to migrate to koreaderScanPath
 		koreaderMountPoint: z.string().optional(),
 		excludedFolders: z.array(z.string()).optional(),
 		// Be resilient: accept bad arrays and default later
@@ -155,7 +157,7 @@ function deepMerge<T>(base: T, next: Partial<T>): T {
 
 // --- Base defaults (no circular refs) ---
 export const BASE_DEFAULTS: KoreaderHighlightImporterSettings = {
-	koreaderMountPoint: "",
+	koreaderScanPath: "",
 	excludedFolders: [
 		".adds",
 		".kobo",
@@ -189,7 +191,19 @@ export function normalizeSettings(
 	raw: unknown,
 ): KoreaderHighlightImporterSettings {
 	const parsed = RawSettingsSchema.safeParse(raw ?? {});
-	const partial = parsed.success ? parsed.data : {};
+	const partialRaw = (parsed.success ? parsed.data : {}) as any;
+
+	// Migrate legacy key to new canonical key in-memory before deep merge
+	const partial: Partial<KoreaderHighlightImporterSettings> = {
+		...(partialRaw as any),
+	} as any;
+	if (
+		(partial as any).koreaderScanPath == null &&
+		typeof partialRaw.koreaderMountPoint === "string"
+	) {
+		(partial as any).koreaderScanPath = partialRaw.koreaderMountPoint;
+		delete (partial as any).koreaderMountPoint;
+	}
 
 	const merged = deepMerge(
 		BASE_DEFAULTS,
@@ -197,8 +211,8 @@ export function normalizeSettings(
 	) as KoreaderHighlightImporterSettings;
 
 	// Post-parse normalizations
-	merged.koreaderMountPoint = FileSystemService.normalizeSystemPath(
-		merged.koreaderMountPoint,
+	merged.koreaderScanPath = FileSystemService.normalizeSystemPath(
+		merged.koreaderScanPath,
 	);
 	merged.highlightsFolder = FileSystemService.toVaultPath(
 		merged.highlightsFolder,

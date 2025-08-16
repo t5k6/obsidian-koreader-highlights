@@ -13,8 +13,8 @@ export class FormattingSettingsSection extends SettingsSection {
 			() => this.plugin.settings.useCustomFileNameTemplate,
 			async (value) => {
 				this.plugin.settings.useCustomFileNameTemplate = value;
-				await this.plugin.saveSettings(true); // Force re-render
 			},
+			async () => this.plugin.saveSettings(true), // Force re-render
 		);
 
 		if (this.plugin.settings.useCustomFileNameTemplate) {
@@ -75,8 +75,8 @@ export class FormattingSettingsSection extends SettingsSection {
 			() => this.plugin.settings.autoMergeOnAddition,
 			async (value) => {
 				this.plugin.settings.autoMergeOnAddition = value;
-				await this.plugin.saveSettings();
 			},
+			this.debouncedSave,
 		);
 
 		booleanSetting(
@@ -86,8 +86,8 @@ export class FormattingSettingsSection extends SettingsSection {
 			() => this.plugin.settings.enableFullDuplicateCheck,
 			async (value) => {
 				this.plugin.settings.enableFullDuplicateCheck = value;
-				await this.plugin.saveSettings();
 			},
+			this.debouncedSave,
 		);
 
 		booleanSetting(
@@ -97,8 +97,8 @@ export class FormattingSettingsSection extends SettingsSection {
 			() => this.plugin.settings.frontmatter.useUnknownAuthor,
 			async (value) => {
 				this.plugin.settings.frontmatter.useUnknownAuthor = value;
-				await this.plugin.saveSettings();
 			},
+			this.debouncedSave,
 		);
 	}
 }

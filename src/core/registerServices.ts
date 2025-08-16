@@ -5,10 +5,11 @@ import { BookRefreshOrchestrator } from "src/services/BookRefreshOrchestrator";
 import { CapabilityManager } from "src/services/CapabilityManager";
 import { CommandManager } from "src/services/command/CommandManager";
 import { DeviceStatisticsService } from "src/services/device/DeviceStatisticsService";
-import { ScanManager } from "src/services/device/ScanManager";
 import { SDRFinder } from "src/services/device/SDRFinder";
 import { FileSystemService } from "src/services/FileSystemService";
-import { ImportManager } from "src/services/ImportManager";
+import { ImportPipelineService } from "src/services/ImportPipelineService";
+import { ImportExecutorService } from "src/services/import/ImportExecutorService";
+import { ImportPlannerService } from "src/services/import/ImportPlannerService";
 import { LoggingService } from "src/services/LoggingService";
 import { FrontmatterGenerator } from "src/services/parsing/FrontmatterGenerator";
 import { FrontmatterService } from "src/services/parsing/FrontmatterService";
@@ -22,6 +23,8 @@ import { DuplicateHandler } from "src/services/vault/DuplicateHandler";
 import { FileNameGenerator } from "src/services/vault/FileNameGenerator";
 import { LocalIndexService } from "src/services/vault/LocalIndexService";
 import { MergeService } from "src/services/vault/MergeService";
+import { NoteCreationService } from "src/services/vault/NoteCreationService";
+import { NoteMaintenanceService } from "src/services/vault/NoteMaintenanceService";
 import { SnapshotManager } from "src/services/vault/SnapshotManager";
 import type { DuplicateHandlingSession, DuplicateMatch } from "src/types";
 import { DuplicateHandlingModal } from "src/ui/DuplicateModal";
@@ -72,7 +75,7 @@ export function registerServices(
 	// Orchestrator for single-book refresh
 	container.register(BookRefreshOrchestrator, [
 		LocalIndexService,
-		ImportManager,
+		ImportPipelineService,
 		SDRFinder,
 		FileSystemService,
 		LoggingService,
@@ -104,6 +107,15 @@ export function registerServices(
 		LoggingService,
 	]);
 
+	// Maintenance utilities for existing notes (non-import)
+	container.register(NoteMaintenanceService, [
+		PLUGIN_TOKEN,
+		FileSystemService,
+		FrontmatterService,
+		LoggingService,
+		CacheManager,
+	]);
+
 	// --- UI-specific Services ---
 	container.register(StatusBarManager, [
 		APP_TOKEN,
@@ -122,13 +134,6 @@ export function registerServices(
 	// --- Level 2: Depends on Level 1 ---
 	container.register(ContentGenerator, [TemplateManager, PLUGIN_TOKEN]);
 	container.register(MetadataParser, [SDRFinder, CacheManager, LoggingService]);
-	container.register(ScanManager, [
-		APP_TOKEN,
-		PLUGIN_TOKEN,
-		SDRFinder,
-		FileSystemService,
-		LoggingService,
-	]);
 	container.register(MergeService, [
 		APP_TOKEN,
 		VAULT_TOKEN,
@@ -174,34 +179,68 @@ export function registerServices(
 		FileSystemService,
 	]);
 
-	// --- Level 3: Depends on Level 2 ---
-	container.register(ImportManager, [
-		APP_TOKEN,
-		PLUGIN_TOKEN,
-		FileNameGenerator,
-		SDRFinder,
-		MetadataParser,
-		DeviceStatisticsService,
-		LocalIndexService,
-		FrontmatterGenerator,
-		ContentGenerator,
-		DuplicateFinder,
-		DuplicateHandler,
-		SnapshotManager,
-		LoggingService,
+	// Helper for creating notes (used by executor)
+	container.register(NoteCreationService, [
 		FileSystemService,
 		FrontmatterService,
-		PROMPT_SERVICE_TOKEN,
-	]);
-	container.register(CommandManager, [
+		FrontmatterGenerator,
+		ContentGenerator,
+		FileNameGenerator,
+		SnapshotManager,
+		LoggingService,
 		PLUGIN_TOKEN,
-		ImportManager,
-		ScanManager,
+	]);
+
+	// New import pipeline services
+	container.register(ImportPlannerService, [
+		APP_TOKEN,
+		PLUGIN_TOKEN,
+		FileSystemService,
+		LocalIndexService,
+		MetadataParser,
+		SDRFinder,
+		DeviceStatisticsService,
+		DuplicateFinder,
+		LoggingService,
+	]);
+	container.register(ImportExecutorService, [
+		PLUGIN_TOKEN,
+		ContentGenerator,
+		DuplicateHandler,
+		NoteCreationService,
+		FrontmatterService,
+		FrontmatterGenerator,
+		LoggingService,
+		FileSystemService,
+		FileNameGenerator,
+		SnapshotManager,
+	]);
+
+	// Lean orchestrator depending on planner + executor
+	container.register(ImportPipelineService, [
+		APP_TOKEN,
+		PLUGIN_TOKEN,
+		SDRFinder,
+		LocalIndexService,
+		SnapshotManager,
+		LoggingService,
+		PROMPT_SERVICE_TOKEN,
+		ImportPlannerService,
+		ImportExecutorService,
+	]);
+
+	// --- Level 3: Depends on Level 2 ---
+	container.register(CommandManager, [
+		APP_TOKEN,
+		PLUGIN_TOKEN,
+		ImportPipelineService,
 		SDRFinder,
 		CacheManager,
 		LoggingService,
 		LocalIndexService,
 		CapabilityManager,
+		NoteMaintenanceService,
+		FileSystemService,
 	]);
 	container.register(DeviceStatisticsService, [
 		PLUGIN_TOKEN,

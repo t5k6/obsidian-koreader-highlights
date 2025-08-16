@@ -1,5 +1,4 @@
-import { platform } from "node:os";
-import path, { join as joinPath } from "node:path";
+import { join as joinPath } from "node:path";
 import { type CacheManager, memoizeAsync } from "src/lib/cache/CacheManager";
 import { ConcurrencyLimiter } from "src/lib/concurrency/concurrency";
 import { isErr } from "src/lib/core/result";
@@ -82,7 +81,7 @@ export class SDRFinder implements SettingsObserver {
 	 * @returns File content as string or null if not found/readable
 	 */
 	async readMetadataFileContent(sdrDir: string): Promise<string | null> {
-		const mountPoint = await this.findActiveMountPoint();
+		const mountPoint = await this.findActiveScanPath();
 		if (!mountPoint) {
 			this.log.warn("Cannot read metadata file without an active mount point.");
 			return null;
@@ -132,9 +131,9 @@ export class SDRFinder implements SettingsObserver {
 	 * Used to invalidate caches when settings change.
 	 */
 	private updateCacheKey(settings: KoreaderHighlightImporterSettings): void {
-		const { koreaderMountPoint, excludedFolders, allowedFileTypes } = settings;
+		const { koreaderScanPath, excludedFolders, allowedFileTypes } = settings;
 		this.cacheKey = [
-			koreaderMountPoint ?? "nokey",
+			koreaderScanPath ?? "nokey",
 			...excludedFolders.map((s) => s.toLowerCase()),
 			...allowedFileTypes.map((s) => s.toLowerCase()),
 		].join("::");
@@ -148,7 +147,7 @@ export class SDRFinder implements SettingsObserver {
 	private async scan(cacheKey: string): Promise<string[]> {
 		if (this.cacheKey !== cacheKey) return []; // Stale call check
 
-		const mountPoint = await this.findActiveMountPoint();
+		const mountPoint = await this.findActiveScanPath();
 		if (!mountPoint) {
 			return [];
 		}
@@ -237,80 +236,19 @@ export class SDRFinder implements SettingsObserver {
 		return null;
 	}
 
-	/* ---------- mount-point handling / auto-detect ----------------- */
+	/* ---------- scan path handling -------------------- */
 
-	public async findActiveMountPoint(): Promise<string | null> {
-		const { koreaderMountPoint } = this.plugin.settings;
-		if (koreaderMountPoint && (await this.isUsableDir(koreaderMountPoint))) {
-			return koreaderMountPoint;
+	public async findActiveScanPath(): Promise<string | null> {
+		const configured = this.plugin.settings.koreaderScanPath?.trim();
+		if (!configured) return null;
+		const statsRes = await this.fs.getNodeStats(configured);
+		if (statsRes && !("error" in statsRes) && statsRes.value.isDirectory()) {
+			return configured;
 		}
-
-		for (const candidate of await this.detectCandidates()) {
-			if (await this.isUsableDir(candidate)) {
-				this.log.info("Auto-detected a usable mount point:", candidate);
-				return candidate;
-			}
-		}
-
-		// Return null if no configured or auto-detected path is found.
+		this.log.warn(
+			"Configured scan path is not a usable directory:",
+			configured,
+		);
 		return null;
-	}
-
-	/**
-	 * Checks if a path exists and is a directory.
-	 * @param p - Path to check
-	 * @returns True if path is a usable directory
-	 */
-	private async isUsableDir(p: string): Promise<boolean> {
-		const stRes = await this.fs.getNodeStats(p);
-		return !isErr(stRes) && stRes.value.isDirectory();
-	}
-
-	/**
-	 * Detects potential KOReader mount points by platform.
-	 * Looks for Kobo devices on macOS/Linux and KoboReader.sqlite on Windows.
-	 * @returns Array of candidate mount point paths
-	 */
-	private async detectCandidates(): Promise<string[]> {
-		const out: string[] = [];
-		const os = platform();
-
-		if (os === "darwin") {
-			for (const p of await this.listDirs("/Volumes")) {
-				if (path.basename(p).toLowerCase().includes("kobo")) out.push(p);
-			}
-		} else if (os === "linux") {
-			for (const root of ["/media", "/run/media"]) {
-				for (const userDir of await this.listDirs(root)) {
-					for (const deviceDir of await this.listDirs(userDir)) {
-						if (path.basename(deviceDir).toLowerCase().includes("kobo")) {
-							out.push(deviceDir);
-						}
-					}
-				}
-			}
-		} else if (platform() === "win32") {
-			for (const letter of "DEFGHIJKLMNOPQRSTUVWXYZ") {
-				const root = `${letter}:\\`;
-				if (
-					await this.fs.nodeFileExists(path.join(root, "KoboReader.sqlite"))
-				) {
-					out.push(root);
-				}
-			}
-		}
-		return out;
-	}
-
-	private async listDirs(parentPath: string): Promise<string[]> {
-		const subdirs: string[] = [];
-		try {
-			for await (const entry of this.fs.iterateNodeDirectory(parentPath)) {
-				if (entry.isDirectory()) subdirs.push(joinPath(parentPath, entry.name));
-			}
-		} catch {
-			// iterateNodeDirectory already logs/filters common errors
-		}
-		return subdirs;
 	}
 }

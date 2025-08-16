@@ -458,6 +458,18 @@ mark[style*="#00ff00"] {
 	margin-block-start: var(--p-spacing);
 }
 
+/* Validation list under custom filename template row */
+.koreader-setting-validation {
+	margin-top: var(--spacing-xs);
+}
+.koreader-setting-validation ul {
+	margin: var(--spacing-xs) 0 0;
+	padding-left: 1.2em;
+}
+.koreader-setting-validation li {
+	margin-bottom: 2px;
+}
+
 /* Make all text inputs and textareas in our settings panel have a responsive consistent width */
 .koreader-importer-settings .setting-item-control,
 .koreader-importer-settings .search-input-container {

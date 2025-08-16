@@ -1,10 +1,11 @@
-import { type App, Modal, Notice, Plugin } from "obsidian";
+import { Notice, Plugin } from "obsidian";
 import { BookRefreshOrchestrator } from "src/services/BookRefreshOrchestrator";
 import { CommandManager } from "src/services/command/CommandManager";
 import { FileSystemService } from "src/services/FileSystemService";
 import { LoggingService } from "src/services/LoggingService";
 import { TemplateManager } from "src/services/parsing/TemplateManager";
 import { LocalIndexService } from "src/services/vault/LocalIndexService";
+import { ConfirmModal } from "src/ui/ConfirmModal";
 import { SettingsTab } from "src/ui/SettingsTab";
 import { StatusBarManager } from "src/ui/StatusBarManager";
 import { DIContainer } from "./core/DIContainer";
@@ -12,46 +13,6 @@ import { MigrationManager } from "./core/MigrationManager";
 import { PluginDataStore } from "./core/PluginDataStore";
 import { registerServices } from "./core/registerServices";
 import type { KoreaderHighlightImporterSettings } from "./types";
-
-/** Confirmation modal for destructive reset */
-class ResetConfirmationModal extends Modal {
-	constructor(
-		app: App,
-		private readonly onConfirm: () => void,
-	) {
-		super(app);
-	}
-
-	onOpen() {
-		const { contentEl } = this;
-		contentEl.createEl("h2", { text: "Reset KOReader Importer?" });
-		contentEl.createEl("p", {
-			text: "This will delete the plugin's index files and caches. Your actual highlight notes in the vault are not affected.",
-		});
-		contentEl.createEl("p", {
-			text: "This action will also reload the plugin to ensure a completely clean state. Continue?",
-		});
-
-		const buttonContainer = contentEl.createDiv({
-			cls: "modal-button-container",
-		});
-
-		const cancelBtn = buttonContainer.createEl("button", { text: "Cancel" });
-		cancelBtn.addEventListener("click", () => this.close());
-
-		const confirmBtn = buttonContainer.createEl("button", {
-			text: "Yes, Reset and Reload",
-			cls: "mod-warning",
-		});
-		confirmBtn.addEventListener("click", () => {
-			this.onConfirm();
-			this.close();
-		});
-	}
-	onClose() {
-		this.contentEl.empty();
-	}
-}
 
 export default class KoreaderImporterPlugin extends Plugin {
 	public settings!: KoreaderHighlightImporterSettings;
@@ -334,11 +295,15 @@ export default class KoreaderImporterPlugin extends Plugin {
 	// Trigger full reset with confirmation
 	async triggerFullReset(): Promise<void> {
 		if (!this.checkServiceStatus("full reset")) return;
-		new ResetConfirmationModal(this.app, async () => {
-			const commandManager =
-				this.diContainer.resolve<CommandManager>(CommandManager);
-			await commandManager.executeFullReset();
-		}).open();
+		const confirmed = await new ConfirmModal(
+			this.app,
+			"Reset KOReader Importer?",
+			"This will delete the plugin's index files and caches. Your actual highlight notes in the vault are not affected. This action will also reload the plugin to ensure a completely clean state. Continue?",
+		).openAndConfirm();
+		if (!confirmed) return;
+		const commandManager =
+			this.diContainer.resolve<CommandManager>(CommandManager);
+		await commandManager.executeFullReset();
 	}
 
 	async triggerRecheckCapabilities(): Promise<void> {

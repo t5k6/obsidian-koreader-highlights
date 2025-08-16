@@ -1,5 +1,5 @@
 import { isErr } from "src/lib/core/result";
-import { getFileNameWithoutExt } from "src/lib/pathing/fileNaming";
+import { getFileNameWithoutExt } from "src/lib/pathing/pathingUtils";
 import type { ImportContext, ImportPlan, PlannerIO } from "./types";
 
 type Step = (

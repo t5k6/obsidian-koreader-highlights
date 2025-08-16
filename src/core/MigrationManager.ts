@@ -11,36 +11,6 @@ import type { PluginData } from "src/types";
 import type { PluginDataStore } from "./PluginDataStore";
 import { normalizeSettings } from "./settingsSchema";
 
-// --- Helper Functions ---
-
-/**
- * Compares two semantic versions.
- * Returns:
- *   1 if version a > version b
- *   0 if version a == version b
- *  -1 if version a < version b
- * @param a The first version string (e.g., "1.2.3-beta.1").
- * @param b The second version string.
- * @returns A number indicating the comparison result.
- */
-function cmpVer(a: string, b: string): number {
-	const [am, ap] = a.split("-", 2); // main & prerelease
-	const [bm, bp] = b.split("-", 2);
-
-	const an = am.split(".").map((n) => parseInt(n, 10) || 0);
-	const bn = bm.split(".").map((n) => parseInt(n, 10) || 0);
-
-	for (let i = 0; i < 3; i++) {
-		if (an[i] > bn[i]) return 1;
-		if (an[i] < bn[i]) return -1;
-	}
-	/* numeric parts equal – handle prerelease tag */
-	if (ap && !bp) return -1; // 1.0.0-alpha  <  1.0.0
-	if (!ap && bp) return 1;
-	if (ap && bp) return ap > bp ? 1 : ap < bp ? -1 : 0;
-	return 0;
-}
-
 // --- Migration Manager ---
 
 type MigrationFn = (ctx: {
@@ -172,7 +142,7 @@ export class MigrationManager {
 	 */
 	private async cleanupLegacyUserData(
 		vault: Vault,
-		log: LoggingService,
+		_log: LoggingService,
 	): Promise<void> {
 		try {
 			const adapter = (vault as any).adapter as import("obsidian").DataAdapter;

@@ -2,7 +2,7 @@ import {
 	getFileNameWithoutExt,
 	normalizeFileNamePiece,
 	simplifySdrName,
-} from "src/lib/pathing/fileNaming";
+} from "src/lib/pathing/pathingUtils";
 import type { LoggingService } from "src/services/LoggingService";
 import type { DocProps } from "src/types";
 

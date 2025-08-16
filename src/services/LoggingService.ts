@@ -149,7 +149,7 @@ class FileSink {
 			const date = datestamp();
 			this.curDate = date;
 			const path = normalizePath(`${this.dir}/log_${timestamp()}.md`);
-			this.curFile = await this.vault.create(path, `# ${path}\n\n` + "```\n");
+			this.curFile = await this.vault.create(path, `# ${path}\n\n\`\`\`\n`);
 			this.curSize = 0;
 		} catch (e) {
 			console.error("KOReader Logger: Failed to rotate to a new log file.", e);

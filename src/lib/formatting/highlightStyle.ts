@@ -131,8 +131,6 @@ export function styleHighlight(
 				`<mark style="background:transparent;color:${fg};">${content}</mark>`;
 			break;
 		}
-		case "lighten":
-		case undefined:
 		default: {
 			if (drawer === "lighten" && key === "gray") {
 				break;

@@ -182,7 +182,7 @@ export class MetadataParser {
 			}
 
 			const returnArg = ast.body[0]
-				.arguments![0] as luaparser.TableConstructorExpression;
+				.arguments?.[0] as luaparser.TableConstructorExpression;
 			if (!returnArg || returnArg.type !== "TableConstructorExpression") {
 				this.log.warn(
 					"Invalid Lua structure: Expected return statement to return a table.",

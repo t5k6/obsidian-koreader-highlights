@@ -162,7 +162,6 @@ export abstract class BaseModal<T = void> extends Modal {
 		modifiers: string[],
 		key: string,
 		handler: () => void,
-		preventDefault = true,
 	): void {
 		const id = `${modifiers.join("+")}+${key}`;
 

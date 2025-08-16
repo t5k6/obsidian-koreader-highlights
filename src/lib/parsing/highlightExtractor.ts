@@ -1,13 +1,17 @@
 import { computeAnnotationId } from "src/lib/formatting/formatUtils";
 import type { Annotation, CommentStyle, PositionObject } from "src/types";
 
-// Regex pattern sources (no flags). Build instances with explicit flags where needed.
-const HTML_KOHL_PATTERN_SRC = "<!--\\s*KOHL\\s*({.*?})\\s*-->";
-const MD_KOHL_PATTERN_SRC = "%%\\s*KOHL\\s*({.*?})\\s*%%";
+// Pattern sources (no flags). Use [\s\S]*? to safely match multi-line JSON without dotAll.
+const HTML_KOHL_PATTERN_SRC = "<!--\\s*KOHL\\s*({[\\s\\S]*?})\\s*-->";
+const MD_KOHL_PATTERN_SRC = "%%\\s*KOHL\\s*({[\\s\\S]*?})\\s*%%";
 
-// Non-global testers for safe one-off .test() calls
-const HTML_KOHL_PATTERN = new RegExp(HTML_KOHL_PATTERN_SRC);
-const MD_KOHL_PATTERN = new RegExp(MD_KOHL_PATTERN_SRC);
+// Combined pattern with named capture groups
+const COMBINED_KOHL_PATTERN_SRC =
+	"(?:<!--\\s*KOHL\\s*(?<html>{[\\s\\S]*?})\\s*-->)|(?:%%\\s*KOHL\\s*(?<md>{[\\s\\S]*?})\\s*%%)";
+
+// Non-global testers for safe one-off .test() calls (no shared state)
+const HTML_KOHL_TEST = new RegExp(HTML_KOHL_PATTERN_SRC);
+const MD_KOHL_TEST = new RegExp(MD_KOHL_PATTERN_SRC);
 
 interface KohlMetadata {
 	v: number; // Version number
@@ -52,21 +56,6 @@ function splitTextAndNote(block: string): { text: string; note?: string } {
 
 /**
  * Extracts highlight annotations from markdown content with fallback parsing.
- * First tries the preferred comment style, then falls back to the other style.
- * @param md - Markdown content containing highlights
- * @param preferredStyle - Comment style to try first (defaults to "html")
- * @returns Array of parsed annotation objects
- */
-export function extractHighlights(
-	md: string,
-	preferredStyle: CommentStyle = "html",
-): Annotation[] {
-	const { annotations } = extractHighlightsWithStyle(md, preferredStyle);
-	return annotations;
-}
-
-/**
- * Extracts highlight annotations from markdown content with fallback parsing.
  * First tries the preferred style, then falls back to the other if no results.
  * @param content - Content containing highlights
  * @param preferredStyle - Comment style to try first
@@ -76,30 +65,69 @@ export function extractHighlightsWithStyle(
 	content: string,
 	preferredStyle: CommentStyle,
 ): { annotations: Annotation[]; usedStyle: CommentStyle | null } {
-	// If comment style is "none", don't attempt to extract any highlights
-	if (preferredStyle === "none") {
-		return { annotations: [], usedStyle: null };
+	if (preferredStyle === "none") return { annotations: [], usedStyle: null };
+
+	// Single-pass across both styles
+	const combined = new RegExp(COMBINED_KOHL_PATTERN_SRC, "g");
+	const allMatches = Array.from(content.matchAll(combined)) as Array<
+		RegExpMatchArray & { groups?: { html?: string; md?: string } }
+	>;
+
+	if (allMatches.length === 0) return { annotations: [], usedStyle: null };
+
+	// Summarize availability
+	const htmlCount = allMatches.reduce(
+		(acc, m) => acc + (m.groups?.html ? 1 : 0),
+		0,
+	);
+	const mdCount = allMatches.length - htmlCount;
+
+	// Decide which style to use (preserve legacy: prefer HTML when both)
+	let usedStyle: CommentStyle | null = null;
+	if (preferredStyle === "html" && htmlCount > 0) usedStyle = "html";
+	else if (preferredStyle === "md" && mdCount > 0) usedStyle = "md";
+	if (!usedStyle) {
+		if (htmlCount > 0 && mdCount > 0) usedStyle = "html";
+		else if (htmlCount > 0) usedStyle = "html";
+		else if (mdCount > 0) usedStyle = "md";
+	}
+	if (!usedStyle) return { annotations: [], usedStyle: null };
+
+	const isHtml = usedStyle === "html";
+
+	// Filter matches to chosen style only
+	const matches = allMatches
+		.filter((m) => (isHtml ? !!m.groups?.html : !!m.groups?.md))
+		.map((m) => ({
+			index: m.index!,
+			end: m.index! + m[0].length,
+			json: (isHtml ? m.groups?.html : m.groups?.md) as string,
+		}));
+
+	const annotations: Annotation[] = [];
+
+	for (let i = 0; i < matches.length; i++) {
+		const meta = safeParseJson(matches[i].json);
+		if (!meta || !meta.id) continue;
+
+		const startPos = matches[i].end;
+		const endPos =
+			i + 1 < matches.length ? matches[i + 1].index : content.length;
+		const visibleText = content.slice(startPos, endPos).trim();
+		const { text, note } = splitTextAndNote(visibleText);
+
+		annotations.push({
+			id: meta.id,
+			pageno: meta.p,
+			pos0: meta.pos0,
+			pos1: meta.pos1,
+			datetime: meta.t,
+			text,
+			note,
+		});
 	}
 
-	// Try preferred style first
-	const preferredRegex =
-		preferredStyle === "html" ? HTML_KOHL_PATTERN : MD_KOHL_PATTERN;
-	const fallbackRegex =
-		preferredStyle === "html" ? MD_KOHL_PATTERN : HTML_KOHL_PATTERN;
-	const fallbackStyle: CommentStyle = preferredStyle === "html" ? "md" : "html";
-
-	let annotations = extractWithRegex(content, preferredRegex);
-	if (annotations.length > 0) {
-		return { annotations, usedStyle: preferredStyle };
-	}
-
-	// Try fallback style
-	annotations = extractWithRegex(content, fallbackRegex);
-	if (annotations.length > 0) {
-		return { annotations, usedStyle: fallbackStyle };
-	}
-
-	return { annotations: [], usedStyle: null };
+	return { annotations, usedStyle };
 }
 
 /**
@@ -147,56 +175,13 @@ export function createKohlMarker(
  */
 export function detectCommentStyle(content: string): CommentStyle | null {
 	// Stateless tests using non-global patterns
-	const hasHtml = HTML_KOHL_PATTERN.test(content);
-	const hasMd = MD_KOHL_PATTERN.test(content);
+	const hasHtml = HTML_KOHL_TEST.test(content);
+	const hasMd = MD_KOHL_TEST.test(content);
 
 	if (hasHtml && !hasMd) return "html";
 	if (hasMd && !hasHtml) return "md";
-	if (hasHtml && hasMd) {
-		// If both exist, prefer HTML (legacy compatibility)
-		return "html";
-	}
+	if (hasHtml && hasMd) return "html"; // legacy preference
 	return null;
-}
-
-/**
- * Extracts highlights using a specific comment style regex.
- * @param content - Content to parse
- * @param regex - Regular expression to use for extraction
- * @returns Array of parsed annotations
- */
-function extractWithRegex(content: string, pattern: RegExp): Annotation[] {
-	// Create a fresh, local global regex from the source to avoid shared state.
-	// Use "g" only; if JSON may span lines, swap to "gs".
-	const regex = new RegExp(pattern.source, "g");
-	const annotations: Annotation[] = [];
-	const matches = Array.from(content.matchAll(regex));
-
-	if (matches.length === 0) {
-		return [];
-	}
-
-	for (let i = 0; i < matches.length; i++) {
-		const match = matches[i];
-		const meta = safeParseJson(match[1]);
-		if (!meta || !meta.id) continue;
-
-		const startPos = match.index! + match[0].length;
-		const endPos = matches[i + 1] ? matches[i + 1].index! : content.length;
-		const visibleText = content.slice(startPos, endPos).trim();
-		const { text, note } = splitTextAndNote(visibleText);
-
-		annotations.push({
-			id: meta.id,
-			pageno: meta.p,
-			pos0: meta.pos0,
-			pos1: meta.pos1,
-			datetime: meta.t,
-			text: text,
-			note: note,
-		});
-	}
-	return annotations;
 }
 
 /**
@@ -205,13 +190,13 @@ function extractWithRegex(content: string, pattern: RegExp): Annotation[] {
  * @returns Content with all KOHL markers removed
  */
 export function removeKohlComments(content: string): string {
-	// Use local, stateful regex instances built from sources
-	let cleaned = content.replace(new RegExp(HTML_KOHL_PATTERN_SRC, "g"), "");
-	cleaned = cleaned.replace(new RegExp(MD_KOHL_PATTERN_SRC, "g"), "");
-
+	const combinedRemove = new RegExp(
+		`${HTML_KOHL_PATTERN_SRC}|${MD_KOHL_PATTERN_SRC}`,
+		"g",
+	);
+	let cleaned = content.replace(combinedRemove, "");
 	// Collapse 3+ blank lines down to 2
 	cleaned = cleaned.replace(/\n\s*\n(\s*\n)+/g, "\n\n");
-
 	return cleaned;
 }
 

@@ -1,5 +1,5 @@
 import type { TFile } from "obsidian";
-import { getFileNameWithoutExt } from "src/lib/pathing/fileNaming";
+import { getFileNameWithoutExt } from "src/lib/pathing/pathingUtils";
 import type KoreaderImporterPlugin from "src/main";
 import type { FileSystemService } from "src/services/FileSystemService";
 import type { LoggingService } from "src/services/LoggingService";
@@ -21,7 +21,7 @@ export class NoteCreationService {
 		private readonly fileNameGen: FileNameGenerator,
 		private readonly snapshot: SnapshotManager,
 		private readonly log: LoggingService,
-		private readonly plugin: KoreaderImporterPlugin, // injected to access settings
+		readonly plugin: KoreaderImporterPlugin, // injected to access settings
 	) {
 		this.settings = plugin.settings;
 	}

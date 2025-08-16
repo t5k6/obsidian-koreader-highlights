@@ -3,7 +3,7 @@ import path from "node:path";
 import { type App, Notice, TFile } from "obsidian";
 import { KeyedQueue } from "src/lib/concurrency/concurrency";
 import { err, isErr } from "src/lib/core/result";
-import { normalizeFileNamePiece } from "src/lib/pathing/fileNaming";
+import { normalizeFileNamePiece } from "src/lib/pathing/pathingUtils";
 import type KoreaderImporterPlugin from "src/main";
 import type { CapabilityManager } from "../CapabilityManager";
 import type { FileSystemService } from "../FileSystemService";

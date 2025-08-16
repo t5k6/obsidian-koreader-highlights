@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { parse } from "node:path";
-import { normalizeFileNamePiece } from "src/lib/pathing/fileNaming";
+import { normalizeFileNamePiece } from "src/lib/pathing/pathingUtils";
 import type { LoggingService } from "src/services/LoggingService";
 import type { Annotation, DocProps } from "src/types";
 

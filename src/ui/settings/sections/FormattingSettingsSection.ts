@@ -1,104 +1,113 @@
-import { Setting } from "obsidian";
 import { FileNameGenerator } from "src/services/vault/FileNameGenerator";
 import { FrontmatterFieldModal } from "src/ui/FrontmatterFieldModal";
-import { booleanSetting, createSetting } from "../SettingHelpers";
+import { renderSettingsSection } from "../SettingsKit";
 import { SettingsSection } from "../SettingsSection";
 
 export class FormattingSettingsSection extends SettingsSection {
 	protected renderContent(containerEl: HTMLElement): void {
-		booleanSetting(
+		// Single declarative render with custom/buttons specs
+		renderSettingsSection(
 			containerEl,
-			"Use custom file name template",
-			"Define a custom naming scheme for imported highlight notes.",
-			() => this.plugin.settings.useCustomFileNameTemplate,
-			async (value) => {
-				this.plugin.settings.useCustomFileNameTemplate = value;
-			},
-			async () => this.plugin.saveSettings(true), // Force re-render
-		);
-
-		if (this.plugin.settings.useCustomFileNameTemplate) {
-			const setting = createSetting(
-				containerEl,
-				"File name template",
-				"Available placeholders: {{title}}, {{authors}}, {{importDate}}.",
-			);
-
-			const validator = new FileNameGenerator(this.plugin.loggingService);
-			const validationEl = setting.descEl.createDiv({
-				cls: "setting-item-description koreader-setting-validation",
-			});
-
-			const updateValidation = (value: string) => {
-				const { errors, warnings } = validator.validate(value);
-				const errorHtml = errors.map((e) => `<li>${e}</li>`).join("");
-				const warningHtml = warnings.map((w) => `<li>${w}</li>`).join("");
-				validationEl.innerHTML = `<ul>${errorHtml}${warningHtml}</ul>`;
-				validationEl.style.color =
-					errors.length > 0 ? "var(--text-error)" : "var(--text-muted)";
-			};
-
-			setting.addText((text) => {
-				text
-					.setPlaceholder("{{title}} - {{authors}}")
-					.setValue(this.plugin.settings.fileNameTemplate)
-					.onChange(async (value) => {
-						this.plugin.settings.fileNameTemplate = value;
-						updateValidation(value);
-						await this.plugin.saveSettings();
-					});
-			});
-
-			updateValidation(this.plugin.settings.fileNameTemplate);
-		}
-
-		new Setting(containerEl)
-			.setName("Frontmatter fields")
-			.setDesc("Choose which standard fields to EXCLUDE from frontmatter.")
-			.addButton((btn) =>
-				btn.setButtonText("Manage Fields").onClick(() =>
-					new FrontmatterFieldModal(
-						this.app,
-						this.plugin.settings.frontmatter,
-						(updated) => {
-							this.plugin.settings.frontmatter = updated;
-							this.plugin.saveSettings();
+			[
+				{
+					key: "useCustomFileNameTemplate",
+					type: "toggle",
+					name: "Use custom file name template",
+					desc: "Define a custom naming scheme for imported highlight notes.",
+					get: () => this.plugin.settings.useCustomFileNameTemplate,
+					set: async (value) => {
+						this.plugin.settings.useCustomFileNameTemplate = value;
+					},
+				},
+				{
+					key: "fileNameTemplate",
+					type: "custom",
+					name: "File name template",
+					desc: "Available placeholders: {{title}}, {{authors}}, {{importDate}}.",
+					if: () => this.plugin.settings.useCustomFileNameTemplate,
+					render: (s) => {
+						const validator = new FileNameGenerator(this.plugin.loggingService);
+						const validationEl = s.descEl.createDiv({
+							cls: "setting-item-description koreader-setting-validation",
+						});
+						const update = (value: string) => {
+							const { errors, warnings } = validator.validate(value);
+							const errorHtml = errors.map((e) => `<li>${e}</li>`).join("");
+							const warningHtml = warnings.map((w) => `<li>${w}</li>`).join("");
+							validationEl.innerHTML = `<ul>${errorHtml}${warningHtml}</ul>`;
+							validationEl.style.color =
+								errors.length > 0 ? "var(--text-error)" : "var(--text-muted)";
+						};
+						s.addText((text) => {
+							text
+								.setPlaceholder("{{title}} - {{authors}}")
+								.setValue(this.plugin.settings.fileNameTemplate)
+								.onChange(async (value) => {
+									this.plugin.settings.fileNameTemplate = value;
+									update(value);
+									await this.plugin.saveSettings();
+								});
+						});
+						update(this.plugin.settings.fileNameTemplate);
+					},
+				},
+				{
+					key: "frontmatterModal",
+					type: "buttons",
+					name: "Frontmatter fields",
+					desc: "Choose which standard fields to EXCLUDE from frontmatter.",
+					buttons: [
+						{
+							text: "Manage Fields",
+							onClick: async () => {
+								const result = await new FrontmatterFieldModal(
+									this.app,
+									this.plugin.settings.frontmatter,
+								).openAndAwaitResult();
+								if (result) {
+									this.plugin.settings.frontmatter = result;
+									await this.plugin.saveSettings();
+								}
+							},
 						},
-					).open(),
-				),
-			);
-
-		booleanSetting(
-			containerEl,
-			"Auto-merge on addition",
-			"Automatically merge imports if they only add new highlights, without showing the duplicate dialog.",
-			() => this.plugin.settings.autoMergeOnAddition,
-			async (value) => {
-				this.plugin.settings.autoMergeOnAddition = value;
+					],
+				},
+				{
+					key: "autoMergeOnAddition",
+					type: "toggle",
+					name: "Auto-merge on addition",
+					desc: "Automatically merge imports if they only add new highlights, without showing the duplicate dialog.",
+					get: () => this.plugin.settings.autoMergeOnAddition,
+					set: async (value) => {
+						this.plugin.settings.autoMergeOnAddition = value;
+					},
+				},
+				{
+					key: "enableFullDuplicateCheck",
+					type: "toggle",
+					name: "Enable full vault duplicate check",
+					desc: "Checks the entire vault for duplicates (slower). When off, only the highlights folder is scanned (faster).",
+					get: () => this.plugin.settings.enableFullDuplicateCheck,
+					set: async (value) => {
+						this.plugin.settings.enableFullDuplicateCheck = value;
+					},
+				},
+				{
+					key: "useUnknownAuthor",
+					type: "toggle",
+					name: "Use 'Unknown Author' placeholder",
+					desc: "When an author is not found, use 'Unknown Author' as a placeholder instead of omitting the field.",
+					get: () => this.plugin.settings.frontmatter.useUnknownAuthor,
+					set: async (value) => {
+						this.plugin.settings.frontmatter.useUnknownAuthor = value;
+					},
+				},
+			],
+			{
+				app: this.app,
+				parent: this,
+				onSave: async () => this.plugin.saveSettings(true),
 			},
-			this.debouncedSave,
-		);
-
-		booleanSetting(
-			containerEl,
-			"Enable full vault duplicate check",
-			"Checks the entire vault for duplicates (slower). When off, only the highlights folder is scanned (faster).",
-			() => this.plugin.settings.enableFullDuplicateCheck,
-			async (value) => {
-				this.plugin.settings.enableFullDuplicateCheck = value;
-			},
-			this.debouncedSave,
-		);
-
-		booleanSetting(
-			containerEl,
-			"Use 'Unknown Author' placeholder",
-			"When an author is not found, use 'Unknown Author' as a placeholder instead of omitting the field.",
-			() => this.plugin.settings.frontmatter.useUnknownAuthor,
-			async (value) => {
-				this.plugin.settings.frontmatter.useUnknownAuthor = value;
-			},
-			this.debouncedSave,
 		);
 	}
 }

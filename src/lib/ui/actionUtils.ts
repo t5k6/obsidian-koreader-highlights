@@ -27,10 +27,6 @@ export async function runPluginAction(
 		}
 
 		await action();
-	} catch (error: unknown) {
-		// Re-throw the error to be handled by the caller.
-		// The caller is responsible for logging and user notification.
-		throw error;
 	} finally {
 		if (button) {
 			button.setDisabled(false);

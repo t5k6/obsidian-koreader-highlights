@@ -1,4 +1,4 @@
-import { createHash } from "crypto";
+import { createHash } from "node:crypto";
 
 export type CanonicalizeOptions = {
 	normalizeEol?: boolean; // default true: CRLF -> LF

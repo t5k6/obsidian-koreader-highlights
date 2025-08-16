@@ -10,7 +10,7 @@ import {
 	secondsToHoursMinutesSeconds,
 } from "src/lib/formatting/dateUtils";
 import { formatPercent } from "src/lib/formatting/formatUtils";
-import { normalizeFileNamePiece } from "src/lib/pathing/fileNaming";
+import { normalizeFileNamePiece } from "src/lib/pathing/pathingUtils";
 import type { LoggingService } from "src/services/LoggingService";
 import type { BookMetadata, FileMetadataExtractor } from "src/types";
 import { FieldMappingService } from "./FieldMappingService";

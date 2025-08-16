@@ -1,5 +1,5 @@
 import { type App, Notice } from "obsidian";
-import { normalizeFileNamePiece } from "src/lib/pathing/fileNaming";
+import { normalizeFileNamePiece } from "src/lib/pathing/pathingUtils";
 import type {
 	ConfirmationDecision,
 	IncompleteScanDecision,

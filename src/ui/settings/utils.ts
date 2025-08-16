@@ -20,7 +20,7 @@ export async function pickDirectory(
 	};
 
 	try {
-		// Preferred: Obsidian's modern exposed electron API on window
+		// Attempt 1: modern window.electron
 		const anyWindow = window as unknown as { electron?: any };
 		const wElectron = anyWindow?.electron;
 		if (wElectron?.showOpenDialog) {
@@ -31,15 +31,14 @@ export async function pickDirectory(
 			return handleResult(res);
 		}
 
-		// Fallback: legacy electron.remote.dialog (deprecated in modern Electron)
-		// Kept for backward compatibility with older Obsidian versions.
+		// Attempt 2: legacy electron.remote.dialog (sandbox fallback)
 		let dlg: any | undefined;
 		try {
 			// eslint-disable-next-line @typescript-eslint/no-var-requires
 			const electron = require("electron");
 			dlg = electron?.remote?.dialog;
-		} catch (_e) {
-			// require may be unavailable in sandboxed contexts
+		} catch {
+			// require can be unavailable in sandbox
 		}
 
 		if (dlg?.showOpenDialog) {
@@ -54,12 +53,10 @@ export async function pickDirectory(
 		console.warn(
 			"KOReader Importer: No folder picker API available (window.electron/showOpenDialog or electron.remote.dialog)",
 		);
-		new Notice(
-			"Folder picker is unavailable in this environment. Enter the path manually.",
-		);
+		new Notice("Folder picker is unavailable. Enter the path manually.");
 		return undefined;
 	} catch (err) {
-		console.error("KOReader Importer: utils: folder picker failed →", err);
+		console.error("KOReader Importer: folder picker failed →", err);
 		new Notice("Unable to open system folder picker. Enter the path manually.");
 		return undefined;
 	}

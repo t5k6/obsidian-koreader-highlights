@@ -1,7 +1,8 @@
-import { type App, Modal, Notice, Setting } from "obsidian";
+import { type App, Notice, Setting } from "obsidian";
 import type { FrontmatterSettings } from "../types";
+import { BaseModal } from "./BaseModal";
 
-export class FrontmatterFieldModal extends Modal {
+export class FrontmatterFieldModal extends BaseModal<FrontmatterSettings> {
 	private currentSettings!: FrontmatterSettings;
 	private fieldStates: Record<string, boolean> = {};
 	private readonly fieldOptions = [
@@ -21,12 +22,15 @@ export class FrontmatterFieldModal extends Modal {
 	constructor(
 		app: App,
 		private initialSettings: FrontmatterSettings,
-		private onSave: (newSettings: FrontmatterSettings) => void,
 	) {
-		super(app);
+		super(app, {
+			title: "Manage Frontmatter Fields",
+			className: "koreader-frontmatter-modal",
+			ariaLabel: "Manage Frontmatter Fields",
+		});
 	}
 
-	onOpen() {
+	protected renderContent(contentEl: HTMLElement): void {
 		// Deep copy to avoid mutating settings until save.
 		this.currentSettings = JSON.parse(JSON.stringify(this.initialSettings));
 
@@ -37,10 +41,6 @@ export class FrontmatterFieldModal extends Modal {
 			);
 		}
 
-		const { contentEl } = this;
-		contentEl.empty();
-		contentEl.addClass("koreader-frontmatter-modal");
-		contentEl.setAttribute("role", "dialog");
 		contentEl.setAttribute("aria-labelledby", "frontmatter-title");
 
 		const titleEl = contentEl.createEl("h3", {
@@ -147,7 +147,7 @@ export class FrontmatterFieldModal extends Modal {
 					.onClick(() => this.handleSave()),
 			)
 			.addButton((btn) =>
-				btn.setButtonText("Cancel").onClick(() => this.close()),
+				btn.setButtonText("Cancel").onClick(() => this.cancel()),
 			);
 
 		// Set focus to first control
@@ -161,7 +161,6 @@ export class FrontmatterFieldModal extends Modal {
 		this.currentSettings.disabledFields = Object.entries(this.fieldStates)
 			.filter(([, isDisabled]) => isDisabled)
 			.map(([id]) => id);
-		this.onSave(this.currentSettings);
-		this.close();
+		this.resolveAndClose(this.currentSettings);
 	}
 }

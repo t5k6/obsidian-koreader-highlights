@@ -126,7 +126,6 @@ export class DuplicateHandler {
 			}
 			case "keep-both":
 				return { status: "keep-both", file: null }; // Signal to ImportManager to create a new file
-			case "skip":
 			default:
 				return { status: "skipped", file: null };
 		}

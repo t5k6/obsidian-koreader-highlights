@@ -5,7 +5,7 @@ import {
 	compareAnnotations,
 	getHighlightKey,
 } from "src/lib/formatting/formatUtils";
-import { extractHighlights } from "src/lib/parsing/highlightExtractor";
+import { extractHighlightsWithStyle } from "src/lib/parsing/highlightExtractor";
 import type KoreaderImporterPlugin from "src/main";
 import type { FrontmatterGenerator } from "src/services/parsing/FrontmatterGenerator";
 import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
@@ -44,7 +44,7 @@ export class MergeService {
 		await this.snapshotManager.createBackup(file);
 		const { frontmatter: existingFm, body: existingBody } =
 			await this.fmService.parseFile(file);
-		const existingAnnotations = extractHighlights(
+		const { annotations: existingAnnotations } = extractHighlightsWithStyle(
 			existingBody,
 			this.plugin.settings.commentStyle,
 		);

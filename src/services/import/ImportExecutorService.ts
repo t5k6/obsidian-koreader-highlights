@@ -65,7 +65,7 @@ export class ImportExecutorService {
 							io.settings.frontmatter,
 						);
 						const highlights = await io.contentGen.generateHighlightsContent(
-							ctx.luaMetadata!.annotations,
+							ctx.luaMetadata?.annotations ?? [],
 						);
 						return io.fmService.reconstructFileContent(fm, highlights);
 					},
@@ -82,7 +82,7 @@ export class ImportExecutorService {
 							io.settings.frontmatter,
 						);
 						const highlights = await io.contentGen.generateHighlightsContent(
-							ctx.luaMetadata!.annotations,
+							ctx.luaMetadata?.annotations ?? [],
 						);
 						return io.fmService.reconstructFileContent(fm, highlights);
 					},
@@ -97,7 +97,7 @@ export class ImportExecutorService {
 								io.settings.frontmatter,
 							);
 							const highlights = await io.contentGen.generateHighlightsContent(
-								ctx.luaMetadata!.annotations,
+								ctx.luaMetadata?.annotations ?? [],
 							);
 							return io.fmService.reconstructFileContent(fm, highlights);
 						},

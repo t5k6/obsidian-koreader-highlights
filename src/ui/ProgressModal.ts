@@ -1,7 +1,8 @@
 import path from "node:path";
-import { type App, ButtonComponent, Modal } from "obsidian";
+import { type App, ButtonComponent } from "obsidian";
+import { BaseModal } from "./BaseModal";
 
-export class ProgressModal extends Modal {
+export class ProgressModal extends BaseModal<void> {
 	public statusEl!: HTMLElement;
 	private progressEl: HTMLProgressElement | null = null;
 	private total: number | null = null;
@@ -9,42 +10,41 @@ export class ProgressModal extends Modal {
 	private baseTitle: string;
 
 	constructor(app: App, title?: string) {
-		super(app);
+		super(app, { title: title ?? "Importing Highlights and Notes" });
 		this.controller = new AbortController();
-		this.baseTitle = title ?? "Importing Highlights and Notes";
+		this.baseTitle = this.config.title;
 	}
 
 	public get abortSignal(): AbortSignal {
 		return this.controller.signal;
 	}
 
-	onOpen() {
-		const { contentEl } = this;
-		contentEl.empty();
+	protected renderContent(contentEl: HTMLElement): void {
 		this.titleEl.setText(this.baseTitle);
 		this.statusEl = contentEl.createEl("p", {
 			text: "Collecting files...",
 		});
 
-		// Add a cancel button
 		const buttonContainer = contentEl.createDiv({
 			cls: "modal-button-container",
 		});
 		new ButtonComponent(buttonContainer)
 			.setButtonText("Cancel")
 			.setWarning()
-			.onClick(() => {
-				this.controller.abort();
-				this.close();
-			});
+			.onClick(() => this.cancelAndAbort());
 	}
 
-	onClose() {
-		// If the modal is closed by the user (e.g., pressing Esc), also trigger the abort.
+	protected onCleanup(): void {
 		if (!this.controller.signal.aborted) {
 			this.controller.abort();
 		}
-		super.onClose();
+	}
+
+	private cancelAndAbort(): void {
+		if (!this.controller.signal.aborted) {
+			this.controller.abort();
+		}
+		this.cancel();
 	}
 
 	setTotal(total: number) {
@@ -55,14 +55,18 @@ export class ProgressModal extends Modal {
 		});
 	}
 
-	updateProgress(completed: number, currentFile?: string) {
+	updateProgress(completed: number, currentFileOrMessage?: string) {
 		if (this.progressEl && this.total) {
 			this.progressEl.value = completed;
 			const percentage = Math.round((completed / this.total) * 100);
 			this.titleEl.setText(`${this.baseTitle} (${percentage}%)`);
 		}
-		if (currentFile) {
-			this.statusEl.setText(`Processing: ${path.basename(currentFile)}`);
+		if (currentFileOrMessage) {
+			// If it's a path, show basename; otherwise show the message as-is
+			const maybeBasename = /[\\/]/.test(currentFileOrMessage)
+				? path.basename(currentFileOrMessage)
+				: currentFileOrMessage;
+			this.statusEl.setText(`Processing: ${maybeBasename}`);
 		}
 	}
 }

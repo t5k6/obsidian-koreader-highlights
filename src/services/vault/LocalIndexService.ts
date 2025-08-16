@@ -17,7 +17,6 @@ import { isErr } from "src/lib/core/result";
 import type KoreaderImporterPlugin from "src/main";
 import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
 import type {
-	DebouncedFn,
 	Disposable,
 	KoreaderHighlightImporterSettings,
 	SettingsObserver,
@@ -404,7 +403,7 @@ async function backfillImportIndexJsonIfPresent(
 			stmt.free();
 			db.run("COMMIT;");
 			// Archive JSON
-			await app.vault.adapter.rename(jsonPath, jsonPath + ".bak");
+			await app.vault.adapter.rename(jsonPath, `${jsonPath}.bak`);
 			log
 				.scoped("LocalIndexService")
 				.info(

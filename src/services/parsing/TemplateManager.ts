@@ -219,10 +219,10 @@ export class TemplateManager implements SettingsObserver {
 			if (!s) return "";
 			const lines = s.split("\n");
 			if (noteLineHasQuote) {
-				return lines.map((l, idx) => (idx === 0 ? l : "> " + l)).join("\n");
+				return lines.map((l, idx) => (idx === 0 ? l : `> ${l}`)).join("\n");
 			}
 			if (autoPrefixNotes) {
-				return lines.map((l) => "> " + l).join("\n");
+				return lines.map((l) => `> ${l}`).join("\n");
 			}
 			return s;
 		};
@@ -538,13 +538,13 @@ export class TemplateManager implements SettingsObserver {
 
 			if (separator === " ") {
 				// Contiguous highlights, just join with a space.
-				result += " " + styledHighlights[i];
+				result += ` ${styledHighlights[i]}`;
 			} else {
 				// A significant gap exists. Use a visual separator with paragraph breaks.
 				// Normalize any trailing breaks to avoid duplication.
 				result = result.replace(/<br><br>$/, "");
 				// The <br><br> ensures a blank line appears.
-				result += `[...]` + styledHighlights[i];
+				result += `[...]${styledHighlights[i]}`;
 			}
 		}
 

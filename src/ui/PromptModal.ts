@@ -13,7 +13,7 @@ export class PromptModal extends BaseModal<string> {
 	constructor(
 		app: App,
 		title: string,
-		private readonly placeholder: string,
+		readonly _placeholder: string,
 		private readonly defaultValue: string = "",
 	) {
 		super(app, {
@@ -31,7 +31,7 @@ export class PromptModal extends BaseModal<string> {
 	}
 
 	protected renderContent(contentEl: HTMLElement): void {
-		const { placeholder } = this;
+		const { _placeholder: placeholder } = this;
 
 		new Setting(contentEl).addText((text) => {
 			this.inputComponent = text;

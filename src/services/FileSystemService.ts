@@ -1,4 +1,5 @@
-import { promises as fsp } from "fs";
+import { promises as fsp } from "node:fs";
+import path, { posix as posixPath } from "node:path";
 import {
 	normalizePath,
 	type Plugin,
@@ -6,7 +7,6 @@ import {
 	type TFolder,
 	type Vault,
 } from "obsidian";
-import path, { posix as posixPath } from "path";
 import type { CacheManager } from "src/lib/cache";
 import {
 	KeyedQueue,
@@ -19,7 +19,7 @@ import { withFsRetry } from "src/lib/concurrency/fsRetry";
 import { err, isErr, ok, type Result } from "src/lib/core/result";
 import type { AppFailure, FileSystemFailure } from "src/lib/errors/resultTypes";
 import { isTFile, isTFolder } from "src/lib/obsidian/typeguards";
-import { normalizeFileNamePiece } from "src/lib/pathing/fileNaming";
+import { normalizeFileNamePiece } from "src/lib/pathing/pathingUtils";
 import type { Cache } from "src/types";
 
 /* ------------------------------------------------------------------ */

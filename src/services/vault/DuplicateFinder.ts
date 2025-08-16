@@ -1,11 +1,11 @@
 import { type App, normalizePath, TFile, TFolder, type Vault } from "obsidian";
 import type { CacheManager } from "src/lib/cache/CacheManager";
-import { toMatchKey } from "src/lib/core/slug";
 import {
 	bookKeyFromDocProps,
 	getHighlightKey,
 } from "src/lib/formatting/formatUtils";
-import { extractHighlights } from "src/lib/parsing/highlightExtractor";
+import { extractHighlightsWithStyle } from "src/lib/parsing/highlightExtractor";
+import { toMatchKey } from "src/lib/pathing/pathingUtils";
 import type KoreaderImporterPlugin from "src/main";
 import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
 import type {
@@ -259,13 +259,17 @@ export class DuplicateFinder {
 		const { body: existingBody } = this.fmService.parseContent(
 			await this.vault.read(existingFile),
 		);
-		const existingHighlights = extractHighlights(existingBody);
+		const { annotations: existingHighlights }: { annotations: Annotation[] } =
+			extractHighlightsWithStyle(
+				existingBody,
+				this.plugin.settings.commentStyle,
+			);
 
 		let newHighlightCount = 0;
 		let modifiedHighlightCount = 0;
 
-		const existingHighlightsMap = new Map(
-			existingHighlights.map((h) => [getHighlightKey(h), h]),
+		const existingHighlightsMap = new Map<string, Annotation>(
+			existingHighlights.map((h: Annotation) => [getHighlightKey(h), h]),
 		);
 
 		for (const newHighlight of newAnnotations) {
@@ -327,22 +331,6 @@ export class DuplicateFinder {
 	public clearCache(): void {
 		this.potentialDuplicatesCache.clear();
 		this.fmCache.clear();
-	}
-
-	private async getFmCached(
-		file: TFile,
-	): Promise<{ mtime: number; title?: string; authors?: string }> {
-		const prev = this.fmCache.get(file.path);
-		const mtime = file.stat.mtime;
-		if (prev && prev.mtime === mtime) return prev;
-		const { frontmatter } = await this.fmService.parseFile(file);
-		const curr = {
-			mtime,
-			title: String(frontmatter?.title ?? ""),
-			authors: String(frontmatter?.authors ?? ""),
-		};
-		this.fmCache.set(file.path, curr);
-		return curr;
 	}
 
 	/**

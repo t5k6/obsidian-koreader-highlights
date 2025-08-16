@@ -22,7 +22,7 @@ export class NoteMaintenanceService {
 		private readonly fs: FileSystemService,
 		private readonly frontmatterService: FrontmatterService,
 		private readonly loggingService: LoggingService,
-		private readonly cacheManager: CacheManager,
+		readonly _cacheManager: CacheManager,
 	) {
 		this.log = this.loggingService.scoped("NoteMaintenanceService");
 	}

@@ -4,6 +4,7 @@ import type { CacheManager } from "src/lib/cache/CacheManager";
 import type KoreaderImporterPlugin from "src/main";
 import { ProgressModal } from "src/ui/ProgressModal";
 import type { CapabilityManager } from "../CapabilityManager";
+import type { KoreaderEnvironmentService } from "../device/KoreaderEnvironmentService";
 import type { SDRFinder } from "../device/SDRFinder";
 import { FileSystemService } from "../FileSystemService";
 import type { ImportPipelineService } from "../ImportPipelineService";
@@ -20,6 +21,7 @@ export class CommandManager {
 		private readonly plugin: KoreaderImporterPlugin,
 		private readonly importPipelineService: ImportPipelineService,
 		private readonly sdrFinder: SDRFinder,
+		private readonly envService: KoreaderEnvironmentService,
 		private readonly cacheManager: CacheManager,
 		private readonly loggingService: LoggingService,
 		private readonly localIndexService: LocalIndexService,
@@ -35,7 +37,7 @@ export class CommandManager {
 	 * @returns The scan path if successful, otherwise null.
 	 */
 	private async prepareExecution(): Promise<string | null> {
-		const rawMountPoint = await this.sdrFinder.findActiveScanPath();
+		const rawMountPoint = await this.envService.getActiveScanPath();
 		if (!rawMountPoint) {
 			this.log.warn("Scan path not available. Aborting command execution.");
 			new Notice(
@@ -152,7 +154,7 @@ export class CommandManager {
 		const reportFolderPath = this.plugin.settings.highlightsFolder;
 		const fullReportPath = `${reportFolderPath}/${reportFilename}`;
 
-		const mountPoint = await this.sdrFinder.findActiveScanPath();
+		const mountPoint = await this.envService.getActiveScanPath();
 		const reportContent = this.generateReportContent(
 			sdrFilePaths,
 			mountPoint ?? "",

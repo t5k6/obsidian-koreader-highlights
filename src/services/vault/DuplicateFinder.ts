@@ -1,5 +1,6 @@
 import { type App, normalizePath, TFile, TFolder, type Vault } from "obsidian";
 import type { CacheManager } from "src/lib/cache/CacheManager";
+import { isErr } from "src/lib/core/result";
 import {
 	bookKeyFromDocProps,
 	getHighlightKey,
@@ -19,6 +20,7 @@ import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 import type { FileNameGenerator } from "./FileNameGenerator";
 import type { LocalIndexService } from "./LocalIndexService";
+import type { NoteIdentityService } from "./NoteIdentityService";
 import type { SnapshotManager } from "./SnapshotManager";
 
 export class DuplicateFinder {
@@ -38,6 +40,7 @@ export class DuplicateFinder {
 		private LocalIndexService: LocalIndexService,
 		private fmService: FrontmatterService,
 		private snapshotManager: SnapshotManager,
+		private identity: NoteIdentityService,
 		private cacheManager: CacheManager,
 		private loggingService: LoggingService,
 		private fs: FileSystemService,
@@ -157,10 +160,11 @@ export class DuplicateFinder {
 			return { files: [], timedOut: false };
 		}
 
-		const { files, aborted } = await this.fs.getFilesInFolder(root, {
-			extensions: ["md"],
-			recursive: true,
-		});
+		const { files: potentialDuplicates, aborted } =
+			await this.fs.getFilesInFolder(root, {
+				extensions: ["md"],
+				recursive: true,
+			});
 
 		const startTime = Date.now();
 		const SCAN_TIMEOUT_MS =
@@ -190,7 +194,7 @@ export class DuplicateFinder {
 
 		const results: TFile[] = [];
 		let timedOut = false;
-		for (const file of files) {
+		for (const file of potentialDuplicates) {
 			if (Date.now() - startTime > SCAN_TIMEOUT_MS) {
 				timedOut = true;
 				break;
@@ -295,8 +299,18 @@ export class DuplicateFinder {
 			newHighlightCount,
 			modifiedHighlightCount,
 		);
-		const canMergeSafely =
-			(await this.snapshotManager.getSnapshotContent(existingFile)) !== null;
+		let canMergeSafely = false;
+		let expectedUid: string | undefined;
+		try {
+			expectedUid = this.identity.tryGetId(existingFile);
+			if (expectedUid) {
+				const snapRes =
+					await this.snapshotManager.readSnapshotById(expectedUid);
+				canMergeSafely = !isErr(snapRes);
+			}
+		} catch (_) {
+			canMergeSafely = false;
+		}
 
 		return {
 			file: existingFile,
@@ -304,6 +318,7 @@ export class DuplicateFinder {
 			newHighlights: newHighlightCount,
 			modifiedHighlights: modifiedHighlightCount,
 			luaMetadata,
+			expectedUid,
 			canMergeSafely,
 		};
 	}

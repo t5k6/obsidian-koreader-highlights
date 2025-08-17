@@ -5,6 +5,7 @@ import { BookRefreshOrchestrator } from "src/services/BookRefreshOrchestrator";
 import { CapabilityManager } from "src/services/CapabilityManager";
 import { CommandManager } from "src/services/command/CommandManager";
 import { DeviceStatisticsService } from "src/services/device/DeviceStatisticsService";
+import { KoreaderEnvironmentService } from "src/services/device/KoreaderEnvironmentService";
 import { SDRFinder } from "src/services/device/SDRFinder";
 import { FileSystemService } from "src/services/FileSystemService";
 import { ImportPipelineService } from "src/services/ImportPipelineService";
@@ -19,11 +20,12 @@ import { SqlJsManager } from "src/services/SqlJsManager";
 import { ObsidianPromptService } from "src/services/ui/ObsidianPromptService";
 import { ContentGenerator } from "src/services/vault/ContentGenerator";
 import { DuplicateFinder } from "src/services/vault/DuplicateFinder";
-import { DuplicateHandler } from "src/services/vault/DuplicateHandler";
 import { FileNameGenerator } from "src/services/vault/FileNameGenerator";
 import { LocalIndexService } from "src/services/vault/LocalIndexService";
+import { MergeHandler } from "src/services/vault/MergeHandler";
 import { MergeService } from "src/services/vault/MergeService";
 import { NoteCreationService } from "src/services/vault/NoteCreationService";
+import { NoteIdentityService } from "src/services/vault/NoteIdentityService";
 import { NoteMaintenanceService } from "src/services/vault/NoteMaintenanceService";
 import { SnapshotManager } from "src/services/vault/SnapshotManager";
 import type { DuplicateHandlingSession, DuplicateMatch } from "src/types";
@@ -64,6 +66,12 @@ export function registerServices(
 	container.register(CacheManager, [LoggingService]);
 	container.register(FileNameGenerator, [LoggingService]);
 	container.register(FrontmatterService, [APP_TOKEN, LoggingService]);
+	container.register(NoteIdentityService, [
+		APP_TOKEN,
+		FrontmatterService,
+		LoggingService,
+		FileSystemService,
+	]);
 
 	// --- Level 1: Depends on Level 0 or Tokens ---
 	container.register(FileSystemService, [
@@ -72,11 +80,20 @@ export function registerServices(
 		CacheManager,
 	]);
 
+	// Central KOReader environment discovery
+	container.register(KoreaderEnvironmentService, [
+		PLUGIN_TOKEN,
+		FileSystemService,
+		CacheManager,
+		LoggingService,
+	]);
+
 	// Orchestrator for single-book refresh
 	container.register(BookRefreshOrchestrator, [
 		LocalIndexService,
 		ImportPipelineService,
 		SDRFinder,
+		KoreaderEnvironmentService,
 		FileSystemService,
 		LoggingService,
 	]);
@@ -86,6 +103,7 @@ export function registerServices(
 		CacheManager,
 		FileSystemService,
 		LoggingService,
+		KoreaderEnvironmentService,
 	]);
 	container.register(CapabilityManager, [
 		APP_TOKEN,
@@ -97,6 +115,8 @@ export function registerServices(
 		PLUGIN_TOKEN,
 		FileSystemService,
 		LoggingService,
+		FrontmatterService,
+		NoteIdentityService,
 		CapabilityManager,
 	]);
 	container.register(TemplateManager, [
@@ -135,16 +155,17 @@ export function registerServices(
 	container.register(ContentGenerator, [TemplateManager, PLUGIN_TOKEN]);
 	container.register(MetadataParser, [SDRFinder, CacheManager, LoggingService]);
 	container.register(MergeService, [
-		APP_TOKEN,
-		VAULT_TOKEN,
 		PLUGIN_TOKEN,
 		SnapshotManager,
 		FrontmatterService,
 		FrontmatterGenerator,
 		ContentGenerator,
 		LoggingService,
+		FileSystemService,
+		NoteIdentityService,
 	]);
-	container.register(DuplicateHandler, [
+
+	container.register(MergeHandler, [
 		APP_TOKEN,
 		PLUGIN_TOKEN,
 		DUPLICATE_MODAL_FACTORY_TOKEN,
@@ -153,6 +174,7 @@ export function registerServices(
 		FileSystemService,
 		LoggingService,
 		CapabilityManager,
+		NoteIdentityService,
 	]);
 	container.register(LocalIndexService, [
 		PLUGIN_TOKEN,
@@ -174,6 +196,7 @@ export function registerServices(
 		LocalIndexService,
 		FrontmatterService,
 		SnapshotManager,
+		NoteIdentityService,
 		CacheManager,
 		LoggingService,
 		FileSystemService,
@@ -187,6 +210,7 @@ export function registerServices(
 		ContentGenerator,
 		FileNameGenerator,
 		SnapshotManager,
+		NoteIdentityService,
 		LoggingService,
 		PLUGIN_TOKEN,
 	]);
@@ -206,7 +230,7 @@ export function registerServices(
 	container.register(ImportExecutorService, [
 		PLUGIN_TOKEN,
 		ContentGenerator,
-		DuplicateHandler,
+		MergeHandler,
 		NoteCreationService,
 		FrontmatterService,
 		FrontmatterGenerator,
@@ -235,6 +259,7 @@ export function registerServices(
 		PLUGIN_TOKEN,
 		ImportPipelineService,
 		SDRFinder,
+		KoreaderEnvironmentService,
 		CacheManager,
 		LoggingService,
 		LocalIndexService,
@@ -248,5 +273,6 @@ export function registerServices(
 		SqlJsManager,
 		LoggingService,
 		CacheManager,
+		KoreaderEnvironmentService,
 	]);
 }

@@ -1132,7 +1132,7 @@ export class FileSystemService {
 
 	public async nodeFileExists(filePath: string): Promise<boolean> {
 		try {
-			await fsp.access(filePath);
+			await withFsRetry(() => fsp.access(filePath));
 			return true;
 		} catch {
 			return false;
@@ -1145,10 +1145,15 @@ export class FileSystemService {
 		binary: boolean = false,
 	): Promise<Result<string | Uint8Array, FileSystemFailure>> {
 		try {
-			const data = await (binary
-				? fsp.readFile(filePath)
-				: fsp.readFile(filePath, "utf-8"));
-			return ok(data as any);
+			if (binary) {
+				const data = await withFsRetry(() => fsp.readFile(filePath));
+				return ok(data as Uint8Array);
+			} else {
+				const data = await withFsRetry(
+					() => fsp.readFile(filePath, "utf-8") as Promise<string>,
+				);
+				return ok(data as string);
+			}
 		} catch (error: any) {
 			// Map to FileSystemFailure kinds
 			const code = (error?.code ?? error?.Code) as string | undefined;
@@ -1173,8 +1178,10 @@ export class FileSystemService {
 		data: string | Uint8Array,
 	): Promise<Result<void, FileSystemFailure>> {
 		try {
-			await fsp.mkdir(path.dirname(filePath), { recursive: true });
-			await fsp.writeFile(filePath, data);
+			await withFsRetry(async () => {
+				await fsp.mkdir(path.dirname(filePath), { recursive: true });
+				await fsp.writeFile(filePath, data);
+			});
 			this.nodeStatsCache.delete(filePath);
 			return ok(void 0);
 		} catch (error: any) {
@@ -1197,7 +1204,7 @@ export class FileSystemService {
 		filePath: string,
 	): Promise<Result<void, FileSystemFailure>> {
 		try {
-			await fsp.unlink(filePath);
+			await withFsRetry(() => fsp.unlink(filePath));
 			this.nodeStatsCache.delete(filePath);
 			return ok(void 0);
 		} catch (error: any) {
@@ -1223,7 +1230,7 @@ export class FileSystemService {
 		if (cached && this.isCacheValid(cached)) return cached.value;
 
 		try {
-			const stats = await fsp.stat(filePath);
+			const stats = await withFsRetry(() => fsp.stat(filePath));
 			const res = ok(stats);
 			this.nodeStatsCache.set(filePath, { value: res, timestamp: Date.now() });
 			return res;
@@ -1289,7 +1296,7 @@ export class FileSystemService {
 	): AsyncIterable<import("node:fs").Dirent> {
 		let dirHandle: import("node:fs").Dir | undefined;
 		try {
-			dirHandle = await fsp.opendir(dirPath);
+			dirHandle = await withFsRetry(() => fsp.opendir(dirPath));
 			for await (const dirent of dirHandle) yield dirent;
 		} catch (error) {
 			const fsError = this.asFileSystemError("readDirectory", dirPath, error);

@@ -5,6 +5,8 @@ import { FileSystemService } from "src/services/FileSystemService";
 import { LoggingService } from "src/services/LoggingService";
 import { TemplateManager } from "src/services/parsing/TemplateManager";
 import { LocalIndexService } from "src/services/vault/LocalIndexService";
+import { NoteIdentityService } from "src/services/vault/NoteIdentityService";
+import { SnapshotManager } from "src/services/vault/SnapshotManager";
 import { ConfirmModal } from "src/ui/ConfirmModal";
 import { SettingsTab } from "src/ui/SettingsTab";
 import { StatusBarManager } from "src/ui/StatusBarManager";
@@ -133,7 +135,15 @@ export default class KoreaderImporterPlugin extends Plugin {
 		);
 
 		const loadedData = await this.dataStore.load();
-		const migratedData = await this.migrationManager.runAll(loadedData);
+		const noteIdentity =
+			this.diContainer.resolve<NoteIdentityService>(NoteIdentityService);
+		const snapshotManager =
+			this.diContainer.resolve<SnapshotManager>(SnapshotManager);
+		const migratedData = await this.migrationManager.runAll(loadedData, {
+			noteIdentityService: noteIdentity,
+			snapshotManager,
+			settings: loadedData.settings,
+		});
 		if (migratedData !== loadedData) {
 			await this.dataStore.save(migratedData);
 		}

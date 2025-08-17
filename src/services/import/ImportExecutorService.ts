@@ -4,8 +4,8 @@ import type { LoggingService } from "src/services/LoggingService";
 import type { FrontmatterGenerator } from "src/services/parsing/FrontmatterGenerator";
 import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
 import type { ContentGenerator } from "src/services/vault/ContentGenerator";
-import type { DuplicateHandler } from "src/services/vault/DuplicateHandler";
 import type { FileNameGenerator } from "src/services/vault/FileNameGenerator";
+import type { MergeHandler } from "src/services/vault/MergeHandler";
 import type { NoteCreationService } from "src/services/vault/NoteCreationService";
 import type { SnapshotManager } from "src/services/vault/SnapshotManager";
 import type {
@@ -19,7 +19,7 @@ export class ImportExecutorService {
 	constructor(
 		private readonly plugin: KoreaderImporterPlugin,
 		private readonly contentGen: ContentGenerator,
-		private readonly dupHandler: DuplicateHandler,
+		private readonly mergeHandler: MergeHandler,
 		private readonly noteCreation: NoteCreationService,
 		private readonly fmService: FrontmatterService,
 		private readonly fmGen: FrontmatterGenerator,
@@ -36,7 +36,7 @@ export class ImportExecutorService {
 			fmService: this.fmService,
 			fmGen: this.fmGen,
 			contentGen: this.contentGen,
-			dupHandler: this.dupHandler,
+			mergeHandler: this.mergeHandler,
 			fileNameGen: this.fileNameGen,
 			snapshot: this.snapshot,
 			settings: this.plugin.settings,
@@ -50,58 +50,28 @@ export class ImportExecutorService {
 		ctx: ImportContext,
 		session: import("src/types").DuplicateHandlingSession,
 	): Promise<ExecResult> {
-		// Delegate to the legacy execute function logic adapted here
+		// Simplified execution using NoteCreationService for CREATE and body-only provider for MERGE
 		const io = this.buildIO();
 		switch (plan.kind) {
 			case "SKIP":
 				return { status: "skipped", file: null };
 
 			case "CREATE": {
-				const file = await io.noteCreation.createFromLua(
-					ctx.luaMetadata!,
-					async () => {
-						const fm = io.fmGen.createFrontmatterData(
-							ctx.luaMetadata!,
-							io.settings.frontmatter,
-						);
-						const highlights = await io.contentGen.generateHighlightsContent(
-							ctx.luaMetadata?.annotations ?? [],
-						);
-						return io.fmService.reconstructFileContent(fm, highlights);
-					},
-				);
+				const file = await io.noteCreation.createFromLua(ctx.luaMetadata!);
 				return { status: "created", file };
 			}
 
 			case "MERGE": {
-				const result = await io.dupHandler.handleDuplicate(
+				const result = await io.mergeHandler.handleDuplicate(
 					plan.match,
-					async () => {
-						const fm = io.fmGen.createFrontmatterData(
-							ctx.luaMetadata!,
-							io.settings.frontmatter,
-						);
-						const highlights = await io.contentGen.generateHighlightsContent(
+					async () =>
+						io.contentGen.generateHighlightsContent(
 							ctx.luaMetadata?.annotations ?? [],
-						);
-						return io.fmService.reconstructFileContent(fm, highlights);
-					},
+						),
 					session,
 				);
 				if (result.status === "keep-both") {
-					const file = await io.noteCreation.createFromLua(
-						ctx.luaMetadata!,
-						async () => {
-							const fm = io.fmGen.createFrontmatterData(
-								ctx.luaMetadata!,
-								io.settings.frontmatter,
-							);
-							const highlights = await io.contentGen.generateHighlightsContent(
-								ctx.luaMetadata?.annotations ?? [],
-							);
-							return io.fmService.reconstructFileContent(fm, highlights);
-						},
-					);
+					const file = await io.noteCreation.createFromLua(ctx.luaMetadata!);
 					return { status: "created", file };
 				}
 				if (result.status === "skipped")

@@ -1,6 +1,7 @@
 import type { MergeRegion } from "node-diff3";
 import { diff3Merge } from "node-diff3";
-import type { App, TFile, Vault } from "obsidian";
+import type { TFile } from "obsidian";
+import { isErr } from "src/lib/core/result";
 import {
 	compareAnnotations,
 	getHighlightKey,
@@ -10,24 +11,62 @@ import type KoreaderImporterPlugin from "src/main";
 import type { FrontmatterGenerator } from "src/services/parsing/FrontmatterGenerator";
 import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
 import type { Annotation, LuaMetadata } from "src/types";
+import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 import type { ContentGenerator } from "./ContentGenerator";
+import type { NoteIdentityService } from "./NoteIdentityService";
 import type { SnapshotManager } from "./SnapshotManager";
 
 export class MergeService {
 	private readonly log;
 
 	constructor(
-		private app: App,
-		private vault: Vault,
 		private plugin: KoreaderImporterPlugin,
 		private snapshotManager: SnapshotManager,
 		private fmService: FrontmatterService,
 		private frontmatterGenerator: FrontmatterGenerator,
 		private contentGenerator: ContentGenerator,
 		private loggingService: LoggingService,
+		private fs: FileSystemService,
+		private identity: NoteIdentityService,
 	) {
 		this.log = this.loggingService.scoped("MergeService");
+	}
+
+	/**
+	 * Replaces the note content using a provided body while safely reconstructing frontmatter.
+	 * Creates a backup, merges FM (ours + incoming lua + settings), writes final content,
+	 * and refreshes the snapshot baseline.
+	 */
+	public async replaceWithBody(
+		file: TFile,
+		incomingBody: string,
+		luaMetadata: LuaMetadata,
+	): Promise<{ status: "merged"; file: TFile }> {
+		const uid =
+			this.identity.tryGetId(file) ?? (await this.identity.ensureId(file));
+		await this.snapshotManager.createBackup(file);
+		const ours = await this.fmService.parseFile(file);
+		const mergedFm = this.frontmatterGenerator.mergeFrontmatterData(
+			ours.frontmatter ?? {},
+			luaMetadata,
+			this.plugin.settings.frontmatter,
+		);
+		const finalContent = this.fmService.reconstructFileContent(
+			mergedFm,
+			incomingBody,
+		);
+		const writeRes = await this.fs.writeVaultFile(file.path, finalContent);
+		if (isErr(writeRes)) {
+			this.log.error("Replace write failed", writeRes.error);
+			throw new Error("Failed to write replaced content to vault");
+		}
+		try {
+			await this.snapshotManager.createSnapshotFromContent(file, finalContent);
+		} catch (e) {
+			this.log.warn("Failed to update snapshot baseline after replace", e);
+		}
+		return { status: "merged", file };
 	}
 
 	/**
@@ -67,7 +106,17 @@ export class MergeService {
 			mergedFm,
 			newBody,
 		);
-		await this.app.vault.modify(file, finalContent);
+		const writeRes = await this.fs.writeVaultFile(file.path, finalContent);
+		if (isErr(writeRes)) {
+			this.log.error("2-way merge write failed", writeRes.error);
+			throw new Error("Failed to write merged content to vault");
+		}
+
+		try {
+			await this.snapshotManager.createSnapshotFromContent(file, finalContent);
+		} catch (e) {
+			this.log.warn("Failed to update snapshot baseline after 2-way merge", e);
+		}
 
 		return { status: "merged", file };
 	}
@@ -77,26 +126,25 @@ export class MergeService {
 	 * Adds conflict markers when automatic resolution isn't possible.
 	 * @param file - The existing file to merge into
 	 * @param baseContent - The snapshot content (common ancestor)
-	 * @param newFileContent - The new content from KOReader
+	 * @param incomingBody - The new body (content-only) from KOReader
 	 * @param luaMetadata - Metadata for frontmatter merging
 	 * @returns Status indicating merge completion
 	 */
 	public async execute3WayMerge(
 		file: TFile,
 		baseContent: string,
-		newFileContent: string,
+		incomingBody: string,
 		luaMetadata: LuaMetadata,
 	): Promise<{ status: "merged"; file: TFile }> {
 		await this.snapshotManager.createBackup(file);
 
 		const base = this.fmService.parseContent(baseContent);
 		const ours = await this.fmService.parseFile(file);
-		const theirs = this.fmService.parseContent(newFileContent);
 
 		const mergeRegions = this.performSynchronousDiff3(
 			ours.body,
 			base.body,
-			theirs.body,
+			incomingBody,
 		);
 
 		const mergedLines: string[] = [];
@@ -155,7 +203,18 @@ export class MergeService {
 			);
 		}
 
-		await this.vault.modify(file, finalContent);
+		const writeRes = await this.fs.writeVaultFile(file.path, finalContent);
+		if (isErr(writeRes)) {
+			this.log.error("3-way merge write failed", writeRes.error);
+			throw new Error("Failed to write merged content to vault");
+		}
+
+		try {
+			await this.snapshotManager.createSnapshotFromContent(file, finalContent);
+		} catch (e) {
+			this.log.warn("Failed to update snapshot baseline after 3-way merge", e);
+		}
+
 		return { status: "merged", file };
 	}
 

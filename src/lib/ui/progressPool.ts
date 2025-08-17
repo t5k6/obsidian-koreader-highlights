@@ -1,5 +1,5 @@
 import type { App } from "obsidian";
-import { asyncPool } from "src/lib/concurrency/concurrency";
+import pLimit from "p-limit";
 import { withProgress } from "src/lib/ui/progress";
 
 export async function runPoolWithProgress<T, R>(
@@ -23,19 +23,17 @@ export async function runPoolWithProgress<T, R>(
 		app,
 		items.length,
 		async (tick, signal) => {
-			const results = await asyncPool(
-				poolSize,
-				items,
-				async (item) => {
+			const limit = pLimit(poolSize);
+			const tasks = items.map((item) =>
+				limit(async () => {
 					if (signal.aborted)
 						throw new DOMException("Aborted by user", "AbortError");
 					const r = await task(item);
 					tick();
 					return r;
-				},
-				signal,
+				}),
 			);
-			return results;
+			return Promise.all(tasks);
 		},
 		{ title: options.title },
 	);

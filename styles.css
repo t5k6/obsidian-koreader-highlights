@@ -514,3 +514,8 @@ mark[style*="#00ff00"] {
 	font-size: 0.9em;
 	margin-left: 0.5em;
 }
+
+/* Hide KOReader Importer's internal UID in the Properties UI */
+.metadata-property[data-property-key="kohl-uid"] {
+	display: none !important;
+}

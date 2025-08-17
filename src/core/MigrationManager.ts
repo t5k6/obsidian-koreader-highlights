@@ -7,18 +7,26 @@ import {
 } from "obsidian";
 import type { FileSystemService } from "src/services/FileSystemService";
 import type { LoggingService } from "src/services/LoggingService";
-import type { PluginData } from "src/types";
+import type { NoteIdentityService } from "src/services/vault/NoteIdentityService";
+import type { SnapshotManager } from "src/services/vault/SnapshotManager";
+import type { KoreaderHighlightImporterSettings, PluginData } from "src/types";
 import type { PluginDataStore } from "./PluginDataStore";
 import { normalizeSettings } from "./settingsSchema";
 
 // --- Migration Manager ---
 
-type MigrationFn = (ctx: {
+type MigrationContext = {
 	vault: Vault;
 	fs: FileSystemService;
 	log: LoggingService;
 	data: PluginData;
-}) => Promise<PluginData>;
+	// optional deps; if absent, corresponding migrations will no-op
+	snapshotManager?: SnapshotManager;
+	noteIdentityService?: NoteIdentityService;
+	settings?: KoreaderHighlightImporterSettings;
+};
+
+type MigrationFn = (ctx: MigrationContext) => Promise<PluginData>;
 
 export class MigrationManager {
 	private readonly log;
@@ -45,10 +53,51 @@ export class MigrationManager {
 				await this.cleanupLegacyUserData(vault, log);
 				return data;
 			},
+			// One-time migration: move legacy path-hash snapshots to UID-based snapshots (idempotent)
+			"2025-08-migrate-legacy-snapshots": async (ctx) => {
+				const { data, settings, snapshotManager, noteIdentityService } = ctx;
+				if (!snapshotManager || !noteIdentityService) return data;
+				const folder = settings?.highlightsFolder ?? "";
+				const files = await this.listMarkdownInFolder(folder, {
+					recursive: true,
+				});
+				for (const f of files) {
+					try {
+						const uid = (await this.tryEnsureUidFor(f, ctx)) ?? null;
+						if (!uid) continue;
+						await snapshotManager.migrateSingleLegacySnapshot(f, uid);
+					} catch (e) {
+						this.log.warn(`Legacy snapshot migration failed for ${f.path}`, e);
+					}
+				}
+				return data;
+			},
+			// Detect and resolve UID collisions by reassigning newer duplicates
+			"2025-08-resolve-uid-collisions": async (ctx) => {
+				const { data, settings, noteIdentityService } = ctx;
+				if (!noteIdentityService) return data;
+				const folder = settings?.highlightsFolder ?? "";
+				const summary = await noteIdentityService.resolveInFolder(folder, {
+					recursive: true,
+				});
+				if (summary.collisions > 0) {
+					this.log.info(
+						`UID collision resolution: ${summary.collisions} uid(s), ${summary.filesReassigned} files reassigned.`,
+					);
+				}
+				return data;
+			},
 		};
 	}
 
-	public async runAll(data: PluginData): Promise<PluginData> {
+	public async runAll(
+		data: PluginData,
+		deps?: {
+			noteIdentityService?: NoteIdentityService;
+			snapshotManager?: SnapshotManager;
+			settings?: KoreaderHighlightImporterSettings;
+		},
+	): Promise<PluginData> {
 		let out = { ...data };
 		for (const [id, fn] of Object.entries(this.migrations)) {
 			if (out.appliedMigrations.includes(id)) continue;
@@ -60,6 +109,9 @@ export class MigrationManager {
 					fs: this.fs,
 					log: this.loggingService,
 					data: out,
+					settings: deps?.settings,
+					noteIdentityService: deps?.noteIdentityService,
+					snapshotManager: deps?.snapshotManager,
 				});
 				out = {
 					...out,
@@ -69,6 +121,52 @@ export class MigrationManager {
 			} catch (e) {
 				this.log.error(`Migration failed: ${id}. Will not mark as applied.`, e);
 				break;
+			}
+		}
+		return out;
+	}
+
+	private async tryEnsureUidFor(
+		file: TFile,
+		ctx: MigrationContext,
+	): Promise<string | null> {
+		const ids = ctx.noteIdentityService;
+		if (!ids) return null;
+		try {
+			const existing = ids.tryGetId(file as any);
+			if (existing) return existing;
+			const uid = await ids.ensureId(file as any);
+			return uid;
+		} catch (_e) {
+			return null;
+		}
+	}
+	// Local helper to list markdown files in a folder (recursive by default)
+	private async listMarkdownInFolder(
+		folder: string | TFolder,
+		opts: { recursive?: boolean } = {},
+	): Promise<TFile[]> {
+		const recursive = opts.recursive ?? true;
+		let root: TFolder | null = null;
+		if (typeof folder === "string") {
+			const af = this.vault.getAbstractFileByPath(folder);
+			if (af instanceof TFolder) root = af;
+		} else {
+			root = folder;
+		}
+		if (!root) return [];
+
+		const out: TFile[] = [];
+		const stack: (TFile | TFolder)[] = [root];
+		while (stack.length) {
+			const cur = stack.pop()!;
+			if (cur instanceof TFile) {
+				if (cur.extension === "md") out.push(cur);
+				continue;
+			}
+			for (const child of cur.children) {
+				if (!recursive && child instanceof TFolder) continue;
+				stack.push(child as TFile | TFolder);
 			}
 		}
 		return out;

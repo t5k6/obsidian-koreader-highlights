@@ -1,4 +1,5 @@
 import type { TFile } from "obsidian";
+import { isErr } from "src/lib/core/result";
 import { getFileNameWithoutExt } from "src/lib/pathing/pathingUtils";
 import type KoreaderImporterPlugin from "src/main";
 import type { FileSystemService } from "src/services/FileSystemService";
@@ -7,11 +8,14 @@ import type { FrontmatterGenerator } from "src/services/parsing/FrontmatterGener
 import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
 import type { ContentGenerator } from "src/services/vault/ContentGenerator";
 import type { FileNameGenerator } from "src/services/vault/FileNameGenerator";
+import type { NoteIdentityService } from "src/services/vault/NoteIdentityService";
 import type { SnapshotManager } from "src/services/vault/SnapshotManager";
 import type { LuaMetadata } from "src/types";
+import { composeFullNoteContent } from "./NoteComposer";
 
 export class NoteCreationService {
 	private readonly settings;
+	private readonly log;
 
 	constructor(
 		private readonly fs: FileSystemService,
@@ -20,22 +24,40 @@ export class NoteCreationService {
 		private readonly contentGen: ContentGenerator,
 		private readonly fileNameGen: FileNameGenerator,
 		private readonly snapshot: SnapshotManager,
-		private readonly log: LoggingService,
+		private readonly identity: NoteIdentityService,
+		private readonly loggingService: LoggingService,
 		readonly plugin: KoreaderImporterPlugin, // injected to access settings
 	) {
 		this.settings = plugin.settings;
+		this.log = this.loggingService.scoped("NoteCreationService");
 	}
 
-	// Optional content provider allows callers to precompose body/frontmatter if needed.
+	// The optional provider returns BODY-ONLY. We compose FM here so every note is born with a UID.
 	async createFromLua(
 		lua: LuaMetadata,
-		contentProvider?: () => Promise<string>,
+		bodyProvider?: () => Promise<string>,
 	): Promise<TFile> {
-		const fm = this.fmGen.createFrontmatterData(lua, this.settings.frontmatter);
-		const body = contentProvider
-			? await contentProvider()
-			: await this.contentGen.generateHighlightsContent(lua.annotations);
-		const content = this.fmService.reconstructFileContent(fm, body);
+		// Pre-generate a UID so the note is born with a stable identity.
+		const preUid = this.identity.generateUid();
+		const content = bodyProvider
+			? this.fmService.reconstructFileContent(
+					this.fmGen.createFrontmatterData(
+						lua,
+						this.settings.frontmatter,
+						preUid,
+					),
+					await bodyProvider(),
+				)
+			: await composeFullNoteContent(
+					{
+						fmGen: this.fmGen,
+						fmService: this.fmService,
+						contentGen: this.contentGen,
+						fmSettings: this.settings.frontmatter,
+					},
+					lua,
+					preUid,
+				);
 
 		// Derive a base stem using the same generator users expect
 		const fileNameWithExt = this.fileNameGen.generate(
@@ -56,15 +78,27 @@ export class NoteCreationService {
 			content,
 		);
 
-		// Optional snapshot on create; log on failure but don't fail the op
+		// Mandatory snapshot on create; abort on failure to ensure consistent state
 		try {
-			// Create the initial snapshot from the known content for future 3-way merges.
-			await this.snapshot.createSnapshotFromContent(file, content);
+			// Create the initial snapshot from the known content using the pre-generated UID.
+			const res = await this.snapshot.createSnapshotFromContent(
+				file,
+				content,
+				preUid,
+			);
+			if (isErr(res)) {
+				this.log.error("Snapshot creation failed for new file", {
+					path: file.path,
+					error: res.error,
+				});
+				throw new Error("Failed to create snapshot for new note");
+			}
 		} catch (err) {
-			this.log.warn("Snapshot creation skipped/failed for new file", {
+			this.log.error("Snapshot creation failed for new file", {
 				path: file.path,
 				err,
 			});
+			throw err;
 		}
 
 		return file;

@@ -145,6 +145,8 @@ export type CommentStyle = "html" | "md" | "none";
 // Main Plugin Settings Interface
 export interface KoreaderHighlightImporterSettings {
 	koreaderScanPath: string;
+	/** Optional absolute path override to KOReader statistics.sqlite3 file. Empty string disables override. */
+	statsDbPathOverride: string;
 	excludedFolders: string[];
 	allowedFileTypes: string[];
 	highlightsFolder: string;
@@ -194,6 +196,8 @@ export interface DuplicateMatch {
 	newHighlights: number;
 	modifiedHighlights: number;
 	luaMetadata: LuaMetadata;
+	/** UID currently assigned to the existing file (from cache), if present. */
+	expectedUid?: string;
 	canMergeSafely: boolean;
 }
 

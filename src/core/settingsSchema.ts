@@ -78,6 +78,7 @@ export const FrontmatterSchema = z
 export const RawSettingsSchema = z
 	.object({
 		koreaderScanPath: z.string().optional(),
+		statsDbPathOverride: z.string().optional(),
 		// Legacy key accepted to migrate to koreaderScanPath
 		koreaderMountPoint: z.string().optional(),
 		excludedFolders: z.array(z.string()).optional(),
@@ -158,6 +159,7 @@ function deepMerge<T>(base: T, next: Partial<T>): T {
 // --- Base defaults (no circular refs) ---
 export const BASE_DEFAULTS: KoreaderHighlightImporterSettings = {
 	koreaderScanPath: "",
+	statsDbPathOverride: "",
 	excludedFolders: [
 		".adds",
 		".kobo",
@@ -214,6 +216,10 @@ export function normalizeSettings(
 	merged.koreaderScanPath = FileSystemService.normalizeSystemPath(
 		merged.koreaderScanPath,
 	);
+	// Normalize override as well (leave empty string as-is for disabled override)
+	merged.statsDbPathOverride = merged.statsDbPathOverride
+		? FileSystemService.normalizeSystemPath(merged.statsDbPathOverride)
+		: "";
 	merged.highlightsFolder = FileSystemService.toVaultPath(
 		merged.highlightsFolder,
 	);

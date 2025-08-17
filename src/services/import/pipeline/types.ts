@@ -8,9 +8,9 @@ import type { FrontmatterService } from "src/services/parsing/FrontmatterService
 import type { MetadataParser } from "src/services/parsing/MetadataParser";
 import type { ContentGenerator } from "src/services/vault/ContentGenerator";
 import type { DuplicateFinder } from "src/services/vault/DuplicateFinder";
-import type { DuplicateHandler } from "src/services/vault/DuplicateHandler";
 import type { FileNameGenerator } from "src/services/vault/FileNameGenerator";
 import type { LocalIndexService } from "src/services/vault/LocalIndexService";
+import type { MergeHandler } from "src/services/vault/MergeHandler";
 import type { NoteCreationService } from "src/services/vault/NoteCreationService";
 import type { SnapshotManager } from "src/services/vault/SnapshotManager";
 import type {
@@ -60,7 +60,7 @@ export interface ImportIO {
 	contentGen: ContentGenerator;
 
 	dupFinder: DuplicateFinder;
-	dupHandler: DuplicateHandler;
+	mergeHandler: MergeHandler;
 
 	fileNameGen: FileNameGenerator;
 	snapshot: SnapshotManager;
@@ -93,7 +93,7 @@ export type ExecutorIO = Pick<
 	| "fmService"
 	| "fmGen"
 	| "contentGen"
-	| "dupHandler"
+	| "mergeHandler"
 	| "fileNameGen"
 	| "snapshot"
 	| "settings"

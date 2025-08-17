@@ -40,12 +40,35 @@ function splitAndTrim(s: string, rx: RegExp): string[] {
 		.filter(Boolean);
 }
 
+function isHms(s: unknown): boolean {
+	return typeof s === "string" && /^\s*\d+h \d+m \d+s\s*$/.test(s);
+}
+function isPercent(s: unknown): boolean {
+	return typeof s === "string" && /^\s*\d+(\.\d+)?%\s*$/.test(s);
+}
+
 const metaFieldFormatters: Partial<Record<ProgKey, (v: unknown) => unknown>> = {
 	lastRead: (v) => formatDateWithFormat(String(v), "YYYY-MM-DD"),
 	firstRead: (v) => formatDateWithFormat(String(v), "YYYY-MM-DD"),
-	totalReadTime: (v) => secondsToHoursMinutesSeconds(Number(v)),
-	averageTimePerPage: (v) => secondsToHoursMinutesSeconds(Number(v) * 60),
-	progress: (v) => formatPercent(Number(v)),
+	totalReadTime: (v) => {
+		if (isHms(v)) return v; // Already formatted, return as-is
+		const n = Number(v);
+		return Number.isFinite(n)
+			? secondsToHoursMinutesSeconds(n)
+			: String(v ?? "");
+	},
+	averageTimePerPage: (v) => {
+		if (isHms(v)) return v; // Already formatted, return as-is
+		const n = Number(v);
+		return Number.isFinite(n)
+			? secondsToHoursMinutesSeconds(n)
+			: String(v ?? "");
+	},
+	progress: (v) => {
+		if (isPercent(v)) return v; // Already formatted, return as-is
+		const n = Number(v);
+		return Number.isFinite(n) ? formatPercent(n) : String(v ?? "");
+	},
 	readingStatus: (v) => String(v ?? ""),
 	description: (v) => String(v ?? "").replace(/<[^>]+>/g, ""), // strip html
 	authors: (v) => {

@@ -43,7 +43,7 @@ export class DuplicateHandlingModal
 		applyToAll: boolean;
 	}> {
 		const res = await this.openAndAwaitResult();
-		return res ?? { choice: null, applyToAll: false };
+		return res ?? { choice: this.choice, applyToAll: this.applyToAll };
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -217,6 +217,7 @@ export class DuplicateHandlingModal
 		this.registerShortcut(["Mod"], "r", () => this.handleChoice("replace"));
 		this.registerShortcut(["Mod"], "k", () => this.handleChoice("keep-both"));
 		this.registerShortcut(["Mod"], "s", () => this.handleChoice("skip"));
+		this.registerShortcut([], "Escape", () => this.handleChoice("skip"));
 	}
 
 	protected getFocusElement(): HTMLElement | null {

@@ -10,6 +10,8 @@ import type {
 	LuaMetadata,
 	ParsedFrontmatter,
 } from "src/types";
+import { NoteIdentityService } from "../vault/NoteIdentityService";
+import { FieldMappingService } from "./FieldMappingService";
 
 /* ------------------------------------------------------------------ */
 /*               1.  Key mapping / helpers (typed)                    */
@@ -125,6 +127,7 @@ export class FrontmatterGenerator {
 	createFrontmatterData(
 		meta: LuaMetadata,
 		opts: FrontmatterSettings,
+		uid?: string,
 	): FrontmatterData {
 		const fm: Partial<FrontmatterData> = {};
 		const disabled = new Set(opts.disabledFields ?? []);
@@ -182,6 +185,10 @@ export class FrontmatterGenerator {
 			}
 		}
 
+		// If caller provided a UID, include it so notes are born with a stable identity.
+		if (uid) {
+			(fm as any)[NoteIdentityService.UID_KEY] = uid;
+		}
 		return fm as FrontmatterData;
 	}
 
@@ -199,6 +206,12 @@ export class FrontmatterGenerator {
 		opts: FrontmatterSettings,
 	): FrontmatterData {
 		const incoming = this.createFrontmatterData(meta, opts);
+
+		const existingCanon: Partial<FrontmatterData> = {};
+		for (const [k, v] of Object.entries(existing)) {
+			const canon = FieldMappingService.normalize(k) as keyof FrontmatterData;
+			(existingCanon as any)[canon] = v;
+		}
 
 		// 1) Build effective policy map, respecting user settings.
 		const effectivePolicies: PolicyMap = { ...MERGE_POLICIES };
@@ -223,26 +236,28 @@ export class FrontmatterGenerator {
 
 		// 2) Determine all keys present in either existing or incoming.
 		const allKeys = new Set<keyof FrontmatterData>([
-			...(Object.keys(existing) as (keyof FrontmatterData)[]),
+			...(Object.keys(existingCanon) as (keyof FrontmatterData)[]),
 			...(Object.keys(incoming) as (keyof FrontmatterData)[]),
 		]);
 
 		const merged: Partial<FrontmatterData> = {};
-
-		// 3) Apply policy per key.
 		for (const key of allKeys) {
 			const policy = effectivePolicies[key] ?? { kind: "preserveAlways" };
-			const finalValue = applyPolicy(key, existing, incoming, policy);
-
-			// Only include keys with a valid final value.
+			// Use the normalized existingCanon object here
+			const finalValue = applyPolicy(key, existingCanon, incoming, policy);
 			if (hasValue(finalValue)) {
-				merged[key] = finalValue as any;
+				(merged as any)[key] = finalValue;
 			}
 		}
 
 		// 4) Guarantee presence of required fields with fallbacks.
 		merged.title ??= "";
 		merged.authors ??= opts.useUnknownAuthor ? "Unknown Author" : "";
+
+		const existingUid = existingCanon[NoteIdentityService.UID_KEY];
+		if (existingUid && typeof existingUid === "string") {
+			(merged as any)[NoteIdentityService.UID_KEY] = existingUid;
+		}
 
 		return merged as FrontmatterData;
 	}

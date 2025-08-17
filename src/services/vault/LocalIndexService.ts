@@ -369,8 +369,9 @@ async function backfillImportIndexJsonIfPresent(
 	if (!(await fs.vaultExists(jsonPath))) return;
 
 	try {
-		const text = await app.vault.adapter.read(jsonPath);
-		const parsed = JSON.parse(text) as Record<
+		const textRes = await fs.readVaultText(jsonPath);
+		if (isErr(textRes)) return;
+		const parsed = JSON.parse(textRes.value) as Record<
 			string,
 			{ mtime: number; size: number; newestAnnotationTimestamp?: string }
 		>;
@@ -402,8 +403,9 @@ async function backfillImportIndexJsonIfPresent(
 			}
 			stmt.free();
 			db.run("COMMIT;");
-			// Archive JSON
-			await app.vault.adapter.rename(jsonPath, `${jsonPath}.bak`);
+			// Archive JSON using FileSystemService (best-effort)
+			const rn = await fs.renameVaultPath(jsonPath, `${jsonPath}.bak`);
+			void rn;
 			log
 				.scoped("LocalIndexService")
 				.info(
@@ -1055,6 +1057,11 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		}
 	}
 
+	public async dispose(): Promise<void> {
+		await this.flushIndex();
+		this.sqlJsManager.closeDatabase(this.idxPath);
+	}
+
 	/**
 	 * Completely deletes the persistent index database file.
 	 * This is a destructive operation intended for a full reset.
@@ -1071,12 +1078,12 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		this.pathCache.clear();
 		this.indexState = "unavailable";
 
-		// 3. Physically delete the file
+		// 3. Physically delete the file via FileSystemService
 		try {
-			// Use Vault adapter to delete the file physically (normalize path for adapter)
 			const normalizedPath = FileSystemService.toVaultPath(this.idxPath);
 			if (await this.fsService.vaultExists(normalizedPath)) {
-				await this.app.vault.adapter.remove(normalizedPath);
+				const rm = await this.fsService.removeVaultPath(normalizedPath);
+				if (isErr(rm)) throw rm.error as any;
 				this.log.info("Successfully deleted index file.");
 			}
 		} catch (error) {
@@ -1086,11 +1093,6 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 			);
 			// proceed anyway
 		}
-	}
-
-	public async dispose(): Promise<void> {
-		await this.flushIndex();
-		this.sqlJsManager.closeDatabase(this.idxPath);
 	}
 
 	private registerVaultEvents(): void {

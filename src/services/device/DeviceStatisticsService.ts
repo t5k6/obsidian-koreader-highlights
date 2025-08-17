@@ -1,4 +1,3 @@
-import path from "node:path";
 import type { Database, SqlValue } from "sql.js";
 import type { CacheManager } from "src/lib/cache/CacheManager";
 import type { LruCache } from "src/lib/cache/LruCache";
@@ -18,6 +17,7 @@ import type {
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 import type { SqlJsManager } from "../SqlJsManager";
+import type { KoreaderEnvironmentService } from "./KoreaderEnvironmentService";
 
 // --- Types ---
 export interface BookStatisticsBundle {
@@ -27,7 +27,6 @@ export interface BookStatisticsBundle {
 }
 
 // --- Constants ---
-const MAX_ROOT_SEARCH_DEPTH = 25;
 
 const BOOK_COLUMNS =
 	`id, md5, last_open, pages, total_read_time, total_read_pages, title, authors, series, language`
@@ -49,7 +48,6 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 	private cdbLazy: AsyncLazy<ConcurrentDatabase | null>;
 
 	private statsCache: LruCache<string, BookStatisticsBundle | null>;
-	private deviceRootCache = new Map<string, string | null>();
 
 	constructor(
 		plugin: KoreaderImporterPlugin,
@@ -57,6 +55,7 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 		private sqlJsManager: SqlJsManager,
 		private loggingService: LoggingService,
 		private cacheManager: CacheManager,
+		private envService: KoreaderEnvironmentService,
 	) {
 		this.settings = plugin.settings;
 		this.statsCache = this.cacheManager.createLru<
@@ -65,8 +64,11 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 		>("stats.derived", 100);
 		this.log = this.loggingService.scoped("DeviceStatisticsService");
 		this.cdbLazy = new AsyncLazy<ConcurrentDatabase | null>(async () => {
-			const filePath = await this.resolveStatsDbPath();
+			const filePath = await this.envService.getStatsDbPath();
 			if (!filePath) {
+				this.log.info(
+					"Statistics DB path not found or configured. Statistics service disabled.",
+				);
 				return null;
 			}
 
@@ -175,9 +177,14 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 	}
 
 	onSettingsChanged(newSettings: KoreaderHighlightImporterSettings): void {
-		if (newSettings.koreaderScanPath !== this.settings.koreaderScanPath) {
-			this.log.info("Scan path changed, resetting stats DB connection.");
-			this.dispose();
+		if (
+			newSettings.koreaderScanPath !== this.settings.koreaderScanPath ||
+			newSettings.statsDbPathOverride !== this.settings.statsDbPathOverride
+		) {
+			this.log.info(
+				"Environment settings changed, resetting stats DB connection.",
+			);
+			this.dispose(); // This also resets cdbLazy and clears caches
 		}
 		this.settings = newSettings;
 	}
@@ -194,63 +201,6 @@ export class DeviceStatisticsService implements SettingsObserver, Disposable {
 		this.dbFileMtimeMs = null;
 		this.cdbLazy.reset();
 		this.statsCache.clear();
-	}
-
-	/**
-	 * Finds the KOReader device root by looking for .adds directory.
-	 * Walks up the directory tree from the mount point.
-	 * @param startPath - Starting directory path
-	 * @returns Device root path or null if not found
-	 */
-	private async findDeviceRoot(mountPoint: string): Promise<string | null> {
-		const cached = this.deviceRootCache.get(mountPoint);
-		if (cached !== undefined) return cached;
-
-		let p = path.resolve(mountPoint);
-		for (let i = 0; i < MAX_ROOT_SEARCH_DEPTH; i++) {
-			const stRes = await this.fsService.getNodeStats(path.join(p, ".adds"));
-			if (!isErr(stRes)) {
-				this.deviceRootCache.set(mountPoint, p);
-				return p;
-			}
-			const parent = path.dirname(p);
-			if (parent === p) break;
-			p = parent;
-		}
-		this.deviceRootCache.set(mountPoint, null);
-		return null;
-	}
-
-	/**
-	 * Resolves the path to the statistics database.
-	 * @returns Path to the statistics database or null if not found
-	 */
-	private async resolveStatsDbPath(): Promise<string | null> {
-		const mountPoint = this.settings.koreaderScanPath;
-		if (!mountPoint) {
-			this.log.warn("Scan path not set, cannot resolve stats DB path.");
-			return null;
-		}
-
-		const deviceRoot = await this.findDeviceRoot(mountPoint);
-		if (!deviceRoot) {
-			this.log.warn(`Could not find KOReader .adds in ${mountPoint}`);
-			return null;
-		}
-
-		const filePath = path.join(
-			deviceRoot,
-			".adds/koreader/settings/statistics.sqlite3",
-		);
-
-		if (!(await this.fsService.nodeFileExists(filePath))) {
-			this.log.warn(
-				`Statistics DB not found or not accessible at ${filePath}.`,
-			);
-			return null;
-		}
-
-		return filePath;
 	}
 
 	/**

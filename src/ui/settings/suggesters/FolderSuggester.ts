@@ -1,4 +1,5 @@
-import { prepareFuzzySearch, TFolder } from "obsidian";
+import { prepareFuzzySearch, type TFolder } from "obsidian";
+import { isTFolder } from "src/lib/obsidian/typeguards";
 import { TextInputSuggest } from "./suggest";
 
 interface ScoredFolder {
@@ -14,7 +15,7 @@ export class FolderSuggest extends TextInputSuggest<ScoredFolder> {
 		// Single pass: collect folders once
 		const folders: TFolder[] = [];
 		for (const f of this.app.vault.getAllLoadedFiles()) {
-			if (f instanceof TFolder) folders.push(f);
+			if (isTFolder(f)) folders.push(f);
 		}
 
 		if (query.length === 0) {

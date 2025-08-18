@@ -7,13 +7,14 @@ import {
 	getHighlightKey,
 } from "src/lib/formatting/formatUtils";
 import { extractHighlightsWithStyle } from "src/lib/parsing/highlightExtractor";
+import { notifyOnError } from "src/lib/ui/actionUtils";
 import type KoreaderImporterPlugin from "src/main";
-import type { FrontmatterGenerator } from "src/services/parsing/FrontmatterGenerator";
+import { mergeFrontmatterData } from "src/services/parsing/FrontmatterGenerator";
 import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
 import type { Annotation, LuaMetadata } from "src/types";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
-import type { ContentGenerator } from "./ContentGenerator";
+import type { TemplateManager } from "../parsing/TemplateManager";
 import type { NoteIdentityService } from "./NoteIdentityService";
 import type { SnapshotManager } from "./SnapshotManager";
 
@@ -24,11 +25,10 @@ export class MergeService {
 		private plugin: KoreaderImporterPlugin,
 		private snapshotManager: SnapshotManager,
 		private fmService: FrontmatterService,
-		private frontmatterGenerator: FrontmatterGenerator,
-		private contentGenerator: ContentGenerator,
 		private loggingService: LoggingService,
 		private fs: FileSystemService,
 		private identity: NoteIdentityService,
+		private templateManager: TemplateManager,
 	) {
 		this.log = this.loggingService.scoped("MergeService");
 	}
@@ -47,7 +47,7 @@ export class MergeService {
 			this.identity.tryGetId(file) ?? (await this.identity.ensureId(file));
 		await this.snapshotManager.createBackup(file);
 		const ours = await this.fmService.parseFile(file);
-		const mergedFm = this.frontmatterGenerator.mergeFrontmatterData(
+		const mergedFm = mergeFrontmatterData(
 			ours.frontmatter ?? {},
 			luaMetadata,
 			this.plugin.settings.frontmatter,
@@ -61,11 +61,13 @@ export class MergeService {
 			this.log.error("Replace write failed", writeRes.error);
 			throw new Error("Failed to write replaced content to vault");
 		}
-		try {
-			await this.snapshotManager.createSnapshotFromContent(file, finalContent);
-		} catch (e) {
-			this.log.warn("Failed to update snapshot baseline after replace", e);
-		}
+		await notifyOnError(
+			this.snapshotManager.createSnapshotFromContent(file, finalContent),
+			{
+				message: () =>
+					`Warning: Could not update snapshot for ${file.basename}. Future merges may be less accurate.`,
+			},
+		);
 		return { status: "merged", file };
 	}
 
@@ -80,7 +82,10 @@ export class MergeService {
 		file: TFile,
 		luaMetadata: LuaMetadata,
 	): Promise<{ status: "merged"; file: TFile }> {
-		await this.snapshotManager.createBackup(file);
+		await notifyOnError(this.snapshotManager.createBackup(file), {
+			message: (e) =>
+				`Backup failed for ${file.basename}. Proceeding without backup.`,
+		});
 		const { frontmatter: existingFm, body: existingBody } =
 			await this.fmService.parseFile(file);
 		const { annotations: existingAnnotations } = extractHighlightsWithStyle(
@@ -93,10 +98,16 @@ export class MergeService {
 			luaMetadata.annotations,
 		);
 
-		const newBody =
-			await this.contentGenerator.generateHighlightsContent(mergedAnnotations);
+		const compiled = await this.templateManager.getCompiledTemplate();
+		const newBody = this.fmService.composeBody(
+			mergedAnnotations,
+			compiled,
+			this.templateManager,
+			this.plugin.settings.commentStyle,
+			this.plugin.settings.maxHighlightGap,
+		);
 
-		const mergedFm = this.frontmatterGenerator.mergeFrontmatterData(
+		const mergedFm = mergeFrontmatterData(
 			existingFm ?? {},
 			luaMetadata,
 			this.plugin.settings.frontmatter,
@@ -112,11 +123,13 @@ export class MergeService {
 			throw new Error("Failed to write merged content to vault");
 		}
 
-		try {
-			await this.snapshotManager.createSnapshotFromContent(file, finalContent);
-		} catch (e) {
-			this.log.warn("Failed to update snapshot baseline after 2-way merge", e);
-		}
+		await notifyOnError(
+			this.snapshotManager.createSnapshotFromContent(file, finalContent),
+			{
+				message: () =>
+					`Warning: Could not update snapshot for ${file.basename}. Future merges may be less accurate.`,
+			},
+		);
 
 		return { status: "merged", file };
 	}
@@ -136,7 +149,10 @@ export class MergeService {
 		incomingBody: string,
 		luaMetadata: LuaMetadata,
 	): Promise<{ status: "merged"; file: TFile }> {
-		await this.snapshotManager.createBackup(file);
+		await notifyOnError(this.snapshotManager.createBackup(file), {
+			message: (e) =>
+				`Backup failed for ${file.basename}. Proceeding without backup.`,
+		});
 
 		const base = this.fmService.parseContent(baseContent);
 		const ours = await this.fmService.parseFile(file);
@@ -177,7 +193,7 @@ export class MergeService {
 		}
 		const mergedBody = mergedLines.join("\n");
 
-		const mergedFm = this.frontmatterGenerator.mergeFrontmatterData(
+		const mergedFm = mergeFrontmatterData(
 			ours.frontmatter ?? {},
 			luaMetadata,
 			this.plugin.settings.frontmatter,
@@ -209,11 +225,13 @@ export class MergeService {
 			throw new Error("Failed to write merged content to vault");
 		}
 
-		try {
-			await this.snapshotManager.createSnapshotFromContent(file, finalContent);
-		} catch (e) {
-			this.log.warn("Failed to update snapshot baseline after 3-way merge", e);
-		}
+		await notifyOnError(
+			this.snapshotManager.createSnapshotFromContent(file, finalContent),
+			{
+				message: () =>
+					`Warning: Could not update snapshot for ${file.basename}. Future merges may be less accurate.`,
+			},
+		);
 
 		return { status: "merged", file };
 	}

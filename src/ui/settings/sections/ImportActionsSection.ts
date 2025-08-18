@@ -1,7 +1,7 @@
-import { Setting } from "obsidian";
-import { runPluginAction } from "src/lib/ui/actionUtils";
+import { runAsyncAction } from "src/lib/ui/actionUtils";
 import type KoreaderImporterPlugin from "src/main";
 import type { DebouncedFn } from "src/types";
+import { renderSettingsSection } from "../SettingsKit";
 import { SettingsSection } from "../SettingsSection";
 
 export class ImportActionsSection extends SettingsSection {
@@ -14,29 +14,36 @@ export class ImportActionsSection extends SettingsSection {
 		super(plugin, debouncedSave, title, startOpen);
 	}
 	protected renderContent(containerEl: HTMLElement): void {
-		new Setting(containerEl)
-			.setName("Scan / Import")
-			.setDesc("Scan for highlight files or import them into your vault.")
-			.addButton((btn) =>
-				btn.setButtonText("Scan Now").onClick(() =>
-					runPluginAction(() => this.plugin.triggerScan(), {
-						button: btn,
-						inProgressText: "Scanning…",
-						completedText: "Scan Now",
-					}),
-				),
-			)
-			.addButton((btn) =>
-				btn
-					.setCta()
-					.setButtonText("Import Now")
-					.onClick(() =>
-						runPluginAction(() => this.plugin.triggerImport(), {
-							button: btn,
-							inProgressText: "Importing…",
-							completedText: "Import Now",
-						}),
-					),
-			);
+		renderSettingsSection(
+			containerEl,
+			[
+				{
+					key: "import-actions",
+					type: "buttons",
+					name: "Scan / Import",
+					desc: "Scan for highlight files or import them into your vault.",
+					buttons: [
+						{
+							text: "Scan Now",
+							onClick: async (btn) =>
+								runAsyncAction(btn, () => this.plugin.triggerScan(), {
+									inProgress: "Scanning…",
+									original: "Scan Now",
+								}),
+						},
+						{
+							text: "Import Now",
+							cta: true,
+							onClick: async (btn) =>
+								runAsyncAction(btn, () => this.plugin.triggerImport(), {
+									inProgress: "Importing…",
+									original: "Import Now",
+								}),
+						},
+					],
+				},
+			],
+			{ app: this.app, parent: this },
+		);
 	}
 }

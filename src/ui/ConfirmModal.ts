@@ -1,9 +1,7 @@
-import { type App, ButtonComponent } from "obsidian";
+import type { App } from "obsidian";
 import { BaseModal } from "./BaseModal";
 
 export class ConfirmModal extends BaseModal<boolean> {
-	private confirmBtn: ButtonComponent | null = null;
-
 	constructor(
 		app: App,
 		titleText: string,
@@ -18,33 +16,19 @@ export class ConfirmModal extends BaseModal<boolean> {
 		});
 	}
 
-	async openAndConfirm(): Promise<boolean> {
-		const res = await this.openAndAwaitResult();
-		return res ?? false;
-	}
-
 	protected renderContent(contentEl: HTMLElement): void {
 		contentEl.createEl("p", { text: this.bodyText });
-
-		const buttonContainer = contentEl.createDiv({
-			cls: "modal-button-container",
-		});
-
-		this.confirmBtn = new ButtonComponent(buttonContainer)
-			.setButtonText("Proceed")
-			.setWarning()
-			.onClick(() => this.resolveAndClose(true));
-
-		new ButtonComponent(buttonContainer)
-			.setButtonText("Cancel")
-			.onClick(() => this.cancel());
+		this.createButtonRow(contentEl, [
+			{
+				text: "Proceed",
+				warning: true,
+				onClick: () => this.resolveAndClose(true),
+			},
+			{ text: "Cancel", onClick: () => this.cancel() },
+		]);
 	}
 
 	protected handleEnter(): void {
 		this.resolveAndClose(true);
-	}
-
-	protected getFocusElement(): HTMLElement | null {
-		return this.confirmBtn?.buttonEl ?? null;
 	}
 }

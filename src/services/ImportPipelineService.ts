@@ -9,7 +9,7 @@ import {
 	type DuplicateHandlingSession,
 	type Summary,
 } from "src/types";
-import type { SDRFinder } from "./device/SDRFinder";
+import type { DeviceService } from "./device/DeviceService";
 import type { ImportExecutorService } from "./import/ImportExecutorService";
 import type { ImportPlannerService } from "./import/ImportPlannerService";
 import type {
@@ -29,7 +29,7 @@ export class ImportPipelineService {
 	constructor(
 		private readonly app: App,
 		private readonly plugin: KoreaderImporterPlugin,
-		private readonly sdrFinder: SDRFinder,
+		private readonly device: DeviceService,
 		private readonly localIndexService: LocalIndexService,
 		private readonly snapshotManager: SnapshotManager,
 		private readonly loggingService: LoggingService,
@@ -64,8 +64,6 @@ export class ImportPipelineService {
 		const choice = await this.promptService.confirm({
 			title: "Duplicate Scan Incomplete",
 			message: `The duplicate scan for "${plan.title}" did not complete, so a safe merge cannot be guaranteed. A potential match was found at: ${plan.existingPath ?? "—"}. How would you like to proceed?`,
-			ctaLabel: "Create New File",
-			cancelLabel: "Skip Book",
 		});
 		return choice === "confirm"
 			? ({ kind: "CREATE", withTimeoutWarning: true } as const)
@@ -75,7 +73,7 @@ export class ImportPipelineService {
 	public async importHighlights(): Promise<void> {
 		this.log.info("Starting KOReader highlight import process…");
 
-		const metadataPaths = await this.sdrFinder.findSdrDirectoriesWithMetadata();
+		const metadataPaths = await this.device.findSdrDirectoriesWithMetadata();
 		if (!metadataPaths?.length) {
 			new Notice("No KOReader highlight files found (.sdr with metadata.lua).");
 			this.log.info("No SDR files found to import.");
@@ -148,8 +146,6 @@ export class ImportPipelineService {
 					title: "No New Highlights Found",
 					message:
 						"No changes were detected. Re-import all books anyway? This is useful if you have changed your highlight templates.",
-					ctaLabel: "Yes, Re-import",
-					cancelLabel: "Finish",
 				});
 
 				if (choice === "confirm") {

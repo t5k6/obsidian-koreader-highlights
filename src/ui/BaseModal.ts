@@ -1,4 +1,10 @@
-import { type App, type EventRef, Modal, type Scope } from "obsidian";
+import {
+	type App,
+	ButtonComponent,
+	type EventRef,
+	Modal,
+	type Scope,
+} from "obsidian";
 
 /**
  * Result type for modals. Each modal can define its own result shape.
@@ -279,5 +285,32 @@ export abstract class BaseModal<T = void> extends Modal {
 	 */
 	protected registerAppEvent(ref: EventRef): void {
 		this.eventRefs.push(ref);
+	}
+
+	/**
+	 * Create a standardized button row inside a modal.
+	 * Callers supply pure button specs; this method handles DOM and styling.
+	 */
+	protected createButtonRow(
+		parentEl: HTMLElement,
+		buttons: Array<{
+			text: string;
+			onClick: () => void;
+			cta?: boolean;
+			warning?: boolean;
+			disabled?: boolean;
+			tooltip?: string;
+		}>,
+	): void {
+		const container = parentEl.createDiv({ cls: "modal-button-container" });
+		buttons.forEach((spec) => {
+			const btn = new ButtonComponent(container)
+				.setButtonText(spec.text)
+				.onClick(spec.onClick);
+			if (spec.cta) btn.setCta();
+			if (spec.warning) btn.setWarning();
+			if (spec.disabled) btn.setDisabled(true);
+			if (spec.tooltip) btn.setTooltip(spec.tooltip);
+		});
 	}
 }

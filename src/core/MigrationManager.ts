@@ -1,10 +1,11 @@
 import {
 	normalizePath,
 	type Plugin,
-	TFile,
-	TFolder,
+	type TFile,
+	type TFolder,
 	type Vault,
 } from "obsidian";
+import { isTFile, isTFolder } from "src/lib/obsidian/typeguards";
 import type { FileSystemService } from "src/services/FileSystemService";
 import type { LoggingService } from "src/services/LoggingService";
 import type { NoteIdentityService } from "src/services/vault/NoteIdentityService";
@@ -150,7 +151,7 @@ export class MigrationManager {
 		let root: TFolder | null = null;
 		if (typeof folder === "string") {
 			const af = this.vault.getAbstractFileByPath(folder);
-			if (af instanceof TFolder) root = af;
+			if (isTFolder(af)) root = af;
 		} else {
 			root = folder;
 		}
@@ -160,12 +161,12 @@ export class MigrationManager {
 		const stack: (TFile | TFolder)[] = [root];
 		while (stack.length) {
 			const cur = stack.pop()!;
-			if (cur instanceof TFile) {
+			if (isTFile(cur)) {
 				if (cur.extension === "md") out.push(cur);
 				continue;
 			}
 			for (const child of cur.children) {
-				if (!recursive && child instanceof TFolder) continue;
+				if (!recursive && isTFolder(child)) continue;
 				stack.push(child as TFile | TFolder);
 			}
 		}
@@ -209,11 +210,11 @@ export class MigrationManager {
 
 		for (const dir of LEGACY_DIRS) {
 			const folder = vault.getAbstractFileByPath(dir);
-			if (!(folder instanceof TFolder)) continue;
+			if (!isTFolder(folder)) continue;
 
 			const victims = folder.children.filter(
 				(c): c is TFile =>
-					c instanceof TFile && c.name.startsWith("koreader-importer_"),
+					isTFile(c) && c.name.startsWith("koreader-importer_"),
 			);
 
 			await Promise.all(

@@ -1,6 +1,5 @@
 import type { App, Vault } from "obsidian";
 import type KoreaderImporterPlugin from "src/main";
-import type { PromptService } from "src/services/ui/PromptService";
 import type {
 	DuplicateHandlingSession,
 	DuplicateMatch,
@@ -11,7 +10,6 @@ export const APP_TOKEN = Symbol("App");
 export const VAULT_TOKEN = Symbol("Vault");
 export const PLUGIN_TOKEN = Symbol("KoreaderImporterPlugin");
 export const DUPLICATE_MODAL_FACTORY_TOKEN = Symbol("DuplicateModalFactory");
-export const PROMPT_SERVICE_TOKEN = Symbol("PromptService");
 
 // --- For type-hinting the container resolve method ---
 
@@ -24,4 +22,3 @@ export type DuplicateModalFactoryToken = (
 	message: string,
 	session: DuplicateHandlingSession,
 ) => IDuplicateHandlingModal;
-export type PromptServiceToken = PromptService;

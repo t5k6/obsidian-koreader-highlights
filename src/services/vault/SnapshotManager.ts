@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { type App, Notice, TFile } from "obsidian";
+import type { App, TFile } from "obsidian";
 import { KeyedQueue } from "src/lib/concurrency/concurrency";
-import { err, isErr, ok } from "src/lib/core/result";
+import { err, isErr, ok, type Result } from "src/lib/core/result";
+import { formatDateForTimestamp } from "src/lib/formatting/dateUtils";
+import { isTFile } from "src/lib/obsidian/typeguards";
 import { normalizeFileNamePiece } from "src/lib/pathing/pathingUtils";
 import type KoreaderImporterPlugin from "src/main";
 import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
@@ -19,9 +21,9 @@ export class SnapshotManager {
 	private readonly queue = new KeyedQueue();
 
 	// Lazy ensure snapshot/backups dirs are present
-	private ensureDirsOnce: Promise<void> | null = null;
-
-	private unsubscribeUidChanged: (() => void) | null = null;
+	private ensureDirsOnce: Promise<
+		Result<void, { kind: string; message?: string; cause?: unknown }>
+	> | null = null;
 
 	constructor(
 		private app: App,
@@ -49,70 +51,7 @@ export class SnapshotManager {
 		// Provide back-reference so NoteIdentityService can eagerly create snapshots on UID change
 		this.identity.setSnapshotManager?.(this as any);
 
-		// React to UID changes with cleanup-first logic
-		this.unsubscribeUidChanged = this.identity.onUidChanged(
-			async (_file, oldUid, newUid) => {
-				if (!oldUid) return;
-				if (oldUid === newUid) return;
-				const oldPath = this.getSnapshotPathForUid(oldUid);
-				const newPath = this.getSnapshotPathForUid(newUid);
-				try {
-					const [first, second] = [oldUid, newUid].sort();
-					await this.withSnapshotLock(first, async () => {
-						await this.withSnapshotLock(second, async () => {
-							const newExists = await this.fs.vaultExists(newPath);
-							const oldExists = await this.fs.vaultExists(oldPath);
-
-							if (newExists && oldExists) {
-								// New snapshot already created eagerly; remove old best-effort
-								void this.fs.removeVaultPath(oldPath);
-								this.log.info(
-									`Cleaned up old snapshot after UID change ${oldUid} -> ${newUid}`,
-								);
-								return;
-							}
-							if (!newExists && oldExists) {
-								// Fallback: rename old → new
-								const res = await this.fs.renameVaultPath(oldPath, newPath);
-								if (isErr(res)) {
-									this.log.warn("Failed to rename snapshot on UID change", {
-										oldUid,
-										newUid,
-										error: res.error,
-									});
-									new Notice(
-										"Failed to update snapshot for renamed note. Future merges may be affected.",
-										7000,
-									);
-								} else {
-									this.log.info(`Renamed snapshot ${oldUid} -> ${newUid}`);
-								}
-							}
-							// If neither exists: nothing to do. A later merge will recreate a baseline.
-						});
-					});
-				} catch (e) {
-					this.log.warn("Failed to rename snapshot on UID change", {
-						oldUid,
-						newUid,
-						e,
-					});
-					new Notice(
-						"Failed to update snapshot for renamed note. Future merges may be affected.",
-						7000,
-					);
-				}
-			},
-		);
-	}
-
-	/** Dispose resources (event listeners) to prevent leaks. */
-	public dispose(): void {
-		try {
-			this.unsubscribeUidChanged?.();
-		} finally {
-			this.unsubscribeUidChanged = null;
-		}
+		// Listener/cleanup lifecycle removed; UID-change cleanup is now inline post-commit.
 	}
 
 	/**
@@ -120,10 +59,16 @@ export class SnapshotManager {
 	 * Snapshots represent the state of the file after the last import.
 	 * @param targetFile - File to create snapshot for
 	 */
-	public async createSnapshot(targetFile: TFile): Promise<void> {
-		await this.createSnapshotCore(targetFile, async () =>
-			this.app.vault.read(targetFile),
-		);
+	public async createSnapshot(
+		targetFile: TFile,
+	): Promise<
+		Result<void, { kind: string; message?: string; cause?: unknown }>
+	> {
+		return this.createSnapshotCore(targetFile, async () => {
+			const r = await this.fs.readVaultTextWithRetry(targetFile);
+			if (isErr(r)) throw (r as any).error ?? r;
+			return r.value;
+		});
 	}
 
 	/**
@@ -134,7 +79,9 @@ export class SnapshotManager {
 		targetFile: TFile,
 		content: string,
 		knownUid?: string,
-	): Promise<ReturnType<typeof this.writeSnapshotById>> {
+	): Promise<
+		Result<void, { kind: string; message?: string; cause?: unknown }>
+	> {
 		return this.createSnapshotCore(targetFile, async () => content, knownUid);
 	}
 
@@ -143,9 +90,14 @@ export class SnapshotManager {
 	 * Used as safety measure during merge operations.
 	 * @param targetFile - File to backup
 	 */
-	public async createBackup(targetFile: TFile): Promise<void> {
-		await this.ensureDirs();
-		await this.createVersion(
+	public async createBackup(
+		targetFile: TFile,
+	): Promise<
+		Result<void, { kind: string; message?: string; cause?: unknown }>
+	> {
+		const dirRes = await this.ensureDirs();
+		if (isErr(dirRes)) return dirRes;
+		return this.createVersion(
 			targetFile,
 			(f) => this.getBackupPath(f),
 			"backup",
@@ -219,7 +171,7 @@ export class SnapshotManager {
 	}
 
 	private getBackupPath(targetFile: TFile): string {
-		const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+		const timestamp = formatDateForTimestamp();
 		const safeBaseName = normalizeFileNamePiece(targetFile.basename).slice(
 			0,
 			50,
@@ -236,52 +188,60 @@ export class SnapshotManager {
 		targetFile: TFile,
 		getPath: (file: TFile) => string,
 		purpose: "snapshot" | "backup",
-	): Promise<void> {
-		const ok = await this.capabilities.ensure("snapshotsWritable", {
+	): Promise<
+		Result<void, { kind: string; message?: string; cause?: unknown }>
+	> {
+		const writable = await this.capabilities.ensure("snapshotsWritable", {
 			notifyOnce: true,
 		});
-		if (!ok) return;
+		if (!writable)
+			return err({
+				kind: "CapabilityDenied",
+				message: "snapshotsWritable=false",
+			});
 
 		const versionPath = getPath(targetFile);
 		// Ensure the file still exists right before reading to avoid race conditions
 		const abs = this.app.vault.getAbstractFileByPath(targetFile.path);
-		if (!(abs instanceof TFile)) {
+		if (!isTFile(abs)) {
 			this.log.warn(
 				`File ${targetFile.path} was deleted before ${purpose} could be created.`,
 			);
-			return;
+			return err({
+				kind: "NotFound",
+				message: `File missing before ${purpose} creation`,
+			});
 		}
 		try {
-			const content = await this.app.vault.read(targetFile);
+			const r = await this.fs.readVaultTextWithRetry(targetFile);
+			if (isErr(r)) throw (r as any).error ?? r;
+			const content = r.value;
 			const w = await this.writeText(versionPath, content);
 			if (isErr(w)) {
 				this.log.error(
 					`Failed to create ${purpose} for ${targetFile.path}`,
 					w.error,
 				);
-				if (purpose === "snapshot") {
-					new Notice(
-						`Warning: Could not update snapshot for ${targetFile.basename}. Future merges may be less accurate.`,
-					);
-					return;
-				}
-				throw w.error as any;
+				return err({
+					kind: "IO",
+					message: `Failed to create ${purpose} for ${targetFile.path}`,
+					cause: w.error,
+				});
 			}
 			this.log.info(
 				`Created ${purpose} for ${targetFile.path} at ${versionPath}`,
 			);
+			return ok(void 0);
 		} catch (error) {
 			this.log.error(
 				`Failed to create ${purpose} for ${targetFile.path}`,
 				error,
 			);
-			if (purpose === "snapshot") {
-				new Notice(
-					`Warning: Could not update snapshot for ${targetFile.basename}. Future merges may be less accurate.`,
-				);
-				return;
-			}
-			throw error;
+			return err({
+				kind: "IO",
+				message: `Failed to create ${purpose} for ${targetFile.path}`,
+				cause: error,
+			});
 		}
 	}
 
@@ -291,18 +251,43 @@ export class SnapshotManager {
 		return this.queue.run(key, task);
 	}
 
-	private async writeSnapshotById(uid: string, bodyContent: string) {
+	private async writeSnapshotById(
+		uid: string,
+		bodyContent: string,
+	): Promise<
+		Result<void, { kind: string; message?: string; cause?: unknown }>
+	> {
 		const target = this.getSnapshotPathForUid(uid);
 		const hash = this.sha256Hex(bodyContent);
 		const composed = this.composeSnapshotContent(hash, bodyContent);
-		return this.writeText(target, composed);
+		const w = await this.writeText(target, composed);
+		if (isErr(w)) {
+			return err({
+				kind: "IO",
+				message: `Failed to write snapshot for UID ${uid}`,
+				cause: w.error,
+			});
+		}
+		return ok(void 0);
 	}
 
-	private ensureDirs(): Promise<void> {
+	private ensureDirs(): Promise<
+		Result<void, { kind: string; message?: string; cause?: unknown }>
+	> {
 		if (!this.ensureDirsOnce) {
 			this.ensureDirsOnce = (async () => {
-				await this.fs.ensureVaultFolder(this.snapshotDir);
-				await this.fs.ensureVaultFolder(this.backupDir);
+				try {
+					await this.fs.ensureVaultFolder(this.snapshotDir);
+					await this.fs.ensureVaultFolder(this.backupDir);
+					return ok(void 0);
+				} catch (e) {
+					this.log.error("Failed to ensure snapshot/backup directories", e);
+					return err({
+						kind: "IO",
+						message: "Failed to ensure snapshot/backup directories",
+						cause: e,
+					});
+				}
 			})();
 		}
 		return this.ensureDirsOnce;
@@ -330,21 +315,24 @@ export class SnapshotManager {
 		targetFile: TFile,
 		contentProvider: () => Promise<string>,
 		knownUid?: string,
-	): Promise<ReturnType<typeof this.writeSnapshotById>> {
-		const ok = await this.capabilities.ensure("snapshotsWritable", {
+	): Promise<
+		Result<void, { kind: string; message?: string; cause?: unknown }>
+	> {
+		const allowed = await this.capabilities.ensure("snapshotsWritable", {
 			notifyOnce: true,
 		});
-		if (!ok)
+		if (!allowed)
 			return err({
 				kind: "CapabilityDenied",
 				message: "snapshotsWritable=false",
 			} as any);
-		await this.ensureDirs();
+		const dirRes = await this.ensureDirs();
+		if (isErr(dirRes)) return dirRes;
 		const uid = knownUid ?? (await this.identity.ensureId(targetFile));
 		return this.withSnapshotLock(uid, async () => {
 			// Ensure the file still exists to avoid read-after-delete
 			const abs = this.app.vault.getAbstractFileByPath(targetFile.path);
-			if (!(abs instanceof TFile)) {
+			if (!isTFile(abs)) {
 				this.log.warn(
 					`File ${targetFile.path} was deleted before snapshot could be created.`,
 				);
@@ -360,16 +348,12 @@ export class SnapshotManager {
 					`[SnapshotManager] Snapshot write failed for ${targetFile.path}`,
 					writeRes.error,
 				);
-				new Notice(
-					`Warning: Could not update snapshot for ${targetFile.basename}. Future merges may be less accurate.`,
-				);
 				return writeRes;
 			}
 			return writeRes;
 		});
 	}
 
-	// Extracts snapshot meta and returns the body without frontmatter
 	private extractSnapshotMeta(rawContent: string): {
 		metaSha: string | null;
 		body: string;
@@ -388,15 +372,23 @@ export class SnapshotManager {
 	}
 
 	// Read snapshot by UID with integrity verification
-	public async readSnapshotById(uid: string) {
+	public async readSnapshotById(
+		uid: string,
+	): Promise<
+		Result<string, { kind: string; message?: string; cause?: unknown }>
+	> {
 		const snapshotPath = this.getSnapshotPathForUid(uid);
 		const r = await this.fs.readVaultText(snapshotPath);
-		if (isErr(r)) return r;
+		if (isErr(r))
+			return err({
+				kind: "IO",
+				message: `Failed to read ${snapshotPath}`,
+				cause: r.error,
+			});
 		const { metaSha, body } = this.extractSnapshotMeta(r.value);
 		if (!metaSha) return ok(body);
 		const computed = this.sha256Hex(body);
 		if (computed !== metaSha) {
-			new Notice("Snapshot integrity check failed. Merge aborted.");
 			return err({
 				kind: "SNAPSHOT_INTEGRITY_FAILED",
 				message: "Snapshot integrity check failed",
@@ -415,9 +407,36 @@ export class SnapshotManager {
 	public async migrateLegacySnapshotForFile(
 		file: TFile,
 		uid: string,
-	): Promise<void> {
+	): Promise<
+		Result<void, { kind: string; message?: string; cause?: unknown }>
+	> {
 		// Backwards compatibility wrapper; delegate to simplified single-file migration
 		return this.migrateSingleLegacySnapshot(file, uid);
+	}
+
+	public async removeSnapshotById(
+		uid: string,
+	): Promise<
+		Result<void, { kind: string; message?: string; cause?: unknown }>
+	> {
+		// Serialize per-UID to avoid races with any other operations touching this snapshot file.
+		return this.withSnapshotLock(uid, async () => {
+			const snapshotPath = this.getSnapshotPathForUid(uid);
+			if (await this.fs.vaultExists(snapshotPath)) {
+				const res = await this.fs.removeVaultPath(snapshotPath);
+				if (isErr(res)) {
+					this.log.warn(`Failed to remove snapshot for UID ${uid}`, res.error);
+					return err({
+						kind: "IO",
+						message: `Failed to remove ${snapshotPath}`,
+						cause: res.error,
+					});
+				} else {
+					this.log.info(`Removed snapshot for UID ${uid}`);
+				}
+			}
+			return ok(void 0);
+		});
 	}
 
 	/**
@@ -429,31 +448,45 @@ export class SnapshotManager {
 	public async migrateSingleLegacySnapshot(
 		file: TFile,
 		uid: string,
-	): Promise<void> {
+	): Promise<
+		Result<void, { kind: string; message?: string; cause?: unknown }>
+	> {
 		const newPath = this.getSnapshotPathForUid(uid);
 		const legacyHash = createHash("sha1").update(file.path).digest("hex");
 		const legacyPath = path.join(this.snapshotDir, `${legacyHash}.md`);
 
 		try {
 			const legacyExists = await this.fs.vaultExists(legacyPath);
-			if (!legacyExists) return;
+			if (!legacyExists) return ok(void 0);
 
 			if (await this.fs.vaultExists(newPath)) {
 				const rm1 = await this.fs.removeVaultPath(legacyPath);
 				void rm1; // best-effort; ignore errors
-				return;
+				return ok(void 0);
 			}
 
 			const r = await this.fs.readVaultText(legacyPath);
-			if (!isErr(r)) {
-				await this.writeSnapshotById(uid, r.value);
-				const rm2 = await this.fs.removeVaultPath(legacyPath);
-				void rm2;
+			if (isErr(r)) {
+				return err({
+					kind: "IO",
+					message: `Failed to read legacy snapshot ${legacyPath}`,
+					cause: r.error,
+				});
 			}
+			const w = await this.writeSnapshotById(uid, r.value);
+			if (isErr(w)) return w;
+			const rm2 = await this.fs.removeVaultPath(legacyPath);
+			void rm2; // best-effort cleanup
+			return ok(void 0);
 		} catch (e) {
 			this.log.warn("migrateSingleLegacySnapshot failed", {
 				file: file.path,
 				e,
+			});
+			return err({
+				kind: "IO",
+				message: "migrateSingleLegacySnapshot failed",
+				cause: e,
 			});
 		}
 	}

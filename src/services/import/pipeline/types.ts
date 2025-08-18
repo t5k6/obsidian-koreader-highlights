@@ -1,12 +1,10 @@
 import type { App, TFile } from "obsidian";
-import type { DeviceStatisticsService } from "src/services/device/DeviceStatisticsService";
-import type { SDRFinder } from "src/services/device/SDRFinder";
+import type { DeviceService } from "src/services/device/DeviceService";
 import type { FileSystemService } from "src/services/FileSystemService";
 import type { LoggingService } from "src/services/LoggingService";
-import type { FrontmatterGenerator } from "src/services/parsing/FrontmatterGenerator";
 import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
-import type { MetadataParser } from "src/services/parsing/MetadataParser";
-import type { ContentGenerator } from "src/services/vault/ContentGenerator";
+import type { Diagnostic } from "src/services/parsing/MetadataParser";
+import type { TemplateManager } from "src/services/parsing/TemplateManager";
 import type { DuplicateFinder } from "src/services/vault/DuplicateFinder";
 import type { FileNameGenerator } from "src/services/vault/FileNameGenerator";
 import type { LocalIndexService } from "src/services/vault/LocalIndexService";
@@ -51,13 +49,14 @@ export interface ImportIO {
 	// planning + execution ports
 	fs: FileSystemService;
 	index: LocalIndexService;
-	parser: MetadataParser;
-	sdrFinder: SDRFinder;
-	statsSvc: DeviceStatisticsService;
+	parser: (luaContent: string) => {
+		meta: Omit<LuaMetadata, "originalFilePath" | "statistics">;
+		diagnostics: Diagnostic[];
+	};
+	device: DeviceService;
 
 	fmService: FrontmatterService;
-	fmGen: FrontmatterGenerator;
-	contentGen: ContentGenerator;
+	templateManager: TemplateManager;
 
 	dupFinder: DuplicateFinder;
 	mergeHandler: MergeHandler;
@@ -78,8 +77,7 @@ export type PlannerIO = Pick<
 	| "fs"
 	| "index"
 	| "parser"
-	| "sdrFinder"
-	| "statsSvc"
+	| "device"
 	| "dupFinder"
 	| "log"
 	| "settings"
@@ -91,8 +89,6 @@ export type ExecutorIO = Pick<
 	| "app"
 	| "fs"
 	| "fmService"
-	| "fmGen"
-	| "contentGen"
 	| "mergeHandler"
 	| "fileNameGen"
 	| "snapshot"

@@ -11,14 +11,25 @@ export interface RenderCtx {
 	onSave?: SaveFn;
 }
 
+export type RowAction = {
+	text: string;
+	icon?: string;
+	cta?: boolean;
+	warning?: boolean;
+	tooltip?: string;
+	disabled?: boolean | (() => boolean);
+	onClick: (btn: import("obsidian").ButtonComponent) => void | Promise<void>;
+};
+
 type BaseSpec = {
 	key: string;
 	name: string;
-	desc?: string;
+	desc?: string | (() => string);
 	if?: () => boolean;
 	afterRender?: (setting: Setting) => void;
 	disabled?: boolean | (() => boolean);
 	tooltip?: string;
+	rowActions?: RowAction[];
 };
 
 export type ToggleSpec = BaseSpec & {
@@ -87,6 +98,14 @@ export type CalloutSpec = {
 	if?: () => boolean;
 };
 
+export type GroupSpec = {
+	type: "group";
+	if?: () => boolean;
+	header?: { text: string; level?: 2 | 3 | 4 };
+	className?: string;
+	children: SettingSpec[];
+};
+
 export type ButtonDef = {
 	text: string;
 	cta?: boolean;
@@ -118,7 +137,8 @@ export type SettingSpec =
 	| ButtonsSpec
 	| CustomSpec
 	| HeaderSpec
-	| CalloutSpec;
+	| CalloutSpec
+	| GroupSpec;
 
 // Helper to map callout type to an icon name
 function iconForCallout(t: CalloutSpec["calloutType"]): string {
@@ -154,6 +174,22 @@ export function renderSettingsSection(
 	const created: Setting[] = [];
 
 	for (const spec of specs) {
+		// Group: container with optional header and recursive children
+		if (spec.type === "group") {
+			const gs = spec as GroupSpec;
+			if (gs.if && !gs.if()) continue;
+			const el = container.createDiv({
+				cls: gs.className ?? "koreader-settings-group",
+			});
+			if (gs.header) {
+				el.createEl(`h${gs.header.level ?? 4}` as any, {
+					text: gs.header.text,
+				});
+			}
+			renderSettingsSection(el, gs.children, ctx);
+			continue;
+		}
+
 		// Headers are lightweight and have no BaseSpec props
 		if (spec.type === "header") {
 			const hs = spec as HeaderSpec;
@@ -191,7 +227,12 @@ export function renderSettingsSection(
 
 		const s = new Setting(container);
 		if ((spec as any).name) s.setName((spec as any).name as string);
-		if ((spec as any).desc) s.setDesc((spec as any).desc as string);
+		if ((spec as any).desc) {
+			const d = (spec as any).desc;
+			s.setDesc(
+				typeof d === "function" ? (d as () => string)() : (d as string),
+			);
+		}
 
 		switch (spec.type) {
 			case "toggle": {
@@ -329,6 +370,22 @@ export function renderSettingsSection(
 				"title",
 				(spec as any).tooltip as string,
 			);
+		}
+
+		// Attach row actions after the control (BaseSpec only)
+		if ((spec as any).rowActions?.length) {
+			for (const a of (spec as any).rowActions as RowAction[]) {
+				s.addButton((btn) => {
+					if (a.icon) btn.setIcon(a.icon);
+					btn.setButtonText(a.text).onClick(() => a.onClick(btn));
+					if (a.cta) btn.setCta();
+					if (a.warning) btn.setWarning();
+					if (a.tooltip) btn.setTooltip(a.tooltip);
+					const disabled =
+						typeof a.disabled === "function" ? a.disabled() : a.disabled;
+					if (disabled) btn.setDisabled(true);
+				});
+			}
 		}
 
 		const isDisabled =

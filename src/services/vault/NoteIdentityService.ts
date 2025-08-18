@@ -1,4 +1,5 @@
 import type { App, FrontMatterCache, TFile, TFolder } from "obsidian";
+import { KeyedQueue } from "src/lib/concurrency/concurrency";
 import { isErr } from "src/lib/core/result";
 import type { FileSystemService } from "src/services/FileSystemService";
 import type { LoggingService } from "src/services/LoggingService";
@@ -14,22 +15,14 @@ export type UidCollisionSummary = {
 	details: Array<{ uid: string; kept: string; reassigned: string[] }>;
 };
 
-/**
- * Manages stable note identities via a frontmatter UID field (kohl-uid).
- * - tryGetId: fast, synchronous read from metadata cache only
- * - ensureId: asynchronous; writes a UID to frontmatter if missing and returns it
- * - assignNewId: force-assign a brand new UID and return it; emits change
- * - onUidChanged: subscribe to UID-change events
- */
 export class NoteIdentityService {
 	public static readonly UID_KEY = "kohl-uid" as const;
 
 	private readonly log;
-	private listeners: Array<
-		(file: TFile, oldUid: string | null, newUid: string) => void
-	> = [];
 	// Optional snapshot manager reference, set by SnapshotManager to avoid DI cycles
 	private snapshot?: SnapshotManager;
+	// Serialize operations per file to prevent overlapping UID reassignments
+	private readonly fileQueue = new KeyedQueue();
 
 	constructor(
 		private readonly app: App,
@@ -71,72 +64,111 @@ export class NoteIdentityService {
 
 	/**
 	 * Force-assigns a brand new UID, replacing any existing value.
-	 * Emits a UID-change event.
+	 * Two-phase flow: prepare (snapshot) -> commit (frontmatter) -> publish (event).
+	 * Serialized per-file to avoid overlapping operations.
 	 */
 	public async assignNewId(file: TFile): Promise<string> {
-		const oldUid = this.tryGetId(file) ?? null;
-		const newUid = this.generateUid();
+		return this.fileQueue.run(`nid:${file.path}`, async () => {
+			const oldUid = this.tryGetId(file) ?? null;
+			const newUid = this.generateUid();
 
-		try {
-			await this.app.fileManager.processFrontMatter(file, (fm) => {
-				// Set the new, correct key. Obsidian's processor will handle it correctly.
-				fm[NoteIdentityService.UID_KEY] = newUid;
+			// Build patched content once (in-memory): new UID + prev list cleanup
+			const readRes = await this.fs.readVaultTextWithRetry(file);
+			if (isErr(readRes)) {
+				this.log.error("Failed to read file while assigning UID", {
+					file: file.path,
+					error: (readRes as any).error ?? readRes,
+				});
+				throw (
+					(readRes as any).error ?? new Error("readVaultTextWithRetry failed")
+				);
+			}
+			const currentContent = readRes.value;
+			const { frontmatter, body } = this.fmService.parseContent(currentContent);
+			(frontmatter as any)[NoteIdentityService.UID_KEY] = newUid;
+			try {
+				const prevRaw = (frontmatter as any)["kohl-prev-uids"];
+				const prevArr: string[] = Array.isArray(prevRaw)
+					? prevRaw.filter((x: any) => typeof x === "string" && x.trim())
+					: typeof prevRaw === "string" && prevRaw.trim()
+						? [prevRaw.trim()]
+						: [];
+				const merged = [...prevArr, ...(oldUid ? [oldUid] : [])];
+				(frontmatter as any)["kohl-prev-uids"] = Array.from(
+					new Set(merged),
+				).slice(-5);
+			} catch {
+				/* best-effort */
+			}
+			for (const key in frontmatter as any) {
+				if (
+					Object.hasOwn(frontmatter as any, key) &&
+					key.includes("kohl-uid") &&
+					key !== NoteIdentityService.UID_KEY
+				) {
+					delete (frontmatter as any)[key];
+				}
+			}
+			const patchedContent = this.fmService.reconstructFileContent(
+				frontmatter as any,
+				body,
+			);
 
-				// Proactively clean up any malformed keys from development testing.
-				for (const key in fm) {
-					if (key.includes("kohl-uid") && key !== NoteIdentityService.UID_KEY) {
-						delete fm[key];
+			// 1) Prepare: snapshot-first using the patched content; abort if it fails
+			let snapshotPrepared = false;
+			if (this.snapshot) {
+				const res = await this.snapshot.createSnapshotFromContent(
+					file,
+					patchedContent,
+					newUid,
+				);
+				if (isErr(res)) {
+					this.log.warn("Snapshot write before UID change failed", {
+						file: file.path,
+						error: (res as any).error ?? res,
+					});
+					throw new Error(
+						"Failed to prepare snapshot for new UID; aborting UID change",
+					);
+				}
+				snapshotPrepared = true;
+			} else {
+				this.log.warn(
+					"SnapshotManager is not set; proceeding without snapshot-first.",
+				);
+			}
+
+			// 2) Commit: write the same patched content; rollback snapshot on failure
+			try {
+				await this.fmService.overwriteFile(file, patchedContent);
+			} catch (e) {
+				if (snapshotPrepared) {
+					try {
+						await this.snapshot?.removeSnapshotById?.(newUid);
+					} catch {
+						/* best-effort */
 					}
 				}
-			});
-
-			// Eagerly create a new snapshot for the new UID (best-effort, but awaited)
-			try {
-				if (this.snapshot) {
-					const content = await this.app.vault.read(file);
-					await this.snapshot.createSnapshotFromContent(file, content, newUid);
-				}
-			} catch (e) {
-				// Log but don't fail UID assignment
-				this.log.warn("Failed to write new snapshot after UID change", {
+				this.log.error("Failed to overwrite file while assigning UID", {
 					file: file.path,
 					error: e,
 				});
+				throw new Error(`Failed to assign new UID to ${file.path}`);
 			}
 
-			this.emitUidChanged(file, oldUid, newUid);
+			// 3) Cleanup: best-effort removal of the old snapshot.
+			// The new snapshot is guaranteed to exist at this point (snapshot-first).
+			if (oldUid && this.snapshot) {
+				const cleanupRes = await this.snapshot.removeSnapshotById(oldUid);
+				if (isErr(cleanupRes)) {
+					this.log.warn(`Failed to clean up old snapshot for ${oldUid}`, {
+						file: file.path,
+						error: cleanupRes.error,
+					});
+				}
+			}
 			return newUid;
-		} catch (e) {
-			this.log.error("Failed to process frontmatter while assigning UID", {
-				file: file.path,
-				error: e,
-			});
-			throw new Error(`Failed to assign new UID to ${file.path}`);
-		}
-	}
-
-	/** Subscribe to UID changes (assignment or reassignment). */
-	public onUidChanged(
-		listener: (file: TFile, oldUid: string | null, newUid: string) => void,
-	): () => void {
-		this.listeners.push(listener);
-		return () => {
-			this.listeners = this.listeners.filter((l) => l !== listener);
-		};
-	}
-
-	private emitUidChanged(
-		file: TFile,
-		oldUid: string | null,
-		newUid: string,
-	): void {
-		for (const l of this.listeners) {
-			try {
-				l(file, oldUid, newUid);
-			} catch (e) {
-				this.log.warn("UID change listener threw", e);
-			}
-		}
+		});
 	}
 
 	public generateUid(): string {

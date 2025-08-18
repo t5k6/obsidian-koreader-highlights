@@ -234,68 +234,61 @@ export class CapabilityManager {
 		}
 	}
 
+	// New: Declarative configs for each capability (getter avoids using `this` before constructor runs)
+	private get capabilityConfigs(): Record<
+		Capability,
+		{ probePath: string; ensureDirs?: string[] }
+	> {
+		return {
+			pluginDataWritable: {
+				probePath: this.fs.joinPluginDataPath(".__plugin_probe__"),
+				ensureDirs: [this.fs.joinPluginDataPath()],
+			},
+			snapshotsWritable: {
+				probePath: this.fs.joinPluginDataPath("snapshots", ".__snap_probe__"),
+				ensureDirs: [
+					this.fs.joinPluginDataPath("snapshots"),
+					this.fs.joinPluginDataPath("backups"),
+				],
+			},
+			indexPersistenceLikely: {
+				probePath: this.fs.joinPluginDataPath(
+					"highlight_index.sqlite.__probe__",
+				),
+				ensureDirs: [this.fs.joinPluginDataPath()],
+			},
+		};
+	}
+
+	// New: Unified probe helper
+	private async probeWritablePath(config: {
+		probePath: string;
+		ensureDirs?: string[];
+	}): Promise<boolean> {
+		try {
+			if (config.ensureDirs) {
+				for (const dir of config.ensureDirs) {
+					await this.fs.ensureVaultFolder(dir);
+				}
+			}
+			const ok = await this.fs.writeProbe(config.probePath);
+			if (!ok) throw new Error("probe failed");
+			return true;
+		} catch (_e) {
+			return false;
+		}
+	}
+
 	private async probe(cap: Capability): Promise<boolean> {
 		try {
-			switch (cap) {
-				case "pluginDataWritable":
-					return await this.probePluginDataWritable();
-				case "snapshotsWritable":
-					return await this.probeSnapshotsWritable();
-				case "indexPersistenceLikely":
-					return await this.probeIndexPersistenceLikely();
-				default:
-					return false;
-			}
-		} catch (_e) {
-			// Defensive: treat unexpected probe errors as unavailable.
-			return false;
-		}
-	}
-
-	private async probePluginDataWritable(): Promise<boolean> {
-		const probePath = this.fs.joinPluginDataPath(".__plugin_probe__");
-		try {
-			await this.fs.ensureVaultFolder(this.fs.joinPluginDataPath());
-			const ok = await this.fs.writeProbe(probePath);
-			if (!ok) throw new Error("probe failed");
-			return true;
+			const config = this.capabilityConfigs[cap as Capability];
+			if (!config) return false; // Defensive
+			const ok = await this.probeWritablePath(config);
+			this.state[cap].lastError = undefined;
+			return ok;
 		} catch (e) {
-			this.state.pluginDataWritable.lastError = e;
-			return false;
-		}
-	}
-
-	private async probeSnapshotsWritable(): Promise<boolean> {
-		const snapshotsDir = this.fs.joinPluginDataPath("snapshots");
-		const backupsDir = this.fs.joinPluginDataPath("backups");
-		const probePath = this.fs.joinPluginDataPath(
-			"snapshots",
-			".__snap_probe__",
-		);
-		try {
-			await this.fs.ensureVaultFolder(snapshotsDir);
-			await this.fs.ensureVaultFolder(backupsDir);
-			const ok = await this.fs.writeProbe(probePath);
-			if (!ok) throw new Error("probe failed");
-			return true;
-		} catch (e) {
-			this.state.snapshotsWritable.lastError = e;
-			return false;
-		}
-	}
-
-	private async probeIndexPersistenceLikely(): Promise<boolean> {
-		// We don't open the DB here; we only check that the adapter can create a file next to the DB
-		const probePath = this.fs.joinPluginDataPath(
-			"highlight_index.sqlite.__probe__",
-		);
-		try {
-			await this.fs.ensureVaultFolder(this.fs.joinPluginDataPath());
-			const ok = await this.fs.writeProbe(probePath);
-			if (!ok) throw new Error("probe failed");
-			return true;
-		} catch (e) {
-			this.state.indexPersistenceLikely.lastError = e;
+			// Defensive: treat unexpected probe errors as unavailable and capture error
+			this.state[cap].lastError = e;
 			return false;
 		}
 	}

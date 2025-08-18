@@ -1,5 +1,4 @@
 import { Notice, Plugin } from "obsidian";
-import { BookRefreshOrchestrator } from "src/services/BookRefreshOrchestrator";
 import { CommandManager } from "src/services/command/CommandManager";
 import { FileSystemService } from "src/services/FileSystemService";
 import { LoggingService } from "src/services/LoggingService";
@@ -7,7 +6,6 @@ import { TemplateManager } from "src/services/parsing/TemplateManager";
 import { LocalIndexService } from "src/services/vault/LocalIndexService";
 import { NoteIdentityService } from "src/services/vault/NoteIdentityService";
 import { SnapshotManager } from "src/services/vault/SnapshotManager";
-import { ConfirmModal } from "src/ui/ConfirmModal";
 import { SettingsTab } from "src/ui/SettingsTab";
 import { StatusBarManager } from "src/ui/StatusBarManager";
 import { DIContainer } from "./core/DIContainer";
@@ -157,6 +155,7 @@ export default class KoreaderImporterPlugin extends Plugin {
 	private async initCoreServices(): Promise<void> {
 		this.localIndexService =
 			this.diContainer.resolve<LocalIndexService>(LocalIndexService);
+		// Eager init for perf; LocalIndexService.whenReady() will lazy-init if needed
 		await this.localIndexService.initialize();
 
 		this.templateManager =
@@ -191,161 +190,105 @@ export default class KoreaderImporterPlugin extends Plugin {
 
 	// --- Command Registration ---
 	private registerPluginCommands(): void {
-		this.addCommand({
-			id: "import-koreader-highlights",
-			name: "Import KOReader Highlights",
-			callback: () => this.triggerImport(),
-		});
-
-		this.addCommand({
-			id: "scan-koreader-highlights",
-			name: "Scan KOReader for Highlights",
-			callback: () => this.triggerScan(),
-		});
-
-		this.addCommand({
-			id: "convert-comment-style",
-			name: "Convert All Files to Current Comment Style",
-			callback: () => this.triggerConvertCommentStyle(),
-		});
-
-		// Less-destructive cache clear (existing behavior)
-		this.addCommand({
-			id: "clear-koreader-importer-caches",
-			name: "Clear in-memory caches",
-			callback: () => this.triggerClearCaches(),
-		});
-
-		// Force re-scan and import (clear caches then import)
-		this.addCommand({
-			id: "force-import-koreader-highlights",
-			name: "Force Re-scan and Import KOReader Highlights",
-			callback: () => this.triggerForceImport(),
-		});
-
-		// Full reset and reload
-		this.addCommand({
-			id: "reset-koreader-importer",
-			name: "Troubleshoot: Full Reset and Reload Plugin",
-			callback: () => this.triggerFullReset(),
-		});
-
-		// Re-check capabilities (force probe refresh)
-		this.addCommand({
-			id: "recheck-environment-capabilities",
-			name: "Troubleshoot: Re-check environment capabilities",
-			callback: () => this.triggerRecheckCapabilities(),
-		});
-
-		// Refresh highlights for the currently active book note
-		this.addCommand({
-			id: "refresh-highlights-for-this-book",
-			name: "Refresh highlights for this book",
-			checkCallback: (checking) => {
-				const file = this.app.workspace.getActiveFile();
-				if (!file || file.extension !== "md") return false;
-				if (!checking) this.triggerRefreshCurrentNote(file);
-				return true;
-			},
-		});
+		const commandManager =
+			this.diContainer.resolve<CommandManager>(CommandManager);
+		for (const command of commandManager.getCommands()) {
+			this.addCommand(command);
+		}
 	}
 
-	// --- Utility Methods ---
-	private checkServiceStatus(operation: string): boolean {
-		if (!this.servicesInitialized) {
-			this.loggingService.error(
-				"KoreaderImporterPlugin",
-				`Cannot trigger ${operation}: Services not fully initialized.`,
-			);
+	// --- Public API used by Settings UI ---
+	public async triggerImport(): Promise<void> {
+		const commandManager =
+			this.diContainer.resolve<CommandManager>(CommandManager);
+		const res = await commandManager.executeImport();
+		if (res.status === "cancelled") {
+			new Notice("Import cancelled.");
+		} else if (res.status === "error") {
+			new Notice("Import failed. Check console for details.");
+		}
+	}
+
+	public async triggerScan(): Promise<void> {
+		const commandManager =
+			this.diContainer.resolve<CommandManager>(CommandManager);
+		const res = await commandManager.executeScan();
+		if (res.status === "success") {
+			const count = res.data?.fileCount ?? 0;
+			if (count === 0) {
+				new Notice("Scan complete: No KOReader highlight files found.");
+			} else {
+				new Notice(
+					`Scan complete: Report saved to "KOReader SDR Scan Report.md"`,
+				);
+			}
+		} else if (res.status === "cancelled") {
+			new Notice("Scan cancelled.");
+		} else if (res.status === "error") {
+			new Notice("Scan failed. Check console for details.");
+		}
+	}
+
+	public async triggerForceImport(): Promise<void> {
+		const commandManager =
+			this.diContainer.resolve<CommandManager>(CommandManager);
+		const res = await commandManager.executeForceImport();
+		if (res.status === "cancelled") {
+			new Notice("Force import cancelled.");
+		} else if (res.status === "error") {
+			new Notice("Force import failed. Check console for details.");
+		}
+	}
+
+	public async triggerClearCaches(): Promise<void> {
+		const commandManager =
+			this.diContainer.resolve<CommandManager>(CommandManager);
+		const res = await commandManager.executeClearCaches();
+		if (res.status === "success") {
+			new Notice("KOReader Importer caches cleared.");
+		} else if (res.status === "error") {
+			new Notice("Failed to clear caches. Check console for details.");
+		}
+	}
+
+	public async triggerConvertCommentStyle(): Promise<void> {
+		const commandManager =
+			this.diContainer.resolve<CommandManager>(CommandManager);
+		const res = await commandManager.executeConvertCommentStyle();
+		if (res.status === "cancelled") new Notice("Conversion cancelled.");
+		else if (res.status === "error")
+			new Notice("Conversion failed. Check console for details.");
+	}
+
+	public async triggerRecheckCapabilities(): Promise<void> {
+		const commandManager =
+			this.diContainer.resolve<CommandManager>(CommandManager);
+		const res = await commandManager.executeRecheckCapabilities();
+		if (res.status === "success" && res.data?.message) {
+			new Notice(`KOReader Importer: ${res.data.message}`, 5000);
+		} else if (res.status === "error") {
 			new Notice(
-				"Error: KOReader Importer services not ready. Please check settings or reload the plugin.",
+				"Failed to re-check capabilities. See console for details.",
 				7000,
 			);
-			return false;
 		}
-		return true;
 	}
 
-	// --- Methods Called by UI Elements ---
-	async triggerImport(): Promise<void> {
-		if (!this.checkServiceStatus("import")) return;
+	public async triggerFullReset(): Promise<void> {
 		const commandManager =
 			this.diContainer.resolve<CommandManager>(CommandManager);
-		await commandManager.executeImport();
-	}
-
-	async triggerScan(): Promise<void> {
-		if (!this.checkServiceStatus("scan")) return;
-		const commandManager =
-			this.diContainer.resolve<CommandManager>(CommandManager);
-		await commandManager.executeScan();
-	}
-
-	async triggerClearCaches(): Promise<void> {
-		if (!this.checkServiceStatus("cache clearing")) return;
-		const commandManager =
-			this.diContainer.resolve<CommandManager>(CommandManager);
-		await commandManager.executeClearCaches();
-	}
-
-	async triggerConvertCommentStyle(): Promise<void> {
-		if (!this.checkServiceStatus("comment style conversion")) return;
-		const commandManager =
-			this.diContainer.resolve<CommandManager>(CommandManager);
-		await commandManager.executeConvertCommentStyle();
-	}
-
-	// Force re-scan and import (clear caches then immediately import)
-	async triggerForceImport(): Promise<void> {
-		if (!this.checkServiceStatus("force import")) return;
-		await this.triggerClearCaches();
-		await this.triggerImport();
-	}
-
-	// Trigger full reset with confirmation
-	async triggerFullReset(): Promise<void> {
-		if (!this.checkServiceStatus("full reset")) return;
-		const confirmed = await new ConfirmModal(
-			this.app,
-			"Reset KOReader Importer?",
-			"This will delete the plugin's index files and caches. Your actual highlight notes in the vault are not affected. This action will also reload the plugin to ensure a completely clean state. Continue?",
-		).openAndConfirm();
-		if (!confirmed) return;
-		const commandManager =
-			this.diContainer.resolve<CommandManager>(CommandManager);
-		await commandManager.executeFullReset();
-	}
-
-	async triggerRecheckCapabilities(): Promise<void> {
-		if (!this.checkServiceStatus("re-check capabilities")) return;
-		const commandManager =
-			this.diContainer.resolve<CommandManager>(CommandManager);
-		await commandManager.executeRecheckCapabilities();
-	}
-
-	async triggerRefreshCurrentNote(
-		file?: import("obsidian").TFile,
-	): Promise<void> {
-		if (!this.checkServiceStatus("refresh current note")) return;
-		const active = file ?? this.app.workspace.getActiveFile();
-		if (!active) {
-			new Notice("No active file to refresh.", 4000);
-			return;
-		}
-		try {
-			const orchestrator = this.diContainer.resolve<BookRefreshOrchestrator>(
-				BookRefreshOrchestrator,
-			);
-			const changed = await orchestrator.refreshNote(active);
+		const res = await commandManager.executeFullResetWithConfirm();
+		if (res.status === "cancelled") return;
+		if (res.status === "success") {
 			new Notice(
-				changed
-					? "KOReader highlights refreshed for this book."
-					: "No changes found for this book.",
+				"KOReader Importer has been reset. Reloading plugin now...",
 				5000,
 			);
-		} catch (e: any) {
-			console.error("Book refresh failed", e);
-			new Notice(`Refresh failed: ${e?.message ?? e}`, 7000);
+		} else if (res.status === "error") {
+			new Notice(
+				"Error during reset. Check the developer console for details.",
+				10000,
+			);
 		}
 	}
 

@@ -1,6 +1,6 @@
 import { Notice } from "obsidian";
 import { DEFAULT_LOGS_FOLDER } from "src/constants";
-import { runPluginAction } from "src/lib/ui/actionUtils";
+import { runAsyncAction } from "src/lib/ui/actionUtils";
 import { LogLevel } from "src/services/LoggingService";
 import type { KoreaderHighlightImporterSettings } from "src/types";
 import { renderSettingsSection } from "../SettingsKit";
@@ -67,11 +67,14 @@ export class AdvancedSettingsSection extends SettingsSection {
 							text: "Reset Status",
 							warning: true,
 							onClick: async (btn) => {
-								await runPluginAction(() => this.plugin.triggerClearCaches(), {
-									button: btn,
-									inProgressText: "Resetting…",
-									completedText: "Reset Status",
-								});
+								await runAsyncAction(
+									btn,
+									() => this.plugin.triggerClearCaches(),
+									{
+										inProgress: "Resetting…",
+										original: "Reset Status",
+									},
+								);
 								new Notice(
 									"Import status has been reset. Run an import to re-process all books.",
 								);
@@ -89,11 +92,14 @@ export class AdvancedSettingsSection extends SettingsSection {
 							text: "Force Re-import",
 							warning: true,
 							onClick: async (btn) => {
-								await runPluginAction(() => this.plugin.triggerForceImport(), {
-									button: btn,
-									inProgressText: "Importing...",
-									completedText: "Force Re-import",
-								});
+								await runAsyncAction(
+									btn,
+									() => this.plugin.triggerForceImport(),
+									{
+										inProgress: "Importing...",
+										original: "Force Re-import",
+									},
+								);
 							},
 						},
 					],
@@ -122,12 +128,12 @@ export class AdvancedSettingsSection extends SettingsSection {
 						{
 							text: "Re-check",
 							onClick: async (btn) => {
-								await runPluginAction(
+								await runAsyncAction(
+									btn,
 									() => this.plugin.triggerRecheckCapabilities(),
 									{
-										button: btn,
-										inProgressText: "Checking…",
-										completedText: "Re-check",
+										inProgress: "Checking…",
+										original: "Re-check",
 									},
 								);
 							},
@@ -171,12 +177,12 @@ export class AdvancedSettingsSection extends SettingsSection {
 							text: "Convert All Files",
 							warning: true,
 							onClick: async (btn) => {
-								await runPluginAction(
+								await runAsyncAction(
+									btn,
 									() => this.plugin.triggerConvertCommentStyle(),
 									{
-										button: btn,
-										inProgressText: "Converting...",
-										completedText: "Convert All Files",
+										inProgress: "Converting...",
+										original: "Convert All Files",
 									},
 								);
 							},

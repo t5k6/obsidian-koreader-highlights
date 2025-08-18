@@ -97,6 +97,25 @@ export function formatDateAsDailyNote(dateStr: string): string {
 }
 
 /**
+ * Returns current date (or provided date) in YYYY-MM-DD format for daily notes/filenames.
+ * @param date Optional Date (defaults to now)
+ */
+export function formatDateForDailyNote(date: Date = new Date()): string {
+	// ISO 8601 date prefix, stable and timezone-safe for filenames
+	return date.toISOString().slice(0, 10);
+}
+
+/**
+ * Returns a detailed, filesystem-safe timestamp (e.g., 2025-08-19T05-37-12-345Z).
+ * Useful for versioned filenames and logs.
+ * @param date Optional Date (defaults to now)
+ */
+export function formatDateForTimestamp(date: Date = new Date()): string {
+	// Replace colon and dot which are problematic on some filesystems
+	return date.toISOString().replace(/[:.]/g, "-");
+}
+
+/**
  * Formats a Unix timestamp to readable date.
  * @param timestamp - Unix timestamp (seconds since epoch)
  * @returns Formatted date like "Jan 1, 2025"

@@ -5,10 +5,6 @@ import type { Annotation, CommentStyle, PositionObject } from "src/types";
 const HTML_KOHL_PATTERN_SRC = "<!--\\s*KOHL\\s*({[\\s\\S]*?})\\s*-->";
 const MD_KOHL_PATTERN_SRC = "%%\\s*KOHL\\s*({[\\s\\S]*?})\\s*%%";
 
-// Combined pattern with named capture groups
-const COMBINED_KOHL_PATTERN_SRC =
-	"(?:<!--\\s*KOHL\\s*(?<html>{[\\s\\S]*?})\\s*-->)|(?:%%\\s*KOHL\\s*(?<md>{[\\s\\S]*?})\\s*%%)";
-
 // Non-global testers for safe one-off .test() calls (no shared state)
 const HTML_KOHL_TEST = new RegExp(HTML_KOHL_PATTERN_SRC);
 const MD_KOHL_TEST = new RegExp(MD_KOHL_PATTERN_SRC);
@@ -21,6 +17,15 @@ interface KohlMetadata {
 	pos1: string | PositionObject | undefined; // End position
 	t: string; // Datetime timestamp
 }
+
+type Style = Extract<CommentStyle, "html" | "md">;
+
+type Marker = {
+	style: Style;
+	index: number;
+	end: number;
+	json: string;
+};
 
 /**
  * Safely parses JSON string without throwing errors.
@@ -64,55 +69,65 @@ function splitTextAndNote(block: string): { text: string; note?: string } {
 export function extractHighlightsWithStyle(
 	content: string,
 	preferredStyle: CommentStyle,
-): { annotations: Annotation[]; usedStyle: CommentStyle | null } {
-	if (preferredStyle === "none") return { annotations: [], usedStyle: null };
-
-	// Single-pass across both styles
-	const combined = new RegExp(COMBINED_KOHL_PATTERN_SRC, "g");
-	const allMatches = Array.from(content.matchAll(combined)) as Array<
-		RegExpMatchArray & { groups?: { html?: string; md?: string } }
-	>;
-
-	if (allMatches.length === 0) return { annotations: [], usedStyle: null };
-
-	// Summarize availability
-	const htmlCount = allMatches.reduce(
-		(acc, m) => acc + (m.groups?.html ? 1 : 0),
-		0,
-	);
-	const mdCount = allMatches.length - htmlCount;
-
-	// Decide which style to use (preserve legacy: prefer HTML when both)
-	let usedStyle: CommentStyle | null = null;
-	if (preferredStyle === "html" && htmlCount > 0) usedStyle = "html";
-	else if (preferredStyle === "md" && mdCount > 0) usedStyle = "md";
-	if (!usedStyle) {
-		if (htmlCount > 0 && mdCount > 0) usedStyle = "html";
-		else if (htmlCount > 0) usedStyle = "html";
-		else if (mdCount > 0) usedStyle = "md";
+): {
+	annotations: Annotation[];
+	usedStyle: CommentStyle | null;
+	hasMixedStyles: boolean;
+	skippedCount: number;
+} {
+	if (preferredStyle === "none") {
+		return {
+			annotations: [],
+			usedStyle: null,
+			hasMixedStyles: false,
+			skippedCount: 0,
+		};
 	}
-	if (!usedStyle) return { annotations: [], usedStyle: null };
 
-	const isHtml = usedStyle === "html";
+	const allMarkers = scanAll(content);
+	if (allMarkers.length === 0) {
+		return {
+			annotations: [],
+			usedStyle: null,
+			hasMixedStyles: false,
+			skippedCount: 0,
+		};
+	}
 
-	// Filter matches to chosen style only
-	const matches = allMatches
-		.filter((m) => (isHtml ? !!m.groups?.html : !!m.groups?.md))
-		.map((m) => ({
-			index: m.index!,
-			end: m.index! + m[0].length,
-			json: (isHtml ? m.groups?.html : m.groups?.md) as string,
-		}));
+	// Determine if mixed styles are present from the scanned markers
+	const stylesPresent = new Set(allMarkers.map((m) => m.style));
+	const hasMixedStyles = stylesPresent.size > 1;
+
+	const usedStyle = chooseStyle(preferredStyle, allMarkers);
+	if (!usedStyle) {
+		return {
+			annotations: [],
+			usedStyle: null,
+			hasMixedStyles,
+			skippedCount: 0,
+		};
+	}
 
 	const annotations: Annotation[] = [];
+	let skippedCount = 0;
 
-	for (let i = 0; i < matches.length; i++) {
-		const meta = safeParseJson(matches[i].json);
-		if (!meta || !meta.id) continue;
+	for (let i = 0; i < allMarkers.length; i++) {
+		const m = allMarkers[i];
 
-		const startPos = matches[i].end;
+		// This is the key: we use the full, sorted list of markers for slicing,
+		// but only process the ones that match our chosen style.
+		if (m.style !== usedStyle) continue;
+
+		const meta = safeParseJson(m.json);
+		if (!meta || !meta.id) {
+			skippedCount++;
+			continue;
+		}
+
+		const startPos = m.end;
 		const endPos =
-			i + 1 < matches.length ? matches[i + 1].index : content.length;
+			i + 1 < allMarkers.length ? allMarkers[i + 1].index : content.length;
+
 		const visibleText = content.slice(startPos, endPos).trim();
 		const { text, note } = splitTextAndNote(visibleText);
 
@@ -127,7 +142,7 @@ export function extractHighlightsWithStyle(
 		});
 	}
 
-	return { annotations, usedStyle };
+	return { annotations, usedStyle, hasMixedStyles, skippedCount };
 }
 
 /**
@@ -235,4 +250,39 @@ export function convertCommentStyle(
 			? `<!-- KOHL ${newJsonMeta} -->`
 			: `%% KOHL ${newJsonMeta} %%`;
 	});
+}
+
+function scanStyle(content: string, style: Style): Marker[] {
+	const re = new RegExp(
+		style === "html" ? HTML_KOHL_PATTERN_SRC : MD_KOHL_PATTERN_SRC,
+		"g",
+	);
+	const out: Marker[] = [];
+	for (const m of content.matchAll(re)) {
+		const index = (m as RegExpMatchArray).index!;
+		out.push({ style, index, end: index + m[0].length, json: m[1] as string });
+	}
+	return out;
+}
+
+function scanAll(content: string): Marker[] {
+	const hasHtml = HTML_KOHL_TEST.test(content);
+	const hasMd = MD_KOHL_TEST.test(content);
+
+	const htmlMarkers = hasHtml ? scanStyle(content, "html") : [];
+	const mdMarkers = hasMd ? scanStyle(content, "md") : [];
+
+	if (htmlMarkers.length === 0) return mdMarkers;
+	if (mdMarkers.length === 0) return htmlMarkers;
+
+	const merged = [...htmlMarkers, ...mdMarkers];
+	merged.sort((a, b) => a.index - b.index || (a.style < b.style ? -1 : 1));
+	return merged;
+}
+
+function chooseStyle(preferred: Style, markers: Marker[]): Style | null {
+	const present = new Set<Style>(markers.map((m) => m.style));
+	if (present.has(preferred)) return preferred;
+	const fallback: Style = preferred === "html" ? "md" : "html";
+	return present.has(fallback) ? fallback : null;
 }

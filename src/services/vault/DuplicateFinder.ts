@@ -1,10 +1,17 @@
-import { type App, normalizePath, TFile, TFolder, type Vault } from "obsidian";
+import {
+	type App,
+	normalizePath,
+	type TFile,
+	TFolder,
+	type Vault,
+} from "obsidian";
 import type { CacheManager } from "src/lib/cache/CacheManager";
 import { isErr } from "src/lib/core/result";
 import {
 	bookKeyFromDocProps,
 	getHighlightKey,
 } from "src/lib/formatting/formatUtils";
+import { isTFile, isTFolder } from "src/lib/obsidian/typeguards";
 import { extractHighlightsWithStyle } from "src/lib/parsing/highlightExtractor";
 import { toMatchKey } from "src/lib/pathing/pathingUtils";
 import type KoreaderImporterPlugin from "src/main";
@@ -71,7 +78,7 @@ export class DuplicateFinder {
 				`${this.plugin.settings.highlightsFolder}/${expectedFileName}`,
 			);
 			const direct = this.app.vault.getAbstractFileByPath(expectedPath);
-			if (direct instanceof TFile) {
+			if (isTFile(direct)) {
 				const analysis = await this.analyzeDuplicate(
 					direct,
 					luaMetadata.annotations,
@@ -132,7 +139,7 @@ export class DuplicateFinder {
 		const paths = await this.LocalIndexService.findExistingBookFiles(bookKey);
 		const filesFromIndex = paths
 			.map((p) => this.vault.getAbstractFileByPath(p))
-			.filter((f): f is TFile => f instanceof TFile);
+			.filter((f): f is TFile => isTFile(f));
 
 		if (this.LocalIndexService.isIndexPersistent()) {
 			this.potentialDuplicatesCache.set(bookKey, filesFromIndex);
@@ -153,7 +160,7 @@ export class DuplicateFinder {
 
 		const settingsFolder = this.plugin.settings.highlightsFolder ?? "";
 		const root = this.vault.getAbstractFileByPath(settingsFolder);
-		if (!(root instanceof TFolder)) {
+		if (!isTFolder(root)) {
 			this.log.warn(
 				`Highlights folder not found or not a directory: '${settingsFolder}'`,
 			);

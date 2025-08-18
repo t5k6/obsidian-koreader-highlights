@@ -14,6 +14,7 @@ import type { CacheManager } from "src/lib/cache/CacheManager";
 import type { LruCache } from "src/lib/cache/LruCache";
 import { ConcurrentDatabase } from "src/lib/concurrency/ConcurrentDatabase";
 import { isErr } from "src/lib/core/result";
+import { Pathing } from "src/lib/pathing/pathingUtils";
 import type KoreaderImporterPlugin from "src/main";
 import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
 import type {
@@ -452,6 +453,8 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 	private readyResolve!: () => void;
 	private readonly readyP: Promise<void>;
 	private rebuildP: Promise<any> | null = null;
+	// Warn once if readiness times out across concurrent callers
+	private readinessTimeoutWarned = false;
 
 	// Injected dependencies
 	private readonly plugin!: KoreaderImporterPlugin;
@@ -517,12 +520,9 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		await this.ensureIndexReady();
 		this.registerVaultEvents();
 		if (this.indexState === "in_memory") {
-			// Kick off async rebuild once and gate readiness on its completion
+			// Kick off async rebuild once; readiness is not gated on its completion
 			if (!this.rebuildP) {
-				this.rebuildP = this.startBackgroundRebuild().finally(() => {
-					// Signal readiness regardless of rebuild success
-					this.readyResolve();
-				});
+				this.rebuildP = this.startBackgroundRebuild();
 			}
 		}
 	}
@@ -540,21 +540,50 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 	}
 
 	/**
-	 * Returns a promise that resolves when the index is in a minimally consistent state
-	 * (either loaded from disk or after the initial in-memory rebuild is complete).
+	 * Resolves when the index is available (DB opened and schema applied).
+	 * In in-memory mode, a background rebuild continues after readiness.
 	 * Includes a fail-safe timeout to prevent indefinite blocking.
 	 */
 	public async whenReady(): Promise<void> {
+		// 1) Ensure initialization has been triggered (safe: ensureIndexReady is idempotent)
+		await this.ensureIndexReady();
+
+		// Fast-path
+		if (this.isReadyFlag) return;
+
+		// 2) Race with a timeout, but cancel the timer if readiness wins to avoid stray logs
 		const READY_TIMEOUT_MS = 15_000;
-		const timeoutPromise = new Promise<void>((resolve) => {
-			setTimeout(() => {
-				this.log.warn(
-					`Index readiness check timed out after ${READY_TIMEOUT_MS}ms.`,
-				);
-				resolve();
+		let timer: ReturnType<typeof setTimeout> | null = null;
+
+		const timeoutPromise = new Promise<"timeout">((resolve) => {
+			timer = setTimeout(() => {
+				// Log once across concurrent callers to avoid spam
+				if (!this.isReadyFlag && !this.readinessTimeoutWarned) {
+					this.readinessTimeoutWarned = true;
+					this.log.warn(
+						`Index readiness check timed out after ${READY_TIMEOUT_MS}ms.`,
+					);
+				}
+				resolve("timeout");
 			}, READY_TIMEOUT_MS);
 		});
-		return Promise.race([this.readyP, timeoutPromise]);
+
+		const winner = await Promise.race([
+			this.readyP.then(() => "ready" as const),
+			timeoutPromise,
+		]);
+
+		if (winner === "ready" && timer) {
+			clearTimeout(timer);
+		}
+	}
+
+	/**
+	 * Optional: await full rebuild when using in-memory index. No-op for persistent.
+	 */
+	public async whenRebuildComplete(): Promise<void> {
+		if (this.indexState !== "in_memory") return;
+		await this.rebuildP?.catch(() => {});
 	}
 
 	/**
@@ -796,19 +825,7 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 		});
 		if (!raw) return null;
 		// Normalize to be relative to mount root if an absolute path was stored
-		return this.stripRootFromDevicePath(raw);
-	}
-
-	/**
-	 * Strips a Windows drive (e.g., "E:\\") or leading slash from a stored device path
-	 * to make it relative to the mount root.
-	 */
-	private stripRootFromDevicePath(p: string): string {
-		// Windows drive like "E:\\" or "E:/"
-		const win = p.replace(/^[A-Za-z]:[\\/]+/, "");
-		if (win !== p) return win;
-		// POSIX root
-		return p.replace(/^\/+/, "");
+		return Pathing.stripRootFromDevicePath(raw);
 	}
 
 	// Centralized SQL helpers to reduce boilerplate
@@ -919,7 +936,9 @@ export class LocalIndexService implements Disposable, SettingsObserver {
 				},
 				undefined, // in-memory persistence handled separately
 			);
-			// Rebuild will be started in initialize(); readiness gated there.
+			// The index is now available for reads/writes. Signal readiness immediately.
+			this.readyResolve();
+			// Rebuild starts in initialize() and will populate this ready-but-empty index.
 		} catch (memErr) {
 			this.log.error(
 				"Failed to initialize in-memory index database.",

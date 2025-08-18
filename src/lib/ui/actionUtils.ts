@@ -1,39 +1,70 @@
 // Minimal interface so callers can provide a ButtonComponent or a lightweight shim
-interface ButtonLike {
-	setDisabled: (disabled: boolean) => void;
-	setButtonText: (text: string) => void;
-	// Optional, only present on Obsidian's ButtonComponent
-	buttonEl?: HTMLElement;
+// import type { ButtonComponent } from "obsidian";
+
+import { type ButtonComponent, Notice } from "obsidian";
+import { isErr, type Result } from "src/lib/core/result";
+
+type LabelSet = { inProgress: string; original?: string };
+
+function isButtonComponent(x: unknown): x is ButtonComponent {
+	return (
+		!!x &&
+		typeof x === "object" &&
+		"setDisabled" in (x as any) &&
+		"setButtonText" in (x as any)
+	);
 }
 
-export async function runPluginAction(
-	action: () => Promise<void>,
-	options: {
-		button?: ButtonLike;
-		inProgressText?: string;
-		completedText?: string;
-	},
-): Promise<void> {
-	const { button, inProgressText, completedText } = options;
+/**
+ * Shell-level helper: awaits a Result-returning promise and shows a Notice on Err.
+ * Keeps core services free of UI concerns.
+ */
+export async function notifyOnError<T, E = any>(
+	operation: Promise<Result<T, E>>,
+	opts?: { message?: string | ((err: E) => string); timeout?: number },
+): Promise<Result<T, E>> {
+	const res = await operation;
+	if (isErr(res)) {
+		const msg =
+			typeof opts?.message === "function"
+				? opts.message(res.error as E)
+				: (opts?.message ?? "Operation failed");
+		new Notice(msg, opts?.timeout ?? 7000);
+	}
+	return res;
+}
 
-	const originalText = button?.buttonEl ? button.buttonEl.innerText : undefined;
-
-	try {
-		if (button) {
-			button.setDisabled(true);
-			if (inProgressText) {
-				button.setButtonText(inProgressText);
-			}
+/**
+ * Simplified async UI helper. Disables the component and updates its label while the action runs,
+ * then restores the original state.
+ */
+export async function runAsyncAction<T>(
+	component: ButtonComponent | HTMLElement,
+	action: () => Promise<T>,
+	labels: LabelSet,
+): Promise<T> {
+	if (isButtonComponent(component)) {
+		const originalText = component.buttonEl?.innerText ?? "";
+		component.setDisabled(true).setButtonText(labels.inProgress);
+		try {
+			return await action();
+		} finally {
+			component
+				.setDisabled(false)
+				.setButtonText(labels.original ?? originalText);
 		}
-
-		await action();
-	} finally {
-		if (button) {
-			button.setDisabled(false);
-			const textToShow = completedText ?? originalText;
-			if (textToShow !== undefined) {
-				button.setButtonText(textToShow);
-			}
+	} else {
+		const el = component as HTMLElement;
+		const originalAria = el.ariaLabel ?? "";
+		el.classList.add("is-disabled");
+		el.style.pointerEvents = "none";
+		el.ariaLabel = labels.inProgress;
+		try {
+			return await action();
+		} finally {
+			el.classList.remove("is-disabled");
+			el.style.pointerEvents = "";
+			el.ariaLabel = labels.original ?? originalAria;
 		}
 	}
 }

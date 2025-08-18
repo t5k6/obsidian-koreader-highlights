@@ -1,5 +1,6 @@
 import { isErr } from "src/lib/core/result";
 import { getFileNameWithoutExt } from "src/lib/pathing/pathingUtils";
+import type { LuaMetadata } from "src/types";
 import type { ImportContext, ImportPlan, PlannerIO } from "./types";
 
 type Step = (
@@ -39,13 +40,19 @@ export const FastSkipStep: Step = async (ctx, io) => {
 };
 
 export const ParseEnrichStep: Step = async (ctx, io) => {
-	// Prefer parser.parseFile which reads via SDRFinder internally and returns LuaMetadata | null
-	const luaMetadata = await io.parser.parseFile(ctx.sdrPath);
-	if (!luaMetadata) {
-		io.log.warn?.(`parse: failed to read/parse metadata at ${ctx.sdrPath}`);
+	const luaContent = await io.device.readMetadataFileContent(ctx.sdrPath);
+	if (!luaContent) {
+		io.log.warn?.(`No metadata content found in ${ctx.sdrPath}`);
 		const plan = { kind: "SKIP", reason: "NO_ANNOTATIONS" } as const;
 		return { kind: "decide", ctx, plan };
 	}
+	const { meta, diagnostics } = io.parser(luaContent);
+	for (const d of diagnostics) {
+		if (d.severity === "error") io.log.error?.(d.message);
+		else if (d.severity === "warn") io.log.warn?.(d.message);
+		else io.log.info?.(d.message);
+	}
+	const luaMetadata: LuaMetadata = { ...meta, originalFilePath: ctx.sdrPath };
 
 	if (!luaMetadata.annotations || luaMetadata.annotations.length === 0) {
 		io.log.info?.(`Skipping ${ctx.metadataPath}: No highlights`);
@@ -58,7 +65,7 @@ export const ParseEnrichStep: Step = async (ctx, io) => {
 		null,
 	);
 
-	const stats = await io.statsSvc.findBookStatistics(
+	const stats = await io.device.findBookStatistics(
 		luaMetadata.docProps.title,
 		luaMetadata.docProps.authors,
 		luaMetadata.md5,

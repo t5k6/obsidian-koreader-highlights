@@ -1,4 +1,5 @@
 import { parse } from "node:path";
+import type { CacheManager } from "src/lib/cache/CacheManager";
 import { LruCache } from "src/lib/cache/LruCache";
 
 export type FileSafeOptions = {
@@ -16,11 +17,29 @@ export type MatchKeyOptions = {
 };
 
 // Small, dedicated caches
-const fileSafeCache = new LruCache<string, string>(500);
-const matchKeyCache = new LruCache<string, string>(1000);
+// Start with local fallbacks; will be replaced by CacheManager-registered caches via initPathingCaches().
+let fileSafeCache: LruCache<string, string> = new LruCache<string, string>(500);
+let matchKeyCache: LruCache<string, string> = new LruCache<string, string>(
+	1000,
+);
 
 // Avoid caching pathological inputs
 const MAX_CACHEABLE_INPUT_LEN = 4096;
+
+/**
+ * Registers pathing slug caches with the central CacheManager and swaps the internal references.
+ * Call once during bootstrap.
+ */
+export function initPathingCaches(cacheManager: CacheManager): void {
+	fileSafeCache = cacheManager.createLru<string, string>(
+		"pathing.slug.fileSafe",
+		500,
+	);
+	matchKeyCache = cacheManager.createLru<string, string>(
+		"pathing.slug.matchKey",
+		1000,
+	);
+}
 
 // Public test/ops hooks
 export function clearSlugCaches(): void {
@@ -308,6 +327,18 @@ export function getFileNameWithoutExt(filePath: string | undefined): string {
 	return parse(filePath).name;
 }
 
+/**
+ * Strips a Windows drive (e.g., "E:\\" or "E:/") or leading slash from a device path
+ * to make it relative to the mount root.
+ */
+export function stripRootFromDevicePath(p: string): string {
+	// Windows drive like "E:\\" or "E:/"
+	const win = p.replace(/^[A-Za-z]:[\\/]+/, "");
+	if (win !== p) return win;
+	// POSIX root
+	return p.replace(/^\/+/, "");
+}
+
 // Consolidated API object (keep Slug name for compatibility, but expanded)
 export const Slug = {
 	normalizeWhitespace,
@@ -320,6 +351,7 @@ export const Slug = {
 	simplifySdrName,
 	normalizeFileNamePiece,
 	getFileNameWithoutExt,
+	stripRootFromDevicePath,
 };
 
 // Also provide a descriptive alias

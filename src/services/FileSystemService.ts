@@ -662,6 +662,55 @@ export class FileSystemService {
 		}
 	}
 
+	/**
+	 * Result-based read of a TFile's text content using Obsidian's Vault API with retry.
+	 * Centralizes retry policy for higher-level vault reads.
+	 */
+	public async readVaultTextWithRetry(
+		file: TFile,
+	): Promise<Result<string, AppFailure>> {
+		try {
+			const text = await withFsRetry(() => this.vault.read(file), {
+				maxAttempts: 5,
+				baseDelayMs: 30,
+			});
+			return ok(text);
+		} catch (e: any) {
+			const code = e?.code ?? e?.Code;
+			if (code === "ENOENT") return err({ kind: "NotFound", path: file.path });
+			if (code === "EACCES" || code === "EPERM")
+				return err({ kind: "PermissionDenied", path: file.path });
+			return err({ kind: "ReadFailed", path: file.path, cause: e });
+		}
+	}
+
+	/**
+	 * Result-based modify (write) of a TFile's text content using Obsidian's Vault API with retry.
+	 * Centralizes retry policy for higher-level vault writes.
+	 */
+	public async modifyVaultFileWithRetry(
+		file: TFile,
+		content: string,
+	): Promise<Result<void, AppFailure>> {
+		try {
+			await withFsRetry(() => this.vault.modify(file, content), {
+				maxAttempts: 6,
+				baseDelayMs: 40,
+			});
+			return ok(void 0);
+		} catch (e: any) {
+			const code = e?.code ?? e?.Code;
+			if (code === "ENOENT") return err({ kind: "NotFound", path: file.path });
+			if (code === "EACCES" || code === "EPERM")
+				return err({ kind: "PermissionDenied", path: file.path });
+			if (code === "ENOTDIR")
+				return err({ kind: "NotADirectory", path: file.path });
+			if (code === "EISDIR")
+				return err({ kind: "IsADirectory", path: file.path });
+			return err({ kind: "WriteFailed", path: file.path, cause: e });
+		}
+	}
+
 	/* ------------------------------------------------------------------ */
 	/*                         AUTO-ROUTING HELPERS                        */
 	/* ------------------------------------------------------------------ */

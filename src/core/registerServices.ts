@@ -1,24 +1,19 @@
 import type { App } from "obsidian";
 import { CacheManager } from "src/lib/cache/CacheManager";
+import { initPathingCaches } from "src/lib/pathing/pathingUtils";
 import type KoreaderImporterPlugin from "src/main";
-import { BookRefreshOrchestrator } from "src/services/BookRefreshOrchestrator";
 import { CapabilityManager } from "src/services/CapabilityManager";
 import { CommandManager } from "src/services/command/CommandManager";
-import { DeviceStatisticsService } from "src/services/device/DeviceStatisticsService";
-import { KoreaderEnvironmentService } from "src/services/device/KoreaderEnvironmentService";
-import { SDRFinder } from "src/services/device/SDRFinder";
+import { DeviceService } from "src/services/device/DeviceService";
 import { FileSystemService } from "src/services/FileSystemService";
 import { ImportPipelineService } from "src/services/ImportPipelineService";
 import { ImportExecutorService } from "src/services/import/ImportExecutorService";
 import { ImportPlannerService } from "src/services/import/ImportPlannerService";
 import { LoggingService } from "src/services/LoggingService";
-import { FrontmatterGenerator } from "src/services/parsing/FrontmatterGenerator";
 import { FrontmatterService } from "src/services/parsing/FrontmatterService";
-import { MetadataParser } from "src/services/parsing/MetadataParser";
 import { TemplateManager } from "src/services/parsing/TemplateManager";
 import { SqlJsManager } from "src/services/SqlJsManager";
-import { ObsidianPromptService } from "src/services/ui/ObsidianPromptService";
-import { ContentGenerator } from "src/services/vault/ContentGenerator";
+import { PromptService } from "src/services/ui/PromptService";
 import { DuplicateFinder } from "src/services/vault/DuplicateFinder";
 import { FileNameGenerator } from "src/services/vault/FileNameGenerator";
 import { LocalIndexService } from "src/services/vault/LocalIndexService";
@@ -26,7 +21,6 @@ import { MergeHandler } from "src/services/vault/MergeHandler";
 import { MergeService } from "src/services/vault/MergeService";
 import { NoteCreationService } from "src/services/vault/NoteCreationService";
 import { NoteIdentityService } from "src/services/vault/NoteIdentityService";
-import { NoteMaintenanceService } from "src/services/vault/NoteMaintenanceService";
 import { SnapshotManager } from "src/services/vault/SnapshotManager";
 import type { DuplicateHandlingSession, DuplicateMatch } from "src/types";
 import { DuplicateHandlingModal } from "src/ui/DuplicateModal";
@@ -36,7 +30,6 @@ import {
 	APP_TOKEN,
 	DUPLICATE_MODAL_FACTORY_TOKEN,
 	PLUGIN_TOKEN,
-	PROMPT_SERVICE_TOKEN,
 	VAULT_TOKEN,
 } from "./tokens";
 
@@ -60,12 +53,17 @@ export function registerServices(
 	);
 
 	// --- Level 0: Foundational (No internal dependencies) ---
-	container.register(FrontmatterGenerator, []);
 
 	// --- Level 0.5: Depends on LoggingService ---
 	container.register(CacheManager, [LoggingService]);
+	// Register pathing slug caches with the central CacheManager so global clears affect them.
+	initPathingCaches(container.resolve(CacheManager));
 	container.register(FileNameGenerator, [LoggingService]);
-	container.register(FrontmatterService, [APP_TOKEN, LoggingService]);
+	container.register(FrontmatterService, [
+		APP_TOKEN,
+		LoggingService,
+		FileSystemService,
+	]);
 	container.register(NoteIdentityService, [
 		APP_TOKEN,
 		FrontmatterService,
@@ -80,31 +78,16 @@ export function registerServices(
 		CacheManager,
 	]);
 
-	// Central KOReader environment discovery
-	container.register(KoreaderEnvironmentService, [
+	// Unified DeviceService (environment + scanning + statistics)
+	container.register(DeviceService, [
 		PLUGIN_TOKEN,
 		FileSystemService,
+		SqlJsManager,
 		CacheManager,
 		LoggingService,
 	]);
 
-	// Orchestrator for single-book refresh
-	container.register(BookRefreshOrchestrator, [
-		LocalIndexService,
-		ImportPipelineService,
-		SDRFinder,
-		KoreaderEnvironmentService,
-		FileSystemService,
-		LoggingService,
-	]);
 	container.register(SqlJsManager, [LoggingService, FileSystemService]);
-	container.register(SDRFinder, [
-		PLUGIN_TOKEN,
-		CacheManager,
-		FileSystemService,
-		LoggingService,
-		KoreaderEnvironmentService,
-	]);
 	container.register(CapabilityManager, [
 		APP_TOKEN,
 		FileSystemService,
@@ -127,42 +110,27 @@ export function registerServices(
 		LoggingService,
 	]);
 
-	// Maintenance utilities for existing notes (non-import)
-	container.register(NoteMaintenanceService, [
-		PLUGIN_TOKEN,
-		FileSystemService,
-		FrontmatterService,
-		LoggingService,
-		CacheManager,
-	]);
-
 	// --- UI-specific Services ---
 	container.register(StatusBarManager, [
 		APP_TOKEN,
 		PLUGIN_TOKEN,
 		LocalIndexService,
-		BookRefreshOrchestrator,
+		CommandManager,
 	]);
 
 	// Prompt/Interaction service
-	container.register(ObsidianPromptService, [APP_TOKEN]);
-	container.registerValue(
-		PROMPT_SERVICE_TOKEN,
-		container.resolve(ObsidianPromptService),
-	);
+	// Policy: reserve symbol tokens for factories or primitives only. Resolve concrete services by class.
+	container.register(PromptService, [APP_TOKEN]);
 
 	// --- Level 2: Depends on Level 1 ---
-	container.register(ContentGenerator, [TemplateManager, PLUGIN_TOKEN]);
-	container.register(MetadataParser, [SDRFinder, CacheManager, LoggingService]);
 	container.register(MergeService, [
 		PLUGIN_TOKEN,
 		SnapshotManager,
 		FrontmatterService,
-		FrontmatterGenerator,
-		ContentGenerator,
 		LoggingService,
 		FileSystemService,
 		NoteIdentityService,
+		TemplateManager,
 	]);
 
 	container.register(MergeHandler, [
@@ -206,12 +174,11 @@ export function registerServices(
 	container.register(NoteCreationService, [
 		FileSystemService,
 		FrontmatterService,
-		FrontmatterGenerator,
-		ContentGenerator,
 		FileNameGenerator,
 		SnapshotManager,
 		NoteIdentityService,
 		LoggingService,
+		TemplateManager,
 		PLUGIN_TOKEN,
 	]);
 
@@ -221,19 +188,15 @@ export function registerServices(
 		PLUGIN_TOKEN,
 		FileSystemService,
 		LocalIndexService,
-		MetadataParser,
-		SDRFinder,
-		DeviceStatisticsService,
+		DeviceService,
 		DuplicateFinder,
 		LoggingService,
 	]);
 	container.register(ImportExecutorService, [
 		PLUGIN_TOKEN,
-		ContentGenerator,
 		MergeHandler,
 		NoteCreationService,
 		FrontmatterService,
-		FrontmatterGenerator,
 		LoggingService,
 		FileSystemService,
 		FileNameGenerator,
@@ -244,11 +207,11 @@ export function registerServices(
 	container.register(ImportPipelineService, [
 		APP_TOKEN,
 		PLUGIN_TOKEN,
-		SDRFinder,
+		DeviceService,
 		LocalIndexService,
 		SnapshotManager,
 		LoggingService,
-		PROMPT_SERVICE_TOKEN,
+		PromptService,
 		ImportPlannerService,
 		ImportExecutorService,
 	]);
@@ -258,21 +221,12 @@ export function registerServices(
 		APP_TOKEN,
 		PLUGIN_TOKEN,
 		ImportPipelineService,
-		SDRFinder,
-		KoreaderEnvironmentService,
+		DeviceService,
 		CacheManager,
 		LoggingService,
 		LocalIndexService,
 		CapabilityManager,
-		NoteMaintenanceService,
+		FrontmatterService,
 		FileSystemService,
-	]);
-	container.register(DeviceStatisticsService, [
-		PLUGIN_TOKEN,
-		FileSystemService,
-		SqlJsManager,
-		LoggingService,
-		CacheManager,
-		KoreaderEnvironmentService,
 	]);
 }

@@ -1,6 +1,14 @@
 // Credits go to Liam's Periodic Notes Plugin: https://github.com/liamcain/obsidian-periodic-notes
 
-import { createPopper, type Instance as PopperInstance } from "@popperjs/core";
+import {
+	autoUpdate,
+	computePosition,
+	flip,
+	type Middleware,
+	type Placement,
+	shift,
+	size,
+} from "@floating-ui/dom";
 import { type App, Component, type ISuggestOwner, Scope } from "obsidian";
 
 const wrapAround = (value: number, size: number): number => {
@@ -111,7 +119,7 @@ export abstract class TextInputSuggest<T>
 	protected app: App;
 	protected inputEl: HTMLInputElement | HTMLTextAreaElement;
 
-	private popper: PopperInstance | undefined;
+	private cleanupAutoUpdate: (() => void) | undefined;
 	private scope: Scope;
 	private suggestEl: HTMLElement;
 	private suggest: Suggest<T>;
@@ -174,24 +182,43 @@ export abstract class TextInputSuggest<T>
 		}
 
 		container.appendChild(this.suggestEl);
-		this.popper = createPopper(inputEl, this.suggestEl, {
-			placement: "bottom-start",
-			modifiers: [
-				{
-					name: "sameWidth",
-					enabled: true,
-					fn: ({ state, instance }) => {
-						const targetWidth = `${state.rects.reference.width}px`;
-						if (state.styles.popper.width !== targetWidth) {
-							state.styles.popper.width = targetWidth;
-							instance.update();
-						}
-					},
-					phase: "beforeWrite",
-					requires: ["computeStyles"],
+		// Use floating-ui to position the suggestion dropdown
+		const placement: Placement = "bottom-start";
+		const middleware: Middleware[] = [
+			flip(),
+			shift({ padding: 4 }),
+			size({
+				apply({
+					rects,
+					elements,
+				}: {
+					rects: { reference: { width: number } };
+					elements: { floating: HTMLElement };
+				}) {
+					elements.floating.style.width = `${rects.reference.width}px`;
 				},
-			],
+			}),
+		];
+		// Ensure style baseline
+		Object.assign(this.suggestEl.style, {
+			position: "fixed",
+			top: "0px",
+			left: "0px",
+			zIndex: "9999",
 		});
+
+		const update = async () => {
+			const { x, y } = await computePosition(inputEl, this.suggestEl, {
+				placement,
+				middleware,
+				strategy: "fixed",
+			});
+			Object.assign(this.suggestEl.style, {
+				transform: `translate(${x}px, ${y}px)`,
+			});
+		};
+		this.cleanupAutoUpdate = autoUpdate(inputEl, this.suggestEl, update);
+		void update();
 	}
 
 	close(): void {
@@ -201,9 +228,9 @@ export abstract class TextInputSuggest<T>
 		}
 
 		this.suggest.setSuggestions([]);
-		if (this.popper) {
-			this.popper.destroy();
-			this.popper = undefined;
+		if (this.cleanupAutoUpdate) {
+			this.cleanupAutoUpdate();
+			this.cleanupAutoUpdate = undefined;
 		}
 		this.suggestEl.detach();
 	}

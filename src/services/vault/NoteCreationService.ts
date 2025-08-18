@@ -4,14 +4,13 @@ import { getFileNameWithoutExt } from "src/lib/pathing/pathingUtils";
 import type KoreaderImporterPlugin from "src/main";
 import type { FileSystemService } from "src/services/FileSystemService";
 import type { LoggingService } from "src/services/LoggingService";
-import type { FrontmatterGenerator } from "src/services/parsing/FrontmatterGenerator";
+import { createFrontmatterData } from "src/services/parsing/FrontmatterGenerator";
 import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
-import type { ContentGenerator } from "src/services/vault/ContentGenerator";
+import type { TemplateManager } from "src/services/parsing/TemplateManager";
 import type { FileNameGenerator } from "src/services/vault/FileNameGenerator";
 import type { NoteIdentityService } from "src/services/vault/NoteIdentityService";
 import type { SnapshotManager } from "src/services/vault/SnapshotManager";
 import type { LuaMetadata } from "src/types";
-import { composeFullNoteContent } from "./NoteComposer";
 
 export class NoteCreationService {
 	private readonly settings;
@@ -20,16 +19,39 @@ export class NoteCreationService {
 	constructor(
 		private readonly fs: FileSystemService,
 		private readonly fmService: FrontmatterService,
-		private readonly fmGen: FrontmatterGenerator,
-		private readonly contentGen: ContentGenerator,
 		private readonly fileNameGen: FileNameGenerator,
 		private readonly snapshot: SnapshotManager,
 		private readonly identity: NoteIdentityService,
 		private readonly loggingService: LoggingService,
+		private readonly templateManager: TemplateManager,
 		readonly plugin: KoreaderImporterPlugin, // injected to access settings
 	) {
 		this.settings = plugin.settings;
 		this.log = this.loggingService.scoped("NoteCreationService");
+	}
+
+	/**
+	 * Renders the body content for a note from LuaMetadata.
+	 * Pure: No side effects, just computes the body string.
+	 * Handles template compilation, annotation composition, and styling.
+	 * @param lua - LuaMetadata with annotations
+	 * @returns Promise<string> - The rendered body content
+	 * @throws Error if template compilation fails
+	 */
+	public async renderNoteBody(lua: LuaMetadata): Promise<string> {
+		try {
+			const compiled = await this.templateManager.getCompiledTemplate();
+			return this.fmService.composeBody(
+				lua.annotations ?? [],
+				compiled,
+				this.templateManager,
+				this.settings.commentStyle,
+				this.settings.maxHighlightGap,
+			);
+		} catch (err: any) {
+			this.log.error("Failed to render note body", { lua, err });
+			throw new Error(`Body rendering failed: ${err?.message ?? String(err)}`);
+		}
 	}
 
 	// The optional provider returns BODY-ONLY. We compose FM here so every note is born with a UID.
@@ -39,25 +61,12 @@ export class NoteCreationService {
 	): Promise<TFile> {
 		// Pre-generate a UID so the note is born with a stable identity.
 		const preUid = this.identity.generateUid();
-		const content = bodyProvider
-			? this.fmService.reconstructFileContent(
-					this.fmGen.createFrontmatterData(
-						lua,
-						this.settings.frontmatter,
-						preUid,
-					),
-					await bodyProvider(),
-				)
-			: await composeFullNoteContent(
-					{
-						fmGen: this.fmGen,
-						fmService: this.fmService,
-						contentGen: this.contentGen,
-						fmSettings: this.settings.frontmatter,
-					},
-					lua,
-					preUid,
-				);
+		let content: string;
+		const body = bodyProvider
+			? await bodyProvider()
+			: await this.renderNoteBody(lua);
+		const fm = createFrontmatterData(lua, this.settings.frontmatter, preUid);
+		content = this.fmService.reconstructFileContent(fm, body);
 
 		// Derive a base stem using the same generator users expect
 		const fileNameWithExt = this.fileNameGen.generate(

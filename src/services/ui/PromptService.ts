@@ -1,34 +1,54 @@
-export type IncompleteScanDecision = "skip" | "create-new";
+import { type App, Notice } from "obsidian";
+import { normalizeFileNamePiece } from "src/lib/pathing/pathingUtils";
+
 export type RenameResult = { stem: string } | { cancelled: true };
 export type ConfirmationDecision = "confirm" | "cancel";
 
-export interface PromptService {
-	/**
-	 * Handles the case where a duplicate scan is incomplete.
-	 * A merge is not offered as it cannot be guaranteed to be safe.
-	 */
-	onIncompleteScan(params: {
-		title: string;
-		existingPath: string | null;
-	}): Promise<IncompleteScanDecision>;
+export class PromptService {
+	constructor(private app: App) {}
 
-	/**
-	 * Prompts the user for a new filename stem, handling validation and cancellation.
-	 */
-	requestNewFileName(params: {
+	async requestNewFileName(params: {
 		defaultStem: string;
 		folder: string;
-		validate?: (stem: string) => string | null; // Returns error message or null
-	}): Promise<RenameResult>;
+		validate?: (stem: string) => string | null;
+	}): Promise<RenameResult> {
+		const { PromptModal } = await import("src/ui/PromptModal");
 
-	/**
-	 * Displays a generic confirmation modal to the user.
-	 * @returns A promise resolving to "confirm" or "cancel".
-	 */
-	confirm(params: {
+		while (true) {
+			const prompt = new (PromptModal as any)(
+				this.app,
+				"Choose a new filename",
+				"New filename (without extension)",
+				params.defaultStem,
+			);
+
+			const rawValue = (await prompt.openAndAwaitResult())?.trim() ?? null;
+
+			if (!rawValue) {
+				return { cancelled: true };
+			}
+
+			const sanitized = normalizeFileNamePiece(rawValue);
+			const error = params.validate ? params.validate(sanitized) : null;
+
+			if (error) {
+				new Notice(error, 4000);
+				params.defaultStem = sanitized; // re-prompt with user input for editing
+				continue;
+			}
+
+			return { stem: sanitized };
+		}
+	}
+
+	async confirm(params: {
 		title: string;
 		message: string;
-		ctaLabel?: string; // e.g., "Yes, Proceed"
-		cancelLabel?: string; // e.g., "Cancel"
-	}): Promise<ConfirmationDecision>;
+	}): Promise<ConfirmationDecision> {
+		// Reuse ConfirmModal (labels are fixed in current implementation)
+		const { ConfirmModal } = await import("src/ui/ConfirmModal");
+		const modal = new ConfirmModal(this.app, params.title, params.message);
+		const ok = (await modal.openAndAwaitResult()) ?? false;
+		return ok ? "confirm" : "cancel";
+	}
 }

@@ -8,6 +8,7 @@ import {
 	formatDateLocale,
 } from "src/lib/formatting/dateUtils";
 import { styleHighlight } from "src/lib/formatting/highlightStyle";
+import { isTFile } from "src/lib/obsidian/typeguards";
 import type KoreaderImporterPlugin from "src/main";
 import type {
 	Annotation,
@@ -389,7 +390,7 @@ export class TemplateManager implements SettingsObserver {
 	): Promise<string | null> {
 		const normalizedPath = normalizePath(vaultPath);
 		const file = this.vault.getAbstractFileByPath(normalizedPath);
-		if (file instanceof TFile) return this.vault.read(file);
+		if (isTFile(file)) return this.vault.read(file);
 		this.log.warn(`Custom template file not found: "${vaultPath}"`);
 		return null;
 	}

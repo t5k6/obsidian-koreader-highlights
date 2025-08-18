@@ -1,3 +1,4 @@
+import { formatDateForDailyNote } from "src/lib/formatting/dateUtils";
 import {
 	getFileNameWithoutExt,
 	normalizeFileNamePiece,
@@ -48,7 +49,7 @@ export class FileNameGenerator {
 			const templateData: Record<string, string> = {
 				title: docProps.title?.trim() || "Untitled",
 				authors: docProps.authors?.trim() || "Unknown Author",
-				importDate: new Date().toISOString().split("T")[0],
+				importDate: formatDateForDailyNote(),
 			};
 			baseName = FileNameGenerator.renderTemplate(
 				options.template,

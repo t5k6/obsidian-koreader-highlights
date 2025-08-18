@@ -1,7 +1,7 @@
 import { type App, Component, Notice, setIcon, type TFile } from "obsidian";
-import { runPluginAction } from "src/lib/ui/actionUtils";
+import { runAsyncAction } from "src/lib/ui/actionUtils";
 import type KoreaderImporterPlugin from "src/main";
-import type { BookRefreshOrchestrator } from "src/services/BookRefreshOrchestrator";
+import type { CommandManager } from "src/services/command/CommandManager";
 import type { LocalIndexService } from "src/services/vault/LocalIndexService";
 
 /**
@@ -15,7 +15,7 @@ export class StatusBarManager extends Component {
 		private readonly app: App,
 		private readonly plugin: KoreaderImporterPlugin,
 		private readonly localIndex: LocalIndexService,
-		private readonly orchestrator: BookRefreshOrchestrator,
+		private readonly commandManager: CommandManager,
 	) {
 		super();
 	}
@@ -69,28 +69,26 @@ export class StatusBarManager extends Component {
 		if (!file) return;
 
 		let resultMessage = "";
-		await runPluginAction(
+		await runAsyncAction(
+			this.statusBarItem,
 			async () => {
-				const changed = await this.orchestrator.refreshNote(file);
+				const res = await this.commandManager.executeRefreshCurrentNote(file);
+				if (res.status === "error") {
+					resultMessage = "Refresh failed. See console for details.";
+					return;
+				}
+				if (res.status === "skipped") {
+					resultMessage = "No active file to refresh.";
+					return;
+				}
+				const changed = !!res.data?.changed;
 				resultMessage = changed
 					? "KOReader highlights refreshed for this book."
 					: "No new highlights found for this book.";
 			},
 			{
-				button: {
-					// Minimal Button-like impl for runPluginAction
-					setDisabled: (disabled: boolean) => {
-						this.statusBarItem.toggleClass("is-disabled", disabled);
-						this.statusBarItem.style.pointerEvents = disabled ? "none" : "auto";
-					},
-					setButtonText: (text: string) => {
-						// Reflect progress via aria-label only
-						this.statusBarItem.ariaLabel =
-							text || "Refresh KOReader highlights for this note";
-					},
-				} as any,
-				inProgressText: "Refreshing…",
-				completedText: "",
+				inProgress: "Refreshing…",
+				original: "Refresh KOReader highlights for this note",
 			},
 		);
 

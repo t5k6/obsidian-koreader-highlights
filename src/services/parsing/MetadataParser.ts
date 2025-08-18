@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import luaparser from "luaparse";
 import type {
 	Expression,
@@ -6,17 +5,7 @@ import type {
 	TableKeyString,
 	TableValue,
 } from "luaparse/lib/ast";
-import type { CacheManager } from "src/lib/cache/CacheManager";
-import type { LruCache } from "src/lib/cache/LruCache";
-import type { SDRFinder } from "src/services/device/SDRFinder";
-import {
-	type Annotation,
-	type DocProps,
-	DRAWER_TYPES,
-	type LuaMetadata,
-} from "src/types";
-import type { LoggingService } from "../LoggingService";
-import { FieldMappingService } from "./FieldMappingService";
+import type { Annotation, DocProps, LuaMetadata } from "src/types";
 
 const DEFAULT_DOC_PROPS: DocProps = {
 	authors: "",
@@ -27,404 +16,37 @@ const DEFAULT_DOC_PROPS: DocProps = {
 	language: "en",
 };
 
-export class MetadataParser {
-	private readonly log;
-	private parsedMetadataCache: LruCache<string, LuaMetadata>;
-	private stringCache: LruCache<string, string>;
+export type Diagnostic = {
+	severity: "info" | "warn" | "error";
+	message: string;
+};
 
-	constructor(
-		private sdrFinder: SDRFinder,
-		cacheManager: CacheManager,
-		private loggingService: LoggingService,
-	) {
-		this.parsedMetadataCache = cacheManager.createLru("metadata.parsed", 50);
-		this.stringCache = cacheManager.createLru("metadata.strings", 2000);
-		this.log = this.loggingService.scoped("MetadataParser");
-	}
+/**
+ * Pure, stateless Lua parsing core.
+ * Returns the base metadata (no originalFilePath/statistics).
+ */
+export function parse(luaContent: string): {
+	meta: Omit<LuaMetadata, "originalFilePath" | "statistics">;
+	diagnostics: Diagnostic[];
+} {
+	const diagnostics: Diagnostic[] = [];
+	const DEFAULTS: DocProps = { ...DEFAULT_DOC_PROPS };
+	const meta: Omit<LuaMetadata, "originalFilePath" | "statistics"> = {
+		docProps: { ...DEFAULTS },
+		pages: 0,
+		annotations: [],
+		md5: undefined,
+	};
 
-	/**
-	 * Parses a KOReader metadata.lua file from an SDR directory.
-	 * Uses caching to avoid re-parsing the same files.
-	 * @param sdrDirectoryPath - Path to the SDR directory containing metadata.lua
-	 * @returns Parsed metadata object or null if parsing fails
-	 */
-	async parseFile(sdrDirectoryPath: string): Promise<LuaMetadata | null> {
-		this.log.info(`Parsing metadata for: ${sdrDirectoryPath}`);
-		try {
-			const luaContent =
-				await this.sdrFinder.readMetadataFileContent(sdrDirectoryPath);
-			if (!luaContent) {
-				this.log.warn(
-					`No metadata content found or readable in: ${sdrDirectoryPath}`,
-				);
-				return null;
-			}
+	const sliceQuotes = (s: string): string =>
+		s.length >= 2 &&
+		((s.startsWith('"') && s.endsWith('"')) ||
+			(s.startsWith("'") && s.endsWith("'")))
+			? s.slice(1, -1)
+			: s;
 
-			// Use a content-based cache key to avoid stale caching across sessions/updates
-			const contentHash = createHash("sha1").update(luaContent).digest("hex");
-			const cacheKey = `${sdrDirectoryPath}::${contentHash}`;
-			const cachedByContent = this.parsedMetadataCache.get(cacheKey);
-			if (cachedByContent) {
-				this.log.info(
-					`Using cached parsed metadata (content match) for: ${sdrDirectoryPath}`,
-				);
-				return cachedByContent;
-			}
-
-			const parsedBase = this.parseLuaContent(luaContent);
-
-			const fullMetadata: LuaMetadata = {
-				...parsedBase,
-				originalFilePath: sdrDirectoryPath,
-			};
-
-			this.parsedMetadataCache.set(cacheKey, fullMetadata);
-			return fullMetadata;
-		} catch (error) {
-			this.log.error(
-				`Error parsing metadata file in ${sdrDirectoryPath}:`,
-				error,
-			);
-			return null;
-		}
-	}
-
-	/**
-	 * Recursively collects annotations from a Lua table structure.
-	 * Handles both modern format and legacy page-keyed format.
-	 * @param node - Table constructor expression containing annotations
-	 * @param pageOverride - Page number to use for nested annotations
-	 * @returns Array of parsed annotations
-	 */
-	private collectAnnotations(
-		node: luaparser.TableConstructorExpression,
-		pageOverride?: number,
-		depth = 0,
-	): Annotation[] {
-		if (depth > 10) {
-			this.log.warn("Annotation nesting too deep, stopping recursion");
-			return [];
-		}
-
-		const out: Annotation[] = [];
-
-		for (const field of node.fields) {
-			let annotationNode: luaparser.TableConstructorExpression | null = null;
-
-			// Check if the field itself is a table containing an annotation
-			if (
-				(field.type === "TableValue" || field.type === "TableKey") &&
-				field.value.type === "TableConstructorExpression"
-			) {
-				annotationNode = field.value;
-			}
-
-			if (annotationNode) {
-				// This node could be an annotation OR a page-keyed table in the legacy format.
-				// First, try to parse it as a single annotation.
-				const ann = this.createAnnotationFromFields(annotationNode.fields);
-
-				if (ann?.text?.trim()) {
-					// A valid annotation must have text
-					if (pageOverride !== undefined) {
-						ann.pageno = pageOverride;
-					}
-					out.push(ann);
-				} else if (pageOverride === undefined && field.type === "TableKey") {
-					// If it wasn't a valid annotation, it might be a legacy page-keyed table.
-					// We only do this check at the top level (no pageOverride).
-					const pageNumStr = this.extractKeyAsString(field.key);
-					const pageNum = pageNumStr ? Number(pageNumStr) : NaN;
-
-					if (Number.isFinite(pageNum)) {
-						// It's a page number. Recurse into its value.
-						out.push(
-							...this.collectAnnotations(annotationNode, pageNum, depth + 1),
-						);
-					}
-				}
-			}
-		}
-		return out;
-	}
-
-	/**
-	 * Parses the raw Lua content into structured metadata.
-	 * Handles AST parsing and extracts document properties and annotations.
-	 * @param luaContent - Raw Lua file content
-	 * @returns Parsed metadata without file path and statistics
-	 */
-	private parseLuaContent(
-		luaContent: string,
-	): Omit<LuaMetadata, "originalFilePath" | "statistics"> {
-		const result: Omit<LuaMetadata, "originalFilePath" | "statistics"> = {
-			docProps: { ...DEFAULT_DOC_PROPS },
-			pages: 0,
-			annotations: [],
-			md5: undefined,
-		};
-
-		try {
-			const ast = luaparser.parse(luaContent, {
-				locations: false,
-				comments: false,
-			});
-
-			if (
-				!ast.body ||
-				ast.body.length === 0 ||
-				ast.body[0].type !== "ReturnStatement"
-			) {
-				this.log.warn(
-					"Invalid Lua structure: Expected top-level return statement.",
-				);
-				return result;
-			}
-
-			const returnArg = ast.body[0]
-				.arguments?.[0] as luaparser.TableConstructorExpression;
-			if (!returnArg || returnArg.type !== "TableConstructorExpression") {
-				this.log.warn(
-					"Invalid Lua structure: Expected return statement to return a table.",
-				);
-				return result;
-			}
-
-			let modernAnnotationsData: luaparser.TableKey | null = null;
-			let legacyHighlightData: luaparser.TableKey | null = null;
-
-			for (const field of returnArg.fields) {
-				if (field.type !== "TableKey" || field.key.type !== "StringLiteral")
-					continue;
-				const key = field.key.raw.slice(1, -1);
-
-				switch (key) {
-					case "doc_props":
-						result.docProps = this.extractDocProps(field.value);
-						break;
-					case "doc_pages":
-						result.pages = this.extractNumericValue(field.value) ?? 0;
-						break;
-					case "partial_md5_checksum":
-						result.md5 = this.extractStringValue(field.value) ?? undefined;
-						break;
-					case "annotations":
-						modernAnnotationsData = field;
-						break;
-					case "highlight":
-						legacyHighlightData = field;
-						break;
-				}
-			}
-
-			let annotations: Annotation[] = [];
-
-			// 1. Try to process the modern 'annotations' table first.
-			if (modernAnnotationsData?.value.type === "TableConstructorExpression") {
-				this.log.info("Processing modern 'annotations' table.");
-				annotations = this.collectAnnotations(modernAnnotationsData.value);
-			}
-
-			// 2. If no modern annotations were found, fall back to the legacy 'highlight' table.
-			if (
-				annotations.length === 0 &&
-				legacyHighlightData?.value.type === "TableConstructorExpression"
-			) {
-				this.log.info(
-					"No modern annotations found. Processing legacy 'highlight' table.",
-				);
-				annotations = this.collectAnnotations(legacyHighlightData.value);
-			}
-
-			// 3. Filter out any annotations that might be empty.
-			result.annotations = annotations.filter((a) => a.text?.trim());
-
-			this.log.info(`Parsed ${result.annotations.length} valid annotation(s).`);
-			return result;
-		} catch (error: unknown) {
-			const e = error as Partial<Error> & {
-				line?: number;
-				column?: number;
-				stack?: string;
-			};
-			if (
-				e &&
-				typeof e.line === "number" &&
-				typeof e.column === "number" &&
-				e.message
-			) {
-				this.log.error(
-					`Lua parsing error at Line ${e.line}, Column ${e.column}: ${e.message}`,
-					e.stack,
-				);
-			} else {
-				this.log.error("Error parsing Lua content:", error);
-			}
-			throw error as unknown; // rethrow for caller
-		}
-	}
-
-	// --- Extraction Helper Functions ---
-
-	/**
-	 * Extracts document properties from a Lua table node.
-	 * @param valueNode - AST node representing the doc_props table
-	 * @returns Document properties with defaults applied
-	 */
-	private extractDocProps(valueNode: Expression): DocProps {
-		const docProps = { ...DEFAULT_DOC_PROPS };
-		if (valueNode.type !== "TableConstructorExpression") {
-			this.log.warn("doc_props was not a table, using defaults.");
-			return docProps;
-		}
-
-		for (const propField of valueNode.fields) {
-			if (
-				propField.type !== "TableKey" ||
-				propField.key.type !== "StringLiteral"
-			)
-				continue;
-			const propKeyRaw = propField.key.raw.slice(1, -1);
-			const propKey = propKeyRaw as keyof DocProps;
-			let extractedValue = this.extractStringValue(propField.value);
-
-			if (extractedValue !== null) {
-				if (propKey === "keywords") {
-					extractedValue = extractedValue
-						.replace(/\\?\n/g, ", ")
-						.replace(/,\s*,/g, ",")
-						.trim();
-				}
-				if (propKey in docProps) {
-					// Check against known DocProps keys
-					(docProps as any)[propKey] = extractedValue;
-				} else {
-					// Optional: log unknown keys if you want to detect them
-				}
-			} // If extractedValue is null, the default from DEFAULT_DOC_PROPS remains
-		}
-		return docProps;
-	}
-
-	/**
-	 * Creates an annotation object from Lua table fields.
-	 * Maps various field names to standardized annotation properties using FieldMappingService.
-	 */
-	private createAnnotationFromFields(
-		fields: Array<TableKey | TableKeyString | TableValue>,
-	): Annotation | null {
-		const annotation: Partial<Annotation> & { page?: number } = {};
-
-		const set = <K extends keyof Annotation>(
-			k: K,
-			v: Annotation[K] | undefined,
-		) => {
-			if (v !== undefined) annotation[k] = v;
-		};
-
-		for (const field of fields) {
-			if (field.type !== "TableKey") continue;
-			const key = this.extractKeyAsString(field.key);
-			const mapped = key ? FieldMappingService.fromLua(key) : null;
-			const targetField: (keyof Annotation | "page") | null =
-				mapped === "page" ? "page" : ((mapped as keyof Annotation) ?? null);
-			if (!targetField) continue;
-
-			const valueNode = field.value;
-			switch (targetField) {
-				case "page": {
-					const pageNumVal = this.extractNumericValue(valueNode);
-					if (pageNumVal !== null)
-						(annotation as { page?: number }).page = pageNumVal;
-					break;
-				}
-				case "drawer": {
-					const drawerVal = this.extractStringValue(valueNode)?.toLowerCase();
-					if (
-						drawerVal &&
-						(DRAWER_TYPES as readonly string[]).includes(drawerVal)
-					) {
-						set("drawer", drawerVal as (typeof DRAWER_TYPES)[number]);
-					} else if (drawerVal) {
-						this.log.warn(`Invalid/unhandled drawer value: ${drawerVal}`);
-					}
-					break;
-				}
-				case "text":
-				case "note": {
-					const s = this.extractStringValue(valueNode);
-					set(targetField as keyof Annotation, (s ?? "") as any);
-					break;
-				}
-				default: {
-					const s = this.extractStringValue(valueNode) ?? undefined;
-					set(targetField as keyof Annotation, s as any);
-					break;
-				}
-			}
-		}
-
-		if ((annotation as { page?: number }).page !== undefined) {
-			annotation.pageno = (annotation as { page?: number }).page;
-			delete (annotation as { page?: number }).page;
-		} else {
-			annotation.pageno = 0;
-		}
-
-		if (!annotation.text || annotation.text.trim() === "") return null;
-		if (!annotation.datetime) {
-			annotation.datetime = new Date().toISOString();
-			this.log.warn(`Annotation missing datetime, using current time.`);
-		}
-		if (!annotation.pos0 || !annotation.pos1) {
-			this.log.info(
-				`Annotation for text "${annotation.text.slice(0, 20)}..." missing pos0/pos1.`,
-			);
-		}
-		return annotation as Annotation;
-	}
-	// --- Primitive Value Extractors ---
-
-	/**
-	 * Extracts a string representation from various AST key node types.
-	 * @param keyNode - AST node representing a table key
-	 * @returns String value or null if extraction fails
-	 */
-	private extractKeyAsString(keyNode: Expression): string | null {
-		switch (keyNode.type) {
-			case "StringLiteral":
-				return keyNode.raw.slice(1, -1);
-			case "NumericLiteral":
-				return keyNode.value.toString();
-			case "Identifier":
-				return keyNode.name;
-			default:
-				this.log.warn(
-					`Cannot extract string key from node type: ${keyNode.type}`,
-				);
-				return null;
-		}
-	}
-
-	/**
-	 * Sanitizes and unescapes string values from Lua.
-	 * Handles quote removal and escape sequences.
-	 * Uses caching for performance.
-	 * @param rawValue - Raw string from Lua parser
-	 * @returns Cleaned and unescaped string
-	 */
-	private sanitizeString(rawValue: string): string {
-		if (typeof rawValue !== "string") return "";
-		const cached = this.stringCache.get(rawValue);
-		if (cached) return cached;
-		let cleaned = rawValue.trim();
-		if (
-			(cleaned.startsWith('"') && cleaned.endsWith('"')) ||
-			(cleaned.startsWith("'") && cleaned.endsWith("'"))
-		) {
-			cleaned = cleaned.slice(1, -1);
-		}
-		cleaned = cleaned.replace(/\\(.)/g, (match, char) => {
+	const sanitizeString = (raw: string): string =>
+		sliceQuotes(raw).replace(/\\(.)/g, (match, char) => {
 			const escapeMap: Record<string, string> = {
 				n: "\n",
 				t: "\t",
@@ -436,43 +58,246 @@ export class MetadataParser {
 			return escapeMap[char] || match;
 		});
 
-		this.stringCache.set(rawValue, cleaned);
-		return cleaned;
-	}
-
-	/**
-	 * Extracts a string value from various AST node types.
-	 * @param valueNode - AST node to extract string from
-	 * @returns String value or null if extraction fails
-	 */
-	private extractStringValue(valueNode: Expression): string | null {
-		switch (valueNode.type) {
+	const extractKeyAsString = (k: Expression): string | null => {
+		switch (k.type) {
 			case "StringLiteral":
-				return this.sanitizeString(valueNode.raw);
+				return sliceQuotes(k.raw);
 			case "NumericLiteral":
-				return valueNode.value.toString();
-			case "BooleanLiteral":
-				return valueNode.value.toString();
+				return String(k.value);
+			case "Identifier":
+				return k.name;
 			default:
 				return null;
 		}
-	}
+	};
 
-	/**
-	 * Extracts a numeric value from various AST node types.
-	 * @param valueNode - AST node to extract number from
-	 * @returns Numeric value or null if extraction fails
-	 */
-	private extractNumericValue(valueNode: Expression): number | null {
-		switch (valueNode.type) {
+	const extractStringValue = (v: Expression): string | null => {
+		switch (v.type) {
+			case "StringLiteral":
+				return sanitizeString(v.raw);
 			case "NumericLiteral":
-				return valueNode.value;
+				return String(v.value);
+			case "BooleanLiteral":
+				return String(v.value);
+			default:
+				return null;
+		}
+	};
+
+	const extractNumericValue = (v: Expression): number | null => {
+		switch (v.type) {
+			case "NumericLiteral":
+				return v.value;
 			case "StringLiteral": {
-				const num = Number.parseFloat(this.sanitizeString(valueNode.raw));
-				return Number.isNaN(num) ? null : num;
+				const n = Number.parseFloat(sanitizeString(v.raw));
+				return Number.isNaN(n) ? null : n;
 			}
 			default:
 				return null;
 		}
+	};
+
+	const extractDocProps = (v: Expression): DocProps => {
+		const base = { ...DEFAULTS };
+		if (v.type !== "TableConstructorExpression") {
+			diagnostics.push({
+				severity: "warn",
+				message: "doc_props is not a table; using defaults.",
+			});
+			return base;
+		}
+		for (const f of v.fields) {
+			if (f.type !== "TableKey" || f.key.type !== "StringLiteral") continue;
+			const k = sliceQuotes(f.key.raw) as keyof DocProps;
+			let val = extractStringValue(f.value);
+			if (val != null) {
+				if (k === "keywords") {
+					val = val.replace(/\\?\n/g, ", ").replace(/,\s*,/g, ",").trim();
+				}
+				if (k in base) (base as any)[k] = val;
+			}
+		}
+		return base;
+	};
+
+	const createAnnotationFromFields = (
+		fields: Array<TableKey | TableKeyString | TableValue>,
+	): Annotation | null => {
+		const ann: Partial<Annotation> & { page?: number } = {};
+		for (const f of fields) {
+			if (f.type !== "TableKey") continue;
+			const key = extractKeyAsString(f.key);
+			if (!key) continue;
+			switch (key.toLowerCase()) {
+				case "pageno": {
+					// Prioritize 'pageno'
+					const n = extractNumericValue(f.value);
+					if (n != null) (ann as any).pageno = n;
+					break;
+				}
+				case "page": {
+					// Fallback if pageno isn't set yet
+					if ((ann as any).pageno === undefined) {
+						const n = extractNumericValue(f.value);
+						if (n != null) (ann as any).pageno = n;
+					}
+					break;
+				}
+				case "drawer": {
+					const s = extractStringValue(f.value);
+					if (s) (ann as any).drawer = s.toLowerCase();
+					break;
+				}
+				case "text":
+				case "note": {
+					const s = extractStringValue(f.value) ?? "";
+					(ann as any)[key.toLowerCase()] = s;
+					break;
+				}
+				case "chapter": {
+					// Add support for chapter
+					const s = extractStringValue(f.value);
+					if (s) (ann as any).chapter = s;
+					break;
+				}
+				case "datetime":
+				case "pos0":
+				case "pos1": {
+					const s = extractStringValue(f.value) ?? undefined;
+					(ann as any)[key.toLowerCase()] = s as any;
+					break;
+				}
+				default:
+					break;
+			}
+		}
+		// Ensure pageno has a safe default only if nothing was found
+		if ((ann as any).pageno === undefined) {
+			(ann as any).pageno = 0;
+		}
+		if (!ann.text || ann.text.trim() === "") return null;
+		if (!ann.datetime) ann.datetime = new Date().toISOString();
+		return ann as Annotation;
+	};
+
+	const collectAnnotations = (
+		node: luaparser.TableConstructorExpression,
+		maxDepth: number,
+		depth = 0,
+	): { annotations: Annotation[]; diagnostics: Diagnostic[] } => {
+		const diags: Diagnostic[] = [];
+		if (depth > maxDepth) {
+			diags.push({
+				severity: "warn",
+				message: "Annotation nesting too deep; stopping recursion.",
+			});
+			return { annotations: [], diagnostics: diags };
+		}
+		const out: Annotation[] = [];
+		for (const field of node.fields) {
+			let annotationNode: luaparser.TableConstructorExpression | null = null;
+			if (
+				(field.type === "TableValue" || field.type === "TableKey") &&
+				field.value.type === "TableConstructorExpression"
+			) {
+				annotationNode = field.value;
+			}
+			if (!annotationNode) continue;
+			const ann = createAnnotationFromFields(annotationNode.fields);
+			if (ann?.text?.trim()) {
+				out.push(ann);
+				continue;
+			}
+			if (field.type === "TableKey" && field.key) {
+				const k = extractKeyAsString(field.key);
+				const n = k ? Number(k) : NaN;
+				if (Number.isFinite(n)) {
+					const nested = collectAnnotations(
+						annotationNode,
+						maxDepth,
+						depth + 1,
+					);
+					for (const a of nested.annotations) (a as any).pageno = n;
+					out.push(...nested.annotations);
+					diags.push(...nested.diagnostics);
+				}
+			}
+		}
+		return { annotations: out, diagnostics: diags };
+	};
+
+	try {
+		const ast = luaparser.parse(luaContent, {
+			locations: false,
+			comments: false,
+		});
+		const first = ast.body?.[0];
+		if (!first || first.type !== "ReturnStatement") {
+			diagnostics.push({
+				severity: "warn",
+				message: "Invalid Lua: expected top-level return statement.",
+			});
+			return { meta, diagnostics };
+		}
+		const retArg = first.arguments?.[0];
+		if (!retArg || retArg.type !== "TableConstructorExpression") {
+			diagnostics.push({
+				severity: "warn",
+				message: "Invalid Lua: expected returned table.",
+			});
+			return { meta, diagnostics };
+		}
+		let modern: luaparser.TableConstructorExpression | null = null;
+		let legacy: luaparser.TableConstructorExpression | null = null;
+		for (const field of retArg.fields) {
+			if (field.type !== "TableKey" || field.key.type !== "StringLiteral")
+				continue;
+			const key = field.key.raw.slice(1, -1).toLowerCase();
+			switch (key) {
+				case "doc_props":
+					meta.docProps = extractDocProps(field.value);
+					break;
+				case "doc_pages":
+					meta.pages = extractNumericValue(field.value) ?? 0;
+					break;
+				case "partial_md5_checksum":
+					meta.md5 = extractStringValue(field.value) ?? undefined;
+					break;
+				case "annotations":
+					if (field.value.type === "TableConstructorExpression")
+						modern = field.value;
+					break;
+				case "highlight":
+					if (field.value.type === "TableConstructorExpression")
+						legacy = field.value;
+					break;
+			}
+		}
+		let annotations: Annotation[] = [];
+		if (modern) {
+			const out = collectAnnotations(modern, 10);
+			annotations = out.annotations;
+			diagnostics.push(...out.diagnostics);
+		}
+		if (annotations.length === 0 && legacy) {
+			const out = collectAnnotations(legacy, 10);
+			annotations = out.annotations;
+			diagnostics.push(...out.diagnostics);
+		}
+		meta.annotations = annotations.filter((a) => a.text?.trim());
+		diagnostics.push({
+			severity: "info",
+			message: `Parsed ${meta.annotations.length} valid annotation(s).`,
+		});
+	} catch (e: any) {
+		const loc =
+			typeof e?.line === "number" && typeof e?.column === "number"
+				? ` at line ${e.line}, column ${e.column}`
+				: "";
+		diagnostics.push({
+			severity: "error",
+			message: `Lua parsing error${loc}: ${e?.message ?? String(e)}`,
+		});
 	}
+	return { meta, diagnostics };
 }

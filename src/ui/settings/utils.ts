@@ -19,45 +19,55 @@ export async function pickDirectory(
 		return normalizePickedDir(res.filePaths[0]);
 	};
 
-	try {
-		// Attempt 1: modern window.electron
-		const anyWindow = window as unknown as { electron?: any };
-		const wElectron = anyWindow?.electron;
-		if (wElectron?.showOpenDialog) {
-			const res = await wElectron.showOpenDialog({
-				properties: ["openDirectory", "dontAddToRecent"],
-				title,
-			});
-			return handleResult(res);
-		}
+	// Provider pattern: try multiple dialog providers in order
+	const providers: Array<
+		() => Promise<{ canceled?: boolean; filePaths?: string[] } | undefined>
+	> = [
+		// Provider 1: modern window.electron
+		async () => {
+			const anyWindow = window as unknown as { electron?: any };
+			const wElectron = anyWindow?.electron;
+			if (wElectron?.showOpenDialog) {
+				return await wElectron.showOpenDialog({
+					properties: ["openDirectory", "dontAddToRecent"],
+					title,
+				});
+			}
+			return undefined;
+		},
+		// Provider 2: legacy electron.remote.dialog (sandbox fallback)
+		async () => {
+			try {
+				// eslint-disable-next-line @typescript-eslint/no-var-requires
+				const electron = require("electron");
+				const dlg = electron?.remote?.dialog;
+				if (dlg?.showOpenDialog) {
+					return await dlg.showOpenDialog({
+						properties: ["openDirectory", "dontAddToRecent"],
+						title,
+					});
+				}
+			} catch {
+				// require can be unavailable in sandbox – ignore
+			}
+			return undefined;
+		},
+	];
 
-		// Attempt 2: legacy electron.remote.dialog (sandbox fallback)
-		let dlg: any | undefined;
+	for (const provider of providers) {
 		try {
-			// eslint-disable-next-line @typescript-eslint/no-var-requires
-			const electron = require("electron");
-			dlg = electron?.remote?.dialog;
+			const res = await provider();
+			const dir = handleResult(res);
+			if (dir) return dir;
 		} catch {
-			// require can be unavailable in sandbox
+			// ignore provider failure and try next
 		}
-
-		if (dlg?.showOpenDialog) {
-			const res = await dlg.showOpenDialog({
-				properties: ["openDirectory", "dontAddToRecent"],
-				title,
-			});
-			return handleResult(res);
-		}
-
-		// No available dialog API
-		console.warn(
-			"KOReader Importer: No folder picker API available (window.electron/showOpenDialog or electron.remote.dialog)",
-		);
-		new Notice("Folder picker is unavailable. Enter the path manually.");
-		return undefined;
-	} catch (err) {
-		console.error("KOReader Importer: folder picker failed →", err);
-		new Notice("Unable to open system folder picker. Enter the path manually.");
-		return undefined;
 	}
+
+	// No available dialog API succeeded
+	console.warn(
+		"KOReader Importer: No folder picker API available (window.electron/showOpenDialog or electron.remote.dialog)",
+	);
+	new Notice("Folder picker is unavailable. Enter the path manually.");
+	return undefined;
 }

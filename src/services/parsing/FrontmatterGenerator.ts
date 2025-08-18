@@ -113,152 +113,150 @@ function applyPolicy(
 }
 
 /* ------------------------------------------------------------------ */
-/*                    3.  Generator class                             */
+/*                    3.  Generator functions                          */
 /* ------------------------------------------------------------------ */
 
-export class FrontmatterGenerator {
-	/**
-	 * Creates frontmatter data from KOReader metadata.
-	 * Processes document properties, highlight counts, and reading statistics.
-	 * @param meta - KOReader metadata
-	 * @param opts - Frontmatter generation settings
-	 * @returns Complete frontmatter data object
-	 */
-	createFrontmatterData(
-		meta: LuaMetadata,
-		opts: FrontmatterSettings,
-		uid?: string,
-	): FrontmatterData {
-		const fm: Partial<FrontmatterData> = {};
-		const disabled = new Set(opts.disabledFields ?? []);
-		const extra = new Set(opts.customFields ?? []);
+/**
+ * Creates frontmatter data from KOReader metadata.
+ * Processes document properties, highlight counts, and reading statistics.
+ * @param meta - KOReader metadata
+ * @param opts - Frontmatter generation settings
+ * @returns Complete frontmatter data object
+ */
+export function createFrontmatterData(
+	meta: LuaMetadata,
+	opts: FrontmatterSettings,
+	uid?: string,
+): FrontmatterData {
+	const fm: Partial<FrontmatterData> = {};
+	const disabled = new Set(opts.disabledFields ?? []);
+	const extra = new Set(opts.customFields ?? []);
 
-		/*  1️ DocProps */
-		for (const [k, val] of Object.entries(meta.docProps ?? {}) as [
-			keyof DocProps,
-			unknown,
-		][]) {
-			if (!disabled.has(k) && hasValue(val)) {
-				fm[k as keyof FrontmatterData] = String(val);
-			}
+	/*  1️ DocProps */
+	for (const [k, val] of Object.entries(meta.docProps ?? {}) as [
+		keyof DocProps,
+		unknown,
+	][]) {
+		if (!disabled.has(k) && hasValue(val)) {
+			fm[k as keyof FrontmatterData] = String(val);
 		}
-
-		if (!fm.title) fm.title = "";
-		if (!hasValue(fm.authors) && !disabled.has("authors")) {
-			fm.authors = opts.useUnknownAuthor ? "Unknown Author" : undefined;
-		}
-
-		/*  2️  Highlight stats */
-		const hl = meta.annotations?.length ?? 0;
-		const notes = meta.annotations?.filter((a) => a.note?.trim()).length ?? 0;
-		if (!disabled.has("highlightCount")) fm.highlightCount = hl;
-		if (!disabled.has("noteCount")) fm.noteCount = notes;
-
-		/*  3️  Reading statistics */
-		const s = meta.statistics;
-		if (s?.book && s.derived) {
-			const statsMap = {
-				pages: s.book.pages,
-				lastRead: s.derived.lastReadDate?.toISOString(),
-				firstRead: s.derived.firstReadDate?.toISOString(),
-				totalReadTime: s.book.total_read_time,
-				progress: s.derived.percentComplete.toString(),
-				readingStatus: s.derived.readingStatus,
-				averageTimePerPage: s.derived.averageTimePerPage,
-			};
-
-			for (const [k, val] of Object.entries(statsMap) as [
-				keyof typeof statsMap,
-				any,
-			][]) {
-				if (!disabled.has(k) && hasValue(val)) {
-					fm[k] = val;
-				}
-			}
-		}
-
-		/*  4️  extra custom fields */
-		for (const k of extra) {
-			const docPropKey = k as keyof DocProps;
-			if (!disabled.has(k) && hasValue(meta.docProps?.[docPropKey])) {
-				fm[k as keyof FrontmatterData] = meta.docProps?.[docPropKey] as any;
-			}
-		}
-
-		// If caller provided a UID, include it so notes are born with a stable identity.
-		if (uid) {
-			(fm as any)[NoteIdentityService.UID_KEY] = uid;
-		}
-		return fm as FrontmatterData;
 	}
 
-	/**
-	 * Merges existing frontmatter with new KOReader data.
-	 * Preserves custom fields while updating statistics and counts.
-	 * @param existing - Existing parsed frontmatter
-	 * @param meta - New KOReader metadata
-	 * @param opts - Frontmatter generation settings
-	 * @returns Merged frontmatter data
-	 */
-	mergeFrontmatterData(
-		existing: ParsedFrontmatter,
-		meta: LuaMetadata,
-		opts: FrontmatterSettings,
-	): FrontmatterData {
-		const incoming = this.createFrontmatterData(meta, opts);
+	if (!fm.title) fm.title = "";
+	if (!hasValue(fm.authors) && !disabled.has("authors")) {
+		fm.authors = opts.useUnknownAuthor ? "Unknown Author" : undefined;
+	}
 
-		const existingCanon: Partial<FrontmatterData> = {};
-		for (const [k, v] of Object.entries(existing)) {
-			const canon = FieldMappingService.normalize(k) as keyof FrontmatterData;
-			(existingCanon as any)[canon] = v;
+	/*  2️  Highlight stats */
+	const hl = meta.annotations?.length ?? 0;
+	const notes = meta.annotations?.filter((a) => a.note?.trim()).length ?? 0;
+	if (!disabled.has("highlightCount")) fm.highlightCount = hl;
+	if (!disabled.has("noteCount")) fm.noteCount = notes;
+
+	/*  3️  Reading statistics */
+	const s = meta.statistics;
+	if (s?.book && s.derived) {
+		const statsMap = {
+			pages: s.book.pages,
+			lastRead: s.derived.lastReadDate?.toISOString(),
+			firstRead: s.derived.firstReadDate?.toISOString(),
+			totalReadTime: s.book.total_read_time,
+			progress: s.derived.percentComplete.toString(),
+			readingStatus: s.derived.readingStatus,
+			averageTimePerPage: s.derived.averageTimePerPage,
+		};
+
+		for (const [k, val] of Object.entries(statsMap) as [
+			keyof typeof statsMap,
+			any,
+		][]) {
+			if (!disabled.has(k) && hasValue(val)) {
+				(fm as any)[k] = val;
+			}
 		}
+	}
 
-		// 1) Build effective policy map, respecting user settings.
-		const effectivePolicies: PolicyMap = { ...MERGE_POLICIES };
+	/*  4️  extra custom fields */
+	for (const k of extra) {
+		const docPropKey = k as keyof DocProps;
+		if (!disabled.has(k) && hasValue(meta.docProps?.[docPropKey])) {
+			(fm as any)[k] = meta.docProps?.[docPropKey] as any;
+		}
+	}
 
-		// Disabled fields are preserved always.
-		const disabled = new Set(opts.disabledFields ?? []);
-		for (const key of disabled) {
+	// If caller provided a UID, include it so notes are born with a stable identity.
+	if (uid) {
+		(fm as any)[NoteIdentityService.UID_KEY] = uid;
+	}
+	return fm as FrontmatterData;
+}
+
+/**
+ * Merges existing frontmatter with new KOReader data.
+ * Preserves custom fields while updating statistics and counts.
+ * @param existing - Existing parsed frontmatter
+ * @param meta - New KOReader metadata
+ * @param opts - Frontmatter generation settings
+ * @returns Merged frontmatter data
+ */
+export function mergeFrontmatterData(
+	existing: ParsedFrontmatter,
+	meta: LuaMetadata,
+	opts: FrontmatterSettings,
+): FrontmatterData {
+	const incoming = createFrontmatterData(meta, opts);
+
+	const existingCanon: Partial<FrontmatterData> = {};
+	for (const [k, v] of Object.entries(existing)) {
+		const canon = FieldMappingService.normalize(k) as keyof FrontmatterData;
+		(existingCanon as any)[canon] = v;
+	}
+
+	// 1) Build effective policy map, respecting user settings.
+	const effectivePolicies: PolicyMap = { ...MERGE_POLICIES };
+
+	// Disabled fields are preserved always.
+	const disabled = new Set(opts.disabledFields ?? []);
+	for (const key of disabled) {
+		effectivePolicies[key as keyof FrontmatterData] = {
+			kind: "preserveAlways",
+		};
+	}
+
+	// Custom/user-defined extra fields should be preserved if no explicit policy.
+	const custom = new Set(opts.customFields ?? []);
+	for (const key of custom) {
+		if (!effectivePolicies[key as keyof FrontmatterData]) {
 			effectivePolicies[key as keyof FrontmatterData] = {
 				kind: "preserveAlways",
 			};
 		}
-
-		// Custom/user-defined extra fields should be preserved if no explicit policy.
-		const custom = new Set(opts.customFields ?? []);
-		for (const key of custom) {
-			if (!effectivePolicies[key as keyof FrontmatterData]) {
-				effectivePolicies[key as keyof FrontmatterData] = {
-					kind: "preserveAlways",
-				};
-			}
-		}
-
-		// 2) Determine all keys present in either existing or incoming.
-		const allKeys = new Set<keyof FrontmatterData>([
-			...(Object.keys(existingCanon) as (keyof FrontmatterData)[]),
-			...(Object.keys(incoming) as (keyof FrontmatterData)[]),
-		]);
-
-		const merged: Partial<FrontmatterData> = {};
-		for (const key of allKeys) {
-			const policy = effectivePolicies[key] ?? { kind: "preserveAlways" };
-			// Use the normalized existingCanon object here
-			const finalValue = applyPolicy(key, existingCanon, incoming, policy);
-			if (hasValue(finalValue)) {
-				(merged as any)[key] = finalValue;
-			}
-		}
-
-		// 4) Guarantee presence of required fields with fallbacks.
-		merged.title ??= "";
-		merged.authors ??= opts.useUnknownAuthor ? "Unknown Author" : "";
-
-		const existingUid = existingCanon[NoteIdentityService.UID_KEY];
-		if (existingUid && typeof existingUid === "string") {
-			(merged as any)[NoteIdentityService.UID_KEY] = existingUid;
-		}
-
-		return merged as FrontmatterData;
 	}
+
+	// 2) Determine all keys present in either existing or incoming.
+	const allKeys = new Set<keyof FrontmatterData>([
+		...(Object.keys(existingCanon) as (keyof FrontmatterData)[]),
+		...(Object.keys(incoming) as (keyof FrontmatterData)[]),
+	]);
+
+	const merged: Partial<FrontmatterData> = {};
+	for (const key of allKeys) {
+		const policy = effectivePolicies[key] ?? { kind: "preserveAlways" };
+		// Use the normalized existingCanon object here
+		const finalValue = applyPolicy(key, existingCanon, incoming, policy);
+		if (hasValue(finalValue)) {
+			(merged as any)[key] = finalValue;
+		}
+	}
+
+	// 4) Guarantee presence of required fields with fallbacks.
+	merged.title ??= "";
+	merged.authors ??= opts.useUnknownAuthor ? "Unknown Author" : "";
+
+	const existingUid = existingCanon[NoteIdentityService.UID_KEY];
+	if (existingUid && typeof existingUid === "string") {
+		(merged as any)[NoteIdentityService.UID_KEY] = existingUid;
+	}
+
+	return merged as FrontmatterData;
 }

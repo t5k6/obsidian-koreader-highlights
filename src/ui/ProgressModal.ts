@@ -1,5 +1,5 @@
 import path from "node:path";
-import { type App, ButtonComponent } from "obsidian";
+import type { App } from "obsidian";
 import { BaseModal } from "./BaseModal";
 
 export class ProgressModal extends BaseModal<void> {
@@ -25,13 +25,9 @@ export class ProgressModal extends BaseModal<void> {
 			text: "Collecting files...",
 		});
 
-		const buttonContainer = contentEl.createDiv({
-			cls: "modal-button-container",
-		});
-		new ButtonComponent(buttonContainer)
-			.setButtonText("Cancel")
-			.setWarning()
-			.onClick(() => this.cancelAndAbort());
+		this.createButtonRow(contentEl, [
+			{ text: "Cancel", warning: true, onClick: () => this.cancelAndAbort() },
+		]);
 	}
 
 	protected onCleanup(): void {

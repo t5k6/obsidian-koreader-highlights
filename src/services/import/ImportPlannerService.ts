@@ -1,10 +1,9 @@
 import type { App } from "obsidian";
 import type KoreaderImporterPlugin from "src/main";
-import type { DeviceStatisticsService } from "src/services/device/DeviceStatisticsService";
-import type { SDRFinder } from "src/services/device/SDRFinder";
+import type { DeviceService } from "src/services/device/DeviceService";
 import type { FileSystemService } from "src/services/FileSystemService";
 import type { LoggingService } from "src/services/LoggingService";
-import type { MetadataParser } from "src/services/parsing/MetadataParser";
+import { parse as parseMetadata } from "src/services/parsing/MetadataParser";
 import type { DuplicateFinder } from "src/services/vault/DuplicateFinder";
 import type { LocalIndexService } from "src/services/vault/LocalIndexService";
 import {
@@ -32,9 +31,7 @@ export class ImportPlannerService {
 		private readonly plugin: KoreaderImporterPlugin,
 		private readonly fs: FileSystemService,
 		private readonly index: LocalIndexService,
-		private readonly parser: MetadataParser,
-		private readonly sdrFinder: SDRFinder,
-		private readonly statsSvc: DeviceStatisticsService,
+		private readonly device: DeviceService,
 		private readonly dupFinder: DuplicateFinder,
 		private readonly log: LoggingService,
 	) {
@@ -51,9 +48,8 @@ export class ImportPlannerService {
 		return {
 			fs: this.fs,
 			index: this.index,
-			parser: this.parser,
-			sdrFinder: this.sdrFinder,
-			statsSvc: this.statsSvc,
+			parser: parseMetadata,
+			device: this.device,
 			dupFinder: this.dupFinder,
 			log: this.log,
 			settings: this.plugin.settings,

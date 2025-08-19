@@ -1,8 +1,9 @@
 import { type App, Component, Notice, setIcon, type TFile } from "obsidian";
-import { runAsyncAction } from "src/lib/ui/actionUtils";
+import { isErr } from "src/lib/core/result";
 import type KoreaderImporterPlugin from "src/main";
 import type { CommandManager } from "src/services/command/CommandManager";
-import type { LocalIndexService } from "src/services/vault/LocalIndexService";
+import type { IndexCoordinator } from "src/services/vault/index/IndexCoordinator";
+import { runAsyncAction } from "src/ui/utils/actionUtils";
 
 /**
  * Manages the status bar item to refresh the current KOReader note.
@@ -14,7 +15,7 @@ export class StatusBarManager extends Component {
 	constructor(
 		private readonly app: App,
 		private readonly plugin: KoreaderImporterPlugin,
-		private readonly localIndex: LocalIndexService,
+		private readonly localIndex: IndexCoordinator,
 		private readonly commandManager: CommandManager,
 	) {
 		super();
@@ -73,15 +74,11 @@ export class StatusBarManager extends Component {
 			this.statusBarItem,
 			async () => {
 				const res = await this.commandManager.executeRefreshCurrentNote(file);
-				if (res.status === "error") {
+				if (isErr(res)) {
 					resultMessage = "Refresh failed. See console for details.";
 					return;
 				}
-				if (res.status === "skipped") {
-					resultMessage = "No active file to refresh.";
-					return;
-				}
-				const changed = !!res.data?.changed;
+				const changed = !!res.value?.changed;
 				resultMessage = changed
 					? "KOReader highlights refreshed for this book."
 					: "No new highlights found for this book.";

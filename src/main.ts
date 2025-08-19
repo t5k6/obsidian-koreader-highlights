@@ -1,17 +1,18 @@
 import { Notice, Plugin } from "obsidian";
+import { isErr } from "src/lib/core/result";
 import { CommandManager } from "src/services/command/CommandManager";
 import { FileSystemService } from "src/services/FileSystemService";
 import { LoggingService } from "src/services/LoggingService";
 import { TemplateManager } from "src/services/parsing/TemplateManager";
-import { LocalIndexService } from "src/services/vault/LocalIndexService";
-import { NoteIdentityService } from "src/services/vault/NoteIdentityService";
-import { SnapshotManager } from "src/services/vault/SnapshotManager";
+import { IndexCoordinator } from "src/services/vault/index/IndexCoordinator";
 import { SettingsTab } from "src/ui/SettingsTab";
 import { StatusBarManager } from "src/ui/StatusBarManager";
 import { DIContainer } from "./core/DIContainer";
 import { MigrationManager } from "./core/MigrationManager";
 import { PluginDataStore } from "./core/PluginDataStore";
 import { registerServices } from "./core/registerServices";
+import { SETTINGS_TOKEN } from "./core/tokens";
+import { NotePersistenceService } from "./services/vault/NotePersistenceService";
 import type { KoreaderHighlightImporterSettings } from "./types";
 
 export default class KoreaderImporterPlugin extends Plugin {
@@ -23,7 +24,7 @@ export default class KoreaderImporterPlugin extends Plugin {
 	private migrationManager!: MigrationManager;
 	private dataStore!: PluginDataStore;
 	public templateManager!: TemplateManager;
-	public localIndexService!: LocalIndexService;
+	public localIndexService!: IndexCoordinator;
 	private statusBarManager!: StatusBarManager;
 
 	async onload() {
@@ -121,7 +122,7 @@ export default class KoreaderImporterPlugin extends Plugin {
 		this.dataStore = new PluginDataStore(this, fs, this.loggingService);
 
 		this.migrationManager = new MigrationManager(
-			this.app.vault,
+			this.app,
 			fs,
 			this.loggingService,
 			this.manifest.version,
@@ -133,13 +134,13 @@ export default class KoreaderImporterPlugin extends Plugin {
 		);
 
 		const loadedData = await this.dataStore.load();
-		const noteIdentity =
-			this.diContainer.resolve<NoteIdentityService>(NoteIdentityService);
-		const snapshotManager =
-			this.diContainer.resolve<SnapshotManager>(SnapshotManager);
+		const notePersistenceService =
+			this.diContainer.resolve<NotePersistenceService>(NotePersistenceService);
+		const localIndexService =
+			this.diContainer.resolve<IndexCoordinator>(IndexCoordinator);
 		const migratedData = await this.migrationManager.runAll(loadedData, {
-			noteIdentityService: noteIdentity,
-			snapshotManager,
+			notePersistenceService,
+			localIndexService,
 			settings: loadedData.settings,
 		});
 		if (migratedData !== loadedData) {
@@ -147,6 +148,7 @@ export default class KoreaderImporterPlugin extends Plugin {
 		}
 
 		this.settings = migratedData.settings;
+		this.diContainer.registerValue(SETTINGS_TOKEN, this.settings);
 		this.loggingService.onSettingsChanged(this.settings);
 		this.diContainer.notifySettingsChanged(this.settings, this.settings);
 		this.loggingService.info("KoreaderImporterPlugin", "Migrations checked.");
@@ -154,8 +156,8 @@ export default class KoreaderImporterPlugin extends Plugin {
 
 	private async initCoreServices(): Promise<void> {
 		this.localIndexService =
-			this.diContainer.resolve<LocalIndexService>(LocalIndexService);
-		// Eager init for perf; LocalIndexService.whenReady() will lazy-init if needed
+			this.diContainer.resolve<IndexCoordinator>(IndexCoordinator);
+		// Eager init for perf; IndexCoordinator.whenReady() will lazy-init if needed
 		await this.localIndexService.initialize();
 
 		this.templateManager =
@@ -202,9 +204,7 @@ export default class KoreaderImporterPlugin extends Plugin {
 		const commandManager =
 			this.diContainer.resolve<CommandManager>(CommandManager);
 		const res = await commandManager.executeImport();
-		if (res.status === "cancelled") {
-			new Notice("Import cancelled.");
-		} else if (res.status === "error") {
+		if (isErr(res)) {
 			new Notice("Import failed. Check console for details.");
 		}
 	}
@@ -213,19 +213,17 @@ export default class KoreaderImporterPlugin extends Plugin {
 		const commandManager =
 			this.diContainer.resolve<CommandManager>(CommandManager);
 		const res = await commandManager.executeScan();
-		if (res.status === "success") {
-			const count = res.data?.fileCount ?? 0;
-			if (count === 0) {
-				new Notice("Scan complete: No KOReader highlight files found.");
-			} else {
-				new Notice(
-					`Scan complete: Report saved to "KOReader SDR Scan Report.md"`,
-				);
-			}
-		} else if (res.status === "cancelled") {
-			new Notice("Scan cancelled.");
-		} else if (res.status === "error") {
+		if (isErr(res)) {
 			new Notice("Scan failed. Check console for details.");
+			return;
+		}
+		const count = res.value.fileCount ?? 0;
+		if (count === 0) {
+			new Notice("Scan complete: No KOReader highlight files found.");
+		} else {
+			new Notice(
+				`Scan complete: Report saved to "KOReader SDR Scan Report.md"`,
+			);
 		}
 	}
 
@@ -233,9 +231,7 @@ export default class KoreaderImporterPlugin extends Plugin {
 		const commandManager =
 			this.diContainer.resolve<CommandManager>(CommandManager);
 		const res = await commandManager.executeForceImport();
-		if (res.status === "cancelled") {
-			new Notice("Force import cancelled.");
-		} else if (res.status === "error") {
+		if (isErr(res)) {
 			new Notice("Force import failed. Check console for details.");
 		}
 	}
@@ -244,10 +240,10 @@ export default class KoreaderImporterPlugin extends Plugin {
 		const commandManager =
 			this.diContainer.resolve<CommandManager>(CommandManager);
 		const res = await commandManager.executeClearCaches();
-		if (res.status === "success") {
-			new Notice("KOReader Importer caches cleared.");
-		} else if (res.status === "error") {
+		if (isErr(res)) {
 			new Notice("Failed to clear caches. Check console for details.");
+		} else {
+			new Notice("KOReader Importer caches cleared.");
 		}
 	}
 
@@ -255,22 +251,22 @@ export default class KoreaderImporterPlugin extends Plugin {
 		const commandManager =
 			this.diContainer.resolve<CommandManager>(CommandManager);
 		const res = await commandManager.executeConvertCommentStyle();
-		if (res.status === "cancelled") new Notice("Conversion cancelled.");
-		else if (res.status === "error")
-			new Notice("Conversion failed. Check console for details.");
+		if (isErr(res)) new Notice("Conversion failed. Check console for details.");
 	}
 
 	public async triggerRecheckCapabilities(): Promise<void> {
 		const commandManager =
 			this.diContainer.resolve<CommandManager>(CommandManager);
 		const res = await commandManager.executeRecheckCapabilities();
-		if (res.status === "success" && res.data?.message) {
-			new Notice(`KOReader Importer: ${res.data.message}`, 5000);
-		} else if (res.status === "error") {
+		if (isErr(res)) {
 			new Notice(
 				"Failed to re-check capabilities. See console for details.",
 				7000,
 			);
+			return;
+		}
+		if (res.value?.message) {
+			new Notice(`KOReader Importer: ${res.value.message}`, 5000);
 		}
 	}
 

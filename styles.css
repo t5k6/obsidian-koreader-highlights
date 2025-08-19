@@ -9,7 +9,7 @@
 /* 0 ▸ KOReader RAW  (do NOT override – used as reference only)       */
 /* ─────────────────────────────────────────────────────────────────── */
 :root {
-	/* Raw KOReader colours */
+	/* Raw KOReader colors */
 	--khl-red-raw: #ff3300;
 	--khl-orange-raw: #ff8800;
 	--khl-yellow-raw: #ffff33;
@@ -31,7 +31,7 @@
 	--khl-purple: var(--khl-purple-raw);
 	--khl-gray: var(--khl-gray-raw);
 
-	/* Foreground helpers (contrast colours) */
+	/* Foreground helpers (contrast colors) */
 	--on-khl-red: #ffffff;
 	--on-khl-orange: #000000;
 	--on-khl-yellow: #000000;
@@ -82,7 +82,7 @@ mark[style*="#00ff00"] {
 
 /* [removed] .scrollable-panel (unused) */
 
-/* Badge component (colour via specific class or data-attr) */
+/* Badge component (color via specific class or data-attr) */
 .badge {
 	font-size: 0.75rem;
 	font-weight: 500;
@@ -518,4 +518,98 @@ mark[style*="#00ff00"] {
 /* Hide KOReader Importer's internal UID in the Properties UI */
 .metadata-property[data-property-key="kohl-uid"] {
 	display: none !important;
+}
+
+/*
+  KOReader Highlights Callout Styling
+  - Add this to an enabled CSS snippet in Obsidian.
+  - This colors the callout title bar with your KOReader highlight colors.
+*/
+
+/*
+ * --- MASTER RULE ---
+ * Set a consistent icon for all KOReader callouts.
+*/
+.callout[data-callout="yellow"],
+.callout[data-callout="orange"],
+.callout[data-callout="red"],
+.callout[data-callout="purple"],
+.callout[data-callout="blue"],
+.callout[data-callout="green"],
+.callout[data-callout="cyan"],
+.callout[data-callout="olive"],
+.callout[data-callout="gray"],
+.callout[data-callout="highlight"] {
+	--callout-icon: lucide-highlighter;
+}
+
+/*
+ * This flattened selector list correctly targets the content area of
+ * ALL our custom callouts and forces its background to be transparent.
+*/
+.callout[data-callout="yellow"] .callout-content,
+.callout[data-callout="orange"] .callout-content,
+.callout[data-callout="red"] .callout-content,
+.callout[data-callout="purple"] .callout-content,
+.callout[data-callout="blue"] .callout-content,
+.callout[data-callout="green"] .callout-content,
+.callout[data-callout="cyan"] .callout-content,
+.callout[data-callout="olive"] .callout-content,
+.callout[data-callout="gray"] .callout-content,
+.callout[data-callout="highlight"] .callout-content {
+	background: transparent !important;
+}
+
+/*
+ * --- PER-COLOR TITLE STYLING ---
+ * These rules apply the KOReader palette colors ONLY to the title bar.
+*/
+.callout[data-callout="yellow"] .callout-title {
+	background-color: var(--khl-yellow);
+	color: var(--on-khl-yellow);
+}
+
+.callout[data-callout="orange"] .callout-title {
+	background-color: var(--khl-orange);
+	color: var(--on-khl-orange);
+}
+
+.callout[data-callout="red"] .callout-title {
+	background-color: var(--khl-red);
+	color: var(--on-khl-red);
+}
+
+.callout[data-callout="purple"] .callout-title {
+	background-color: var(--khl-purple);
+	color: var(--on-khl-purple);
+}
+
+.callout[data-callout="blue"] .callout-title {
+	background-color: var(--khl-blue);
+	color: var(--on-khl-blue);
+}
+
+.callout[data-callout="green"] .callout-title {
+	background-color: var(--khl-green);
+	color: var(--on-khl-green);
+}
+
+.callout[data-callout="cyan"] .callout-title {
+	background-color: var(--khl-cyan);
+	color: var(--on-khl-cyan);
+}
+
+.callout[data-callout="olive"] .callout-title {
+	background-color: var(--khl-olive);
+	color: var(--on-khl-olive);
+}
+
+.callout[data-callout="gray"] .callout-title {
+	background-color: var(--khl-gray);
+	color: var(--on-khl-gray);
+}
+
+.callout[data-callout="highlight"] .callout-title {
+	background-color: var(--khl-gray);
+	color: var(--on-khl-gray);
 }

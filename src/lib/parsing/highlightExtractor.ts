@@ -1,3 +1,6 @@
+import { SimpleCache } from "src/lib/cache";
+import { sha1Hex } from "src/lib/core/crypto";
+import { safeParse } from "src/lib/core/validationUtils";
 import { computeAnnotationId } from "src/lib/formatting/formatUtils";
 import type { Annotation, CommentStyle, PositionObject } from "src/types";
 
@@ -26,19 +29,6 @@ type Marker = {
 	end: number;
 	json: string;
 };
-
-/**
- * Safely parses JSON string without throwing errors.
- * @param json - JSON string to parse
- * @returns Parsed object or null if invalid
- */
-function safeParseJson(json: string): KohlMetadata | null {
-	try {
-		return JSON.parse(json);
-	} catch {
-		return null;
-	}
-}
 
 /**
  * Splits a highlight block into text and note components.
@@ -84,7 +74,7 @@ export function extractHighlightsWithStyle(
 		};
 	}
 
-	const allMarkers = scanAll(content);
+	const { markers: allMarkers, styles } = scanAllCached(content);
 	if (allMarkers.length === 0) {
 		return {
 			annotations: [],
@@ -93,12 +83,8 @@ export function extractHighlightsWithStyle(
 			skippedCount: 0,
 		};
 	}
-
-	// Determine if mixed styles are present from the scanned markers
-	const stylesPresent = new Set(allMarkers.map((m) => m.style));
-	const hasMixedStyles = stylesPresent.size > 1;
-
-	const usedStyle = chooseStyle(preferredStyle, allMarkers);
+	const hasMixedStyles = styles.size > 1;
+	const usedStyle = chooseStyle(preferredStyle as Style, allMarkers);
 	if (!usedStyle) {
 		return {
 			annotations: [],
@@ -118,7 +104,7 @@ export function extractHighlightsWithStyle(
 		// but only process the ones that match our chosen style.
 		if (m.style !== usedStyle) continue;
 
-		const meta = safeParseJson(m.json);
+		const meta = safeParse<KohlMetadata & Record<string, any>>(m.json) as any; // Cast to any to access new props
 		if (!meta || !meta.id) {
 			skippedCount++;
 			continue;
@@ -139,6 +125,8 @@ export function extractHighlightsWithStyle(
 			datetime: meta.t,
 			text,
 			note,
+			color: meta.c,
+			drawer: meta.d,
 		});
 	}
 
@@ -168,16 +156,24 @@ export function createKohlMarker(
 	annotation: Annotation,
 	style: CommentStyle,
 ): string {
-	const meta: KohlMetadata = {
+	const meta = {
+		// No longer KohlMetadata, but a dynamic object
 		v: 1,
 		id: annotation.id ?? computeAnnotationId(annotation),
 		p: annotation.pageno,
 		pos0: annotation.pos0,
 		pos1: annotation.pos1,
 		t: annotation.datetime,
+		c: annotation.color,
+		d: annotation.drawer,
 	};
 
-	const jsonMeta = JSON.stringify(meta);
+	// Filter out undefined keys to keep comments clean
+	const cleanMeta = Object.fromEntries(
+		Object.entries(meta).filter(([, v]) => v !== undefined),
+	);
+
+	const jsonMeta = JSON.stringify(cleanMeta);
 	return style === "html"
 		? `<!-- KOHL ${jsonMeta} -->`
 		: `%% KOHL ${jsonMeta} %%`;
@@ -242,7 +238,7 @@ export function convertCommentStyle(
 	const fromRegex = new RegExp(fromPattern, "g");
 
 	return content.replace(fromRegex, (match, jsonMeta) => {
-		const meta = safeParseJson(jsonMeta);
+		const meta = safeParse<KohlMetadata>(jsonMeta);
 		if (!meta) return match; // Keep original if can't parse
 
 		const newJsonMeta = JSON.stringify(meta);
@@ -265,19 +261,41 @@ function scanStyle(content: string, style: Style): Marker[] {
 	return out;
 }
 
-function scanAll(content: string): Marker[] {
+type ScanResult = { markers: Marker[]; styles: Set<Style> };
+const SCAN_CACHE = new SimpleCache<string, ScanResult>(100);
+
+function scanAllCached(content: string): ScanResult {
+	const key =
+		content.length <= 8192
+			? `s:${content}`
+			: `h:${sha1Hex(content, { normalizeEol: true })}`;
+	const cached = SCAN_CACHE.get(key);
+	if (cached) return cached;
+
+	// Cheap presence tests
 	const hasHtml = HTML_KOHL_TEST.test(content);
 	const hasMd = MD_KOHL_TEST.test(content);
 
 	const htmlMarkers = hasHtml ? scanStyle(content, "html") : [];
 	const mdMarkers = hasMd ? scanStyle(content, "md") : [];
 
-	if (htmlMarkers.length === 0) return mdMarkers;
-	if (mdMarkers.length === 0) return htmlMarkers;
+	let merged: Marker[];
+	if (htmlMarkers.length === 0) merged = mdMarkers;
+	else if (mdMarkers.length === 0) merged = htmlMarkers;
+	else {
+		merged = [...htmlMarkers, ...mdMarkers];
+		merged.sort((a, b) => a.index - b.index || (a.style < b.style ? -1 : 1));
+	}
+	const result = {
+		markers: merged,
+		styles: new Set<Style>(merged.map((m) => m.style)),
+	};
+	SCAN_CACHE.set(key, result);
+	return result;
+}
 
-	const merged = [...htmlMarkers, ...mdMarkers];
-	merged.sort((a, b) => a.index - b.index || (a.style < b.style ? -1 : 1));
-	return merged;
+function scanAll(content: string): Marker[] {
+	return scanAllCached(content).markers;
 }
 
 function chooseStyle(preferred: Style, markers: Marker[]): Style | null {
@@ -285,4 +303,9 @@ function chooseStyle(preferred: Style, markers: Marker[]): Style | null {
 	if (present.has(preferred)) return preferred;
 	const fallback: Style = preferred === "html" ? "md" : "html";
 	return present.has(fallback) ? fallback : null;
+}
+
+// Optional test hook
+export function __clearHighlightScanCache(): void {
+	SCAN_CACHE.clear();
 }

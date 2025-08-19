@@ -23,8 +23,7 @@ export function groupSuccessiveHighlights(
 
 		if (current.length) {
 			const prev = current[current.length - 1];
-			const gap = distanceBetweenHighlights(prev, h);
-			seps.push(gap <= maxHighlightGap ? " " : " [...] ");
+			seps.push(isWithinGap(prev, h, maxHighlightGap) ? " " : " [...] ");
 		}
 
 		current.push(h);

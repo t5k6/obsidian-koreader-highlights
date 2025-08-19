@@ -3,7 +3,7 @@ import {
 	DEFAULT_LOGS_FOLDER,
 	DEFAULT_TEMPLATES_FOLDER,
 } from "src/constants";
-import { FileSystemService } from "src/services/FileSystemService";
+import { normalizeSystemPath, toVaultPath } from "src/lib/pathing";
 import type { KoreaderHighlightImporterSettings } from "src/types";
 import { z } from "zod";
 
@@ -19,41 +19,17 @@ function coerceBoolLoose(v: unknown): boolean {
 	return false;
 }
 
-// --- Nested defaults ---
-export const TEMPLATE_DEFAULTS = {
-	useCustomTemplate: false,
-	source: "vault" as const,
-	selectedTemplate: "default",
-	templateDir: DEFAULT_TEMPLATES_FOLDER,
-};
-
-export const FRONTMATTER_DEFAULTS = {
-	disabledFields: [] as string[],
-	customFields: [] as string[],
-	useUnknownAuthor: false,
-};
-
 // --- Nested schemas (resilient) ---
 export const TemplateSchema = z
 	.object({
-		useCustomTemplate: z.coerce
-			.boolean()
-			.catch(TEMPLATE_DEFAULTS.useCustomTemplate)
-			.default(TEMPLATE_DEFAULTS.useCustomTemplate),
-		source: z
-			.enum(["vault", "external"])
-			.catch(TEMPLATE_DEFAULTS.source)
-			.default(TEMPLATE_DEFAULTS.source),
-		selectedTemplate: z
-			.string()
-			.min(1)
-			.catch(TEMPLATE_DEFAULTS.selectedTemplate)
-			.default(TEMPLATE_DEFAULTS.selectedTemplate),
+		useCustomTemplate: z.coerce.boolean().catch(false).default(false),
+		source: z.enum(["vault", "external"]).catch("vault").default("vault"),
+		selectedTemplate: z.string().min(1).catch("default").default("default"),
 		templateDir: z
 			.string()
 			.min(1)
-			.catch(TEMPLATE_DEFAULTS.templateDir)
-			.default(TEMPLATE_DEFAULTS.templateDir),
+			.catch(DEFAULT_TEMPLATES_FOLDER)
+			.default(DEFAULT_TEMPLATES_FOLDER),
 	})
 	.passthrough();
 
@@ -61,16 +37,13 @@ export const FrontmatterSchema = z
 	.object({
 		disabledFields: z
 			.array(z.string())
-			.catch(FRONTMATTER_DEFAULTS.disabledFields)
-			.default(FRONTMATTER_DEFAULTS.disabledFields),
+			.catch([] as string[])
+			.default([] as string[]),
 		customFields: z
 			.array(z.string())
-			.catch(FRONTMATTER_DEFAULTS.customFields)
-			.default(FRONTMATTER_DEFAULTS.customFields),
-		useUnknownAuthor: z.coerce
-			.boolean()
-			.catch(FRONTMATTER_DEFAULTS.useUnknownAuthor)
-			.default(FRONTMATTER_DEFAULTS.useUnknownAuthor),
+			.catch([] as string[])
+			.default([] as string[]),
+		useUnknownAuthor: z.coerce.boolean().catch(false).default(false),
 	})
 	.passthrough();
 
@@ -185,8 +158,17 @@ export const BASE_DEFAULTS: KoreaderHighlightImporterSettings = {
 	commentStyle: "html" as const,
 	backupRetentionDays: 30,
 	scanTimeoutSeconds: 8,
-	template: TEMPLATE_DEFAULTS,
-	frontmatter: FRONTMATTER_DEFAULTS,
+	template: {
+		useCustomTemplate: false,
+		source: "vault",
+		selectedTemplate: "default",
+		templateDir: DEFAULT_TEMPLATES_FOLDER,
+	},
+	frontmatter: {
+		disabledFields: [],
+		customFields: [],
+		useUnknownAuthor: false,
+	},
 };
 
 export function normalizeSettings(
@@ -213,20 +195,14 @@ export function normalizeSettings(
 	) as KoreaderHighlightImporterSettings;
 
 	// Post-parse normalizations
-	merged.koreaderScanPath = FileSystemService.normalizeSystemPath(
-		merged.koreaderScanPath,
-	);
+	merged.koreaderScanPath = normalizeSystemPath(merged.koreaderScanPath);
 	// Normalize override as well (leave empty string as-is for disabled override)
 	merged.statsDbPathOverride = merged.statsDbPathOverride
-		? FileSystemService.normalizeSystemPath(merged.statsDbPathOverride)
+		? normalizeSystemPath(merged.statsDbPathOverride)
 		: "";
-	merged.highlightsFolder = FileSystemService.toVaultPath(
-		merged.highlightsFolder,
-	);
-	merged.logsFolder = FileSystemService.toVaultPath(merged.logsFolder);
-	merged.template.templateDir = FileSystemService.toVaultPath(
-		merged.template.templateDir,
-	);
+	merged.highlightsFolder = toVaultPath(merged.highlightsFolder);
+	merged.logsFolder = toVaultPath(merged.logsFolder);
+	merged.template.templateDir = toVaultPath(merged.template.templateDir);
 
 	// Override booleans with strict coercion from raw input when provided
 	const rawObj = (raw ?? {}) as any;

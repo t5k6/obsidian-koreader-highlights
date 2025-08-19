@@ -1,5 +1,27 @@
 // Local module used via Vitest alias to replace "obsidian" imports during tests.
 
+import { dump as yamlDump, load as yamlLoad } from "js-yaml";
+
+// YAML helpers to mirror Obsidian API in tests
+export function parseYaml(src: string): any {
+	try {
+		const v = yamlLoad(src);
+		// Obsidian's parseYaml returns null for empty; keep {} fallback in callers
+		return v as any;
+	} catch {
+		return {} as any;
+	}
+}
+
+export function stringifyYaml(obj: any): string {
+	try {
+		// Reasonable defaults; Obsidian formats scalars simply
+		return yamlDump(obj, { lineWidth: 120 });
+	} catch {
+		return "";
+	}
+}
+
 export class Modal {
 	app: unknown;
 	containerEl: { createEl: (tag: string, opts?: unknown) => unknown };
@@ -22,7 +44,6 @@ export class ButtonComponent {
 	}
 }
 
-// Minimal App/Component/Scope surface needed by UI suggesters and code under test
 export class Scope {
 	private handlers: Array<() => void> = [];
 	register(_mods: string[], _key: string, _cb: (e: unknown) => unknown) {
@@ -61,7 +82,18 @@ export class App {
 }
 
 export class Notice {
-	constructor(_msg: string) {}
+	message: string;
+	timeout: number;
+	constructor(message?: string, timeout?: number) {
+		this.message = message ?? "";
+		this.timeout = timeout ?? 0;
+	}
+	setMessage(msg: string) {
+		this.message = msg;
+	}
+	hide(): void {
+		// no-op for tests
+	}
 }
 
 /**
@@ -79,9 +111,16 @@ export function normalizePath(p: string): string {
 // Minimal file item classes used by services
 export class TAbstractFile {
 	path = "";
+	name = "";
+	vault: any = {};
 }
-export class TFile extends TAbstractFile {}
-export class TFolder extends TAbstractFile {}
+export class TFile extends TAbstractFile {
+	extension = "";
+	stat = { mtime: 0, ctime: 0, size: 0 };
+}
+export class TFolder extends TAbstractFile {
+	children: TAbstractFile[] = [];
+}
 
 // Helpers used by services
 export function debounce<T extends (...args: unknown[]) => unknown>(
@@ -118,25 +157,24 @@ export class Plugin {
 	}
 
 	// Add stubs for methods called on the plugin instance
-	addSettingTab(tab: PluginSettingTab) {
+	addSettingTab(_tab: PluginSettingTab) {
 		// No-op for tests
 	}
 
-	addCommand(command: any) {
+	addCommand(_command: any) {
 		// No-op for tests
 	}
 
-	registerEvent(eventRef: any) {
+	registerEvent(_eventRef: any) {
 		// No-op for tests
 	}
 
 	async loadData() {
 		return {};
 	}
-	async saveData(data: any) {}
+	async saveData(_data: any) {}
 }
 
-// This is the missing mock that caused the test failure.
 export class PluginSettingTab {
 	app: App;
 	plugin: Plugin;

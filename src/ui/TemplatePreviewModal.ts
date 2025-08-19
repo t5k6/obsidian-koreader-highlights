@@ -1,4 +1,5 @@
 import { type App, MarkdownRenderer } from "obsidian";
+import { compile, renderGroup } from "src/lib/template/templateCore";
 import type { TemplateManager } from "src/services/parsing/TemplateManager";
 import type { Annotation, TemplateDefinition } from "../types";
 import { BaseModal } from "./BaseModal";
@@ -75,11 +76,9 @@ export class TemplatePreviewModal extends BaseModal<void> {
 		el.setText("Rendering preview…");
 		await new Promise((resolve) => setTimeout(resolve, 10));
 
-		const compiledTemplateFn = this.templateManager.compile(
-			this.template.content,
-		);
+		const compiledTemplateFn = compile(this.template.content);
 
-		const renderedOutput = this.templateManager.renderGroup(
+		const renderedOutput = renderGroup(
 			compiledTemplateFn,
 			EXAMPLE_ANNOTATION_GROUP,
 			EXAMPLE_RENDER_CONTEXT,

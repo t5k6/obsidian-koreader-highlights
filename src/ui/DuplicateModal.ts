@@ -1,4 +1,5 @@
-import { type App, ButtonComponent, Setting, setIcon } from "obsidian";
+import { type App, ButtonComponent, Setting } from "obsidian";
+import { ModalContentBuilder } from "src/ui/utils/modalComponents";
 import type {
 	DuplicateChoice,
 	DuplicateHandlingSession,
@@ -66,21 +67,23 @@ export class DuplicateHandlingModal
 		const main = container.createDiv();
 
 		/* ---------- header ---------- */
-		const headerEl = main.createDiv("duplicate-modal-header");
-		headerEl.createEl("h2", { text: this.title, attr: { id: "modal-title" } });
-		headerEl.createEl("span", {
-			cls: "badge",
-			attr: { "data-type": this.match.matchType },
-			text: this.getMatchTypeLabel(),
+		const builder = new ModalContentBuilder(main);
+		builder.addStatusHeader({
+			title: this.title,
+			badge: { type: this.match.matchType, label: this.getMatchTypeLabel() },
+			icon: undefined,
+			headingLevel: 2,
 		});
+		// ensure aria points to our header
+		const h2 = main.querySelector("h2");
+		if (h2) h2.setAttr("id", "modal-title");
 
 		/* ---------- message + file ---------- */
 		const msg = main.createDiv("duplicate-message");
 		msg.createEl("p", { text: this.message });
-
-		const pathLine = msg.createDiv("duplicate-file-path");
-		setIcon(pathLine.createSpan(), "file-text");
-		pathLine.createSpan({ text: this.match.file.path });
+		new ModalContentBuilder(msg).addFilePath(this.match.file.path, () =>
+			this.app.workspace.openLinkText(this.match.file.path, "", false),
+		);
 
 		// helpers
 		const helperContainer = main.createDiv({ cls: "duplicate-modal-helpers" });
@@ -92,20 +95,21 @@ export class DuplicateHandlingModal
 
 		/* ---------- stats ---------- */
 		if (this.match.matchType !== "exact") {
-			const stats = main.createDiv("duplicate-stats");
-			stats.createEl("h4", { text: "Summary of Changes" });
-			const list = stats.createEl("ul");
-
+			const items: Array<{ text: string; type?: "add" | "modify" | "info" }> =
+				[];
 			if (this.match.newHighlights > 0) {
-				list.createEl("li", {
+				items.push({
 					text: `This import will add ${this.match.newHighlights} new highlight(s).`,
+					type: "add",
 				});
 			}
 			if (this.match.modifiedHighlights > 0) {
-				list.createEl("li", {
+				items.push({
 					text: `This import will update ${this.match.modifiedHighlights} existing highlight(s).`,
+					type: "modify",
 				});
 			}
+			new ModalContentBuilder(main).addStatsList("Summary of Changes", items);
 		}
 
 		/* ---------- toggle ---------- */

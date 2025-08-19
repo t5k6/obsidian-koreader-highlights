@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { err, ok, type Result } from "src/lib/core/result";
+import { normalizeWhitespace } from "src/lib/strings/stringUtils";
 
 export type CanonicalizeOptions = {
 	normalizeEol?: boolean; // default true: CRLF -> LF
@@ -6,6 +8,14 @@ export type CanonicalizeOptions = {
 	collapseWhitespace?: boolean; // default false
 };
 
+/**
+ * Applies a set of normalization rules to a string to produce a canonical representation.
+ * This ensures that hashing operations are consistent across different environments and inputs.
+ *
+ * @param input The string to canonicalize.
+ * @param opts Options to control normalization.
+ * @returns The canonicalized string.
+ */
 export function canonicalize(
 	input: string,
 	opts: CanonicalizeOptions = {},
@@ -15,46 +25,100 @@ export function canonicalize(
 		trim = false,
 		collapseWhitespace = false,
 	} = opts;
+
 	let s = String(input ?? "");
-	if (normalizeEol) s = s.replace(/\r\n/g, "\n");
-	if (trim) s = s.trim();
-	if (collapseWhitespace) s = s.replace(/\s+/g, " ");
+
+	if (normalizeEol) {
+		s = s.replace(/\r\n/g, "\n");
+	}
+
+	// Use the robust normalizeWhitespace utility if both trim and collapse are requested.
+	if (trim && collapseWhitespace) {
+		s = normalizeWhitespace(s);
+	} else {
+		// Otherwise, apply them independently to respect specific cases (e.g., collapse only).
+		if (collapseWhitespace) {
+			s = s.replace(/\s+/g, " ");
+		}
+		if (trim) {
+			s = s.trim();
+		}
+	}
+
 	return s;
 }
 
-// Sync (Node/Electron)
+/**
+ * Internal hashing utility for Node.js crypto.
+ * @param algorithm The hash algorithm (e.g., 'sha1', 'sha256').
+ * @param canonicalizedInput The pre-canonicalized string to hash.
+ * @returns The hex-encoded hash digest.
+ */
+function _nodeHash(algorithm: string, canonicalizedInput: string): string {
+	return createHash(algorithm).update(canonicalizedInput, "utf8").digest("hex");
+}
+
+/**
+ * Synchronously computes a SHA-1 hash of the input string.
+ * Uses Node.js's built-in crypto module. Suitable for server-side/Electron environments.
+ */
 export function sha1Hex(input: string, opts?: CanonicalizeOptions): string {
 	const s = canonicalize(input, opts);
-	return createHash("sha1").update(s, "utf8").digest("hex");
+	return _nodeHash("sha1", s);
 }
 
+/**
+ * Synchronously computes a SHA-256 hash of the input string.
+ * Uses Node.js's built-in crypto module.
+ */
 export function sha256Hex(input: string, opts?: CanonicalizeOptions): string {
 	const s = canonicalize(input, opts);
-	return createHash("sha256").update(s, "utf8").digest("hex");
+	return _nodeHash("sha256", s);
 }
 
+/**
+ * Asynchronously computes a SHA-256 hash of the input string, returning a Result.
+ * Prefers the Web Crypto API (`crypto.subtle`) if available, falling back to Node.js crypto.
+ * This is the preferred method for hashing in potentially browser-like environments.
+ *
+ * @returns A `Result` containing the hex string on success, or an `Error` on failure.
+ */
 export async function sha256HexAsync(
 	input: string,
 	opts?: CanonicalizeOptions,
-): Promise<string> {
+): Promise<Result<string, Error>> {
+	const s = canonicalize(input, opts);
 	const subtle = (globalThis as any).crypto?.subtle;
-	if (!subtle) {
+
+	// Prefer Web Crypto API (available in modern Node, Deno, and browsers)
+	if (subtle) {
 		try {
-			return sha256Hex(input, opts);
-		} catch {
-			throw new Error(
-				"SubtleCrypto not available and Node crypto not accessible.",
-			);
+			const enc = new TextEncoder().encode(s);
+			const buf = await subtle.digest("SHA-256", enc);
+			const hex = [...new Uint8Array(buf)]
+				.map((b) => b.toString(16).padStart(2, "0"))
+				.join("");
+			return ok(hex);
+		} catch (e) {
+			return err(e instanceof Error ? e : new Error("Web Crypto API failed"));
 		}
 	}
-	const s = canonicalize(input, opts);
-	const enc = new TextEncoder().encode(s);
-	const buf = await subtle.digest({ name: "SHA-256" }, enc);
-	return [...new Uint8Array(buf)]
-		.map((b) => b.toString(16).padStart(2, "0"))
-		.join("");
+
+	// Fallback to Node.js crypto module
+	try {
+		return ok(_nodeHash("sha256", s));
+	} catch (e) {
+		return err(
+			new Error(
+				"Crypto fallback failed: Node.js crypto module is unavailable or threw an error.",
+			),
+		);
+	}
 }
 
+/**
+ * A consolidated object of cryptographic utilities for easy injection or namespacing.
+ */
 export const CryptoUtils = {
 	canonicalize,
 	sha1Hex,

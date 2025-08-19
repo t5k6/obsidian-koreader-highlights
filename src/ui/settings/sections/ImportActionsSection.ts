@@ -1,6 +1,6 @@
-import { runAsyncAction } from "src/lib/ui/actionUtils";
 import type KoreaderImporterPlugin from "src/main";
 import type { DebouncedFn } from "src/types";
+import { runAsyncAction } from "src/ui/utils/actionUtils";
 import { renderSettingsSection } from "../SettingsKit";
 import { SettingsSection } from "../SettingsSection";
 

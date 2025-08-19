@@ -18,3 +18,10 @@ export interface ProbeResult {
 	layout: KOReaderLayout;
 	explain: string[];
 }
+
+// Lightweight environment surface for UI validation
+export interface DeviceEnvironment {
+	scanPath: string;
+	statsDbPath: string | null;
+	isValid: boolean;
+}

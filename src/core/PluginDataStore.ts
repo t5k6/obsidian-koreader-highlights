@@ -1,5 +1,7 @@
 import type { Plugin } from "obsidian";
 import { Mutex } from "src/lib/concurrency/concurrency";
+import { isErr } from "src/lib/core/result";
+import { safeParse } from "src/lib/core/validationUtils";
 import type { FileSystemService } from "src/services/FileSystemService";
 import type { LoggingService } from "src/services/LoggingService";
 import {
@@ -30,12 +32,18 @@ export class PluginDataStore {
 		return this.mutex.lock(async () => {
 			if (this.cached) return this.cached;
 
-			await this.fs.ensurePluginDataDirExists();
+			const ensured = await this.fs.ensurePluginDataDir();
+			if (isErr(ensured)) {
+				this.log.warn(
+					"PluginDataStore: failed to ensure plugin data dir (continuing)",
+					(ensured as any).error ?? ensured,
+				);
+			}
 
 			const readJson = async (p: string): Promise<any | null> => {
 				try {
 					const raw = await this.plugin.app.vault.adapter.read(p);
-					return JSON.parse(raw);
+					return safeParse<any>(raw);
 				} catch (_e) {
 					return null;
 				}
@@ -80,7 +88,13 @@ export class PluginDataStore {
 	public async save(data: PluginData): Promise<void> {
 		await this.mutex.lock(async () => {
 			// Ensure plugin data directory exists prior to writing
-			await this.fs.ensurePluginDataDirExists();
+			const ensured = await this.fs.ensurePluginDataDir();
+			if (isErr(ensured)) {
+				this.log.warn(
+					"PluginDataStore: failed to ensure plugin data dir before save",
+					(ensured as any).error ?? ensured,
+				);
+			}
 			const json = JSON.stringify(data, null, 2);
 			const dst = this.dataPath();
 			const bak = this.backupPath();

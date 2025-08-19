@@ -10,6 +10,7 @@ export const APP_TOKEN = Symbol("App");
 export const VAULT_TOKEN = Symbol("Vault");
 export const PLUGIN_TOKEN = Symbol("KoreaderImporterPlugin");
 export const DUPLICATE_MODAL_FACTORY_TOKEN = Symbol("DuplicateModalFactory");
+export const SETTINGS_TOKEN = Symbol("KoreaderHighlightImporterSettings");
 
 // --- For type-hinting the container resolve method ---
 

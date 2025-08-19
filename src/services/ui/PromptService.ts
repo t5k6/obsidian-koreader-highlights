@@ -1,5 +1,5 @@
 import { type App, Notice } from "obsidian";
-import { normalizeFileNamePiece } from "src/lib/pathing/pathingUtils";
+import { toFileSafe } from "src/lib/pathing";
 
 export type RenameResult = { stem: string } | { cancelled: true };
 export type ConfirmationDecision = "confirm" | "cancel";
@@ -28,7 +28,7 @@ export class PromptService {
 				return { cancelled: true };
 			}
 
-			const sanitized = normalizeFileNamePiece(rawValue);
+			const sanitized = toFileSafe(rawValue, { fallback: "" });
 			const error = params.validate ? params.validate(sanitized) : null;
 
 			if (error) {

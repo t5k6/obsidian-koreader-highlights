@@ -3,6 +3,22 @@
 /* ------------------------------------------------------------------ */
 
 /**
+ * Lazily initializes an async value once; resets on failure so callers can retry.
+ */
+export function asyncLazy<T>(factory: () => Promise<T>): () => Promise<T> {
+	let promise: Promise<T> | undefined;
+	return () => {
+		if (!promise) {
+			promise = factory().catch((e) => {
+				promise = undefined; // allow retry after failure
+				throw e;
+			});
+		}
+		return promise;
+	};
+}
+
+/**
  * A minimal mutex that serializes async functions.
  * Guarantees release even if the callback throws/rejects.
  */
@@ -71,9 +87,55 @@ export class Mutex {
 }
 
 /**
- * Provides per-key serial execution of asynchronous tasks without retaining locks
- * after the last job for a given key has completed. This is a lightweight,
- * memory-safe alternative to maintaining a pool of mutexes.
+ * Serializes async tasks per key using a provided map as storage.
+ * Ensures tasks for the same key run strictly one-by-one.
+ * Cleans up the key when the last task settles.
+ */
+export function runExclusiveWithMap<T>(
+	map: Map<string, Promise<unknown>>,
+	key: string,
+	task: () => Promise<T>,
+): Promise<T> {
+	const existing = map.get(key);
+	const chained = existing
+		? existing.then(task, task) // Execute task regardless of prior success or failure
+		: task();
+
+	// Track this key with the newest promise
+	map.set(key, chained as Promise<unknown>);
+
+	// Cleanup once the task settles, but only if still the tail
+	chained.finally(() => {
+		if (map.get(key) === chained) {
+			map.delete(key);
+		}
+	});
+
+	// Attach a no-op catch handler to prevent unhandled rejection errors in test runners.
+	// This does not alter the promise's final resolved/rejected state for the caller.
+	chained.catch(() => {
+		/* no-op */
+	});
+
+	return chained as Promise<T>;
+}
+
+/**
+ * Global convenience: coordinates tasks across all callers of this module.
+ * Useful if you want cross-service serialization for shared keys (e.g., vault paths).
+ */
+const __globalExclusive = new Map<string, Promise<unknown>>();
+export function runExclusive<T>(
+	key: string,
+	task: () => Promise<T>,
+): Promise<T> {
+	return runExclusiveWithMap(__globalExclusive, key, task);
+}
+
+/**
+ * Provides per-key serial execution of asynchronous tasks. If a task fails,
+ * subsequent tasks for the same key will still be executed after the failure.
+ * This is a lightweight, memory-safe alternative to maintaining a pool of mutexes.
  */
 export class KeyedQueue {
 	private queues = new Map<string, Promise<unknown>>();
@@ -83,27 +145,38 @@ export class KeyedQueue {
 	 * same key have completed.
 	 * @param key A unique identifier for the queue (e.g., a file path).
 	 * @param task The asynchronous function to execute.
-	 * @returns A promise that resolves with the result of the task.
+	 * @returns A promise that resolves or rejects with the result of the task.
 	 */
 	public run<T>(key: string, task: () => Promise<T> | T): Promise<T> {
-		const head = this.queues.get(key) ?? Promise.resolve();
+		const existing = this.queues.get(key);
+		const taskWrapper = async () => task();
 
-		const next = head
-			// Ensures the next task runs even if the previous one failed.
-			.catch(() => {})
-			.then(task);
+		const current = existing
+			? existing.then(taskWrapper, taskWrapper)
+			: taskWrapper();
 
-		this.queues.set(key, next);
+		this.queues.set(key, current);
 
-		// Once the task is settled (fulfilled or rejected), check if we can clean up.
-		next.finally(() => {
-			// If this 'next' promise is still the last one in the chain for this key,
-			// it's safe to remove the key from the map.
-			if (this.queues.get(key) === next) {
+		current.finally(() => {
+			if (this.queues.get(key) === current) {
 				this.queues.delete(key);
 			}
 		});
 
-		return next as Promise<T>;
+		// Attach a no-op catch handler to prevent unhandled rejection errors in test runners.
+		// This does not alter the promise's final resolved/rejected state for the caller.
+		current.catch(() => {
+			/* no-op */
+		});
+
+		return current;
+	}
+
+	/**
+	 * @internal
+	 * FOR TESTING PURPOSES ONLY. Returns the number of active queues.
+	 */
+	public _getInternalQueueCount(): number {
+		return this.queues.size;
 	}
 }

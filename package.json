@@ -22,17 +22,16 @@
 	"author": "Tahsin Kocaman",
 	"license": "MIT",
 	"dependencies": {
-		"@floating-ui/dom": "^1.6.12",
-		"@popperjs/core": "^2.11.8",
+		"@floating-ui/dom": "^1.7.4",
 		"luaparse": "^0.3.1",
 		"node-diff3": "^3.1.2",
 		"obsidian": "^1.8.7",
 		"p-limit": "7.0.0",
 		"sql.js": "^1.13.0",
-		"zod": "^4.0.17"
+		"zod": "^4.1.0"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.2.0",
+		"@biomejs/biome": "^2.2.2",
 		"@types/diff3": "^0.0.2",
 		"@types/js-yaml": "^4.0.9",
 		"@types/luaparse": "^0.2.12",

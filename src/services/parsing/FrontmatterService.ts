@@ -1,111 +1,29 @@
-import {
-	type App,
-	type FrontMatterCache,
-	parseYaml,
-	stringifyYaml,
-	type TFile,
-} from "obsidian";
+import { type App, type FrontMatterCache, parseYaml, TFile } from "obsidian";
 import { KeyedQueue } from "src/lib/concurrency";
+import {
+	generateFrontmatter as coreGenerateFrontmatter,
+	mergeFrontmatter as coreMergeFrontmatter,
+	parseFrontmatter as coreParseFrontmatter,
+	reconstructFileContent as coreReconstructFileContent,
+	stringifyFrontmatter as coreStringifyFrontmatter,
+} from "src/lib/content/contentLogic";
 import { err, isErr, ok, type Result } from "src/lib/core/result";
-import type { AppFailure } from "src/lib/errors/resultTypes";
-import { groupSuccessiveHighlights } from "src/lib/formatting/annotationGrouper";
-import {
-	formatDateWithFormat,
-	secondsToHoursMinutesSeconds,
-} from "src/lib/formatting/dateUtils";
-import {
-	compareAnnotations,
-	formatPercent,
-} from "src/lib/formatting/formatUtils";
-import { createKohlMarkers } from "src/lib/parsing/highlightExtractor";
-import { normalizeFileNamePiece } from "src/lib/pathing/pathingUtils";
+import type { AppFailure, AppResult } from "src/lib/errors";
+import { FRONTMATTER_REGEX } from "src/lib/frontmatter/frontmatterUtils";
+import { normalize as normalizeField } from "src/lib/parsing/fieldMapping";
+import { toFileSafe } from "src/lib/pathing";
 import type { FileSystemService } from "src/services/FileSystemService";
 import type { LoggingService } from "src/services/LoggingService";
 import type {
-	CompiledTemplate,
-	TemplateManager,
-} from "src/services/parsing/TemplateManager";
-import type {
-	Annotation,
 	BookMetadata,
-	CommentStyle,
 	FileMetadataExtractor,
+	FrontmatterData,
+	FrontmatterSettings,
+	LuaMetadata,
+	ParsedFrontmatter,
 } from "src/types";
-import { FieldMappingService } from "./FieldMappingService";
-
-// --- Formatting Constants and Helpers ---
-type ProgKey =
-	| "title"
-	| "authors"
-	| "description"
-	| "keywords"
-	| "series"
-	| "language"
-	| "pages"
-	| "highlightCount"
-	| "noteCount"
-	| "lastRead"
-	| "firstRead"
-	| "totalReadTime"
-	| "progress"
-	| "readingStatus"
-	| "averageTimePerPage";
-
-function splitAndTrim(s: string, rx: RegExp): string[] {
-	return s
-		.split(rx)
-		.map((x) => x.trim())
-		.filter(Boolean);
-}
-
-function isHms(s: unknown): boolean {
-	return typeof s === "string" && /^\s*\d+h \d+m \d+s\s*$/.test(s);
-}
-function isPercent(s: unknown): boolean {
-	return typeof s === "string" && /^\s*\d+(\.\d+)?%\s*$/.test(s);
-}
-
-const metaFieldFormatters: Partial<Record<ProgKey, (v: unknown) => unknown>> = {
-	lastRead: (v) => formatDateWithFormat(String(v), "YYYY-MM-DD"),
-	firstRead: (v) => formatDateWithFormat(String(v), "YYYY-MM-DD"),
-	totalReadTime: (v) => {
-		if (isHms(v)) return v; // Already formatted, return as-is
-		const n = Number(v);
-		return Number.isFinite(n)
-			? secondsToHoursMinutesSeconds(n)
-			: String(v ?? "");
-	},
-	averageTimePerPage: (v) => {
-		if (isHms(v)) return v; // Already formatted, return as-is
-		const n = Number(v);
-		return Number.isFinite(n)
-			? secondsToHoursMinutesSeconds(n)
-			: String(v ?? "");
-	},
-	progress: (v) => {
-		if (isPercent(v)) return v; // Already formatted, return as-is
-		const n = Number(v);
-		return Number.isFinite(n) ? formatPercent(n) : String(v ?? "");
-	},
-	readingStatus: (v) => String(v ?? ""),
-	description: (v) => String(v ?? "").replace(/<[^>]+>/g, ""), // strip html
-	authors: (v) => {
-		if (Array.isArray(v)) return v;
-		if (typeof v === "string" && v.startsWith("[[")) return v;
-		const arr = splitAndTrim(String(v), /\s*[,;&\n]\s*/);
-		const links = arr.map((a) => {
-			// Escape special wikilink characters that would break the link: |, ], #, ^
-			const escaped = a.replace(/([|#^\]])/g, "\\$1");
-			return `[[${escaped}]]`;
-		});
-		return links.length === 1 ? links[0] : links;
-	},
-	keywords: (v) => (Array.isArray(v) ? v : splitAndTrim(String(v), /,/)),
-};
 
 export class FrontmatterService implements FileMetadataExtractor {
-	private static readonly FRONTMATTER_REGEX =
-		/^---\s*?\r?\n([\s\S]+?)\r?\n---\s*?\r?\n?/s;
 	private readonly log;
 	private readonly editQueue = new KeyedQueue();
 
@@ -115,6 +33,147 @@ export class FrontmatterService implements FileMetadataExtractor {
 		private readonly fs: FileSystemService,
 	) {
 		this.log = this.loggingService.scoped("FrontmatterService");
+	}
+
+	/**
+	 * Atomically edit a note by reading, applying a pure updater, and writing back.
+	 * - Serializes per-path via KeyedQueue
+	 * - Preserves YAML formatting by reconstructing with stringify()
+	 * - Optional hooks before/after write
+	 */
+	public async editFile(
+		file: TFile,
+		updater: NoteUpdater,
+		options: EditFileOptions = {},
+	): Promise<AppResult<EditFileResult>> {
+		return this.editQueue.run(file.path, async () => {
+			const initialMtime = file.stat.mtime ?? 0;
+			// Read current content
+			const readRes = await this.fs.readVaultText(file.path);
+			if (isErr(readRes)) {
+				this.log.error("editFile: read failed", {
+					file: file.path,
+					error: readRes.error,
+				});
+				return err(readRes.error as AppFailure);
+			}
+			const currentContent = readRes.value;
+			const currentDoc = this.parseContent(currentContent);
+
+			// Compute next doc
+			const maybeNext = await updater({
+				frontmatter: currentDoc.frontmatter ?? {},
+				body: currentDoc.body,
+			});
+			const nextDoc = maybeNext ?? {
+				frontmatter: currentDoc.frontmatter ?? {},
+				body: currentDoc.body,
+			};
+
+			// Detect changes
+			const fmEqual = this.areFrontmattersEqual(
+				currentDoc.frontmatter ?? {},
+				nextDoc.frontmatter ?? {},
+			);
+			const bodyEqual = (currentDoc.body ?? "") === (nextDoc.body ?? "");
+			if (options.skipIfNoChange && fmEqual && bodyEqual) {
+				return ok({ changed: false, file });
+			}
+
+			const newContent = this.reconstructFileContent(
+				nextDoc.frontmatter ?? {},
+				nextDoc.body ?? "",
+			);
+
+			// Optional pre-write hook
+			if (options.beforeWrite) {
+				const pre = await options.beforeWrite({
+					file,
+					newContent,
+					currentDoc: {
+						frontmatter: currentDoc.frontmatter ?? {},
+						body: currentDoc.body,
+					},
+					nextDoc: {
+						frontmatter: nextDoc.frontmatter ?? {},
+						body: nextDoc.body ?? "",
+					},
+				});
+				if (isErr(pre as Result<void, AppFailure>)) {
+					return pre as unknown as AppResult<EditFileResult>;
+				}
+			}
+
+			// Concurrent modification detection (simple mtime CAS)
+			if (options.detectConcurrentModification) {
+				const currentFile = this.app.vault.getAbstractFileByPath(file.path);
+
+				// Use a type guard to ensure we have a TFile before accessing .stat
+				if (currentFile instanceof TFile) {
+					const currentMtime = currentFile.stat.mtime;
+					if (currentMtime > initialMtime) {
+						this.log.warn(
+							"editFile: concurrent modification detected (mtime changed)",
+							{
+								file: file.path,
+								initialMtime,
+								currentMtime,
+							},
+						);
+						return err({
+							kind: "WriteFailed",
+							path: file.path,
+							cause: "ConcurrentModification",
+						});
+					}
+				} else {
+					// If the file is now missing or has been replaced by a folder,
+					// it's a definite concurrent modification.
+					this.log.warn(
+						"editFile: concurrent modification detected (file deleted or replaced by folder)",
+						{
+							file: file.path,
+							initialMtime,
+						},
+					);
+					return err({
+						kind: "WriteFailed",
+						path: file.path,
+						cause: "ConcurrentModification",
+					});
+				}
+			}
+
+			// Write
+			const writeRes = await this.fs.modifyVaultFileWithRetry(file, newContent);
+			if (isErr(writeRes)) {
+				this.log.error("editFile: write failed", {
+					file: file.path,
+					error: writeRes.error,
+				});
+				return err(writeRes.error as AppFailure);
+			}
+
+			// Optional post-write hook (best-effort)
+			try {
+				await options.afterWrite?.({
+					file,
+					newContent,
+					currentDoc: {
+						frontmatter: currentDoc.frontmatter ?? {},
+						body: currentDoc.body,
+					},
+					nextDoc: {
+						frontmatter: nextDoc.frontmatter ?? {},
+						body: nextDoc.body ?? "",
+					},
+				});
+			} catch (e) {
+				this.log.warn("editFile: afterWrite hook threw", e);
+			}
+
+			return ok({ changed: true, file });
+		});
 	}
 
 	/**
@@ -181,82 +240,59 @@ export class FrontmatterService implements FileMetadataExtractor {
 
 	/**
 	 * Asynchronously parses a TFile to separate its frontmatter and body.
-	 * Uses Obsidian's metadata cache for improved performance and accuracy.
+	 * This implementation is unified to a single, robust parsing path to
+	 * ensure correctness and simplify maintenance.
 	 * @param file The TFile to parse.
 	 * @returns A promise resolving to an object with the parsed frontmatter and body.
 	 */
 	public async parseFile(
 		file: TFile,
 	): Promise<{ frontmatter: FrontMatterCache; body: string }> {
-		const cache = this.app.metadataCache.getFileCache(file);
+		// 1. Perform the stateful "shell" operation: Read the file content.
+		const readResult = await this.fs.readVaultText(file.path);
 
-		// Fast path via cache
-		if (cache?.frontmatterPosition) {
-			const r = await this.fs.readVaultText(file.path);
-			if (isErr(r)) {
-				this.log.warn(
-					`Failed to read file for cached frontmatter fast-path: ${file.path}`,
-					(r as any).error ?? r,
-				);
-				// Fall back to empty body but preserve cached frontmatter
-				return { frontmatter: cache.frontmatter ?? {}, body: "" };
-			}
-			const body = r.value.slice(cache.frontmatterPosition.end.offset);
-			// Avoid a second YAML parse; rely on cache.frontmatter here
-			return { frontmatter: cache.frontmatter ?? {}, body: body.trimStart() };
-		}
-
-		// Fallback: parse content ourselves
-		const r2 = await this.fs.readVaultText(file.path);
-		if (isErr(r2)) {
+		if (isErr(readResult)) {
 			this.log.warn(
 				`Failed to read file during parseFile: ${file.path}`,
-				(r2 as any).error ?? r2,
+				(readResult as any).error ?? readResult,
 			);
 			return { frontmatter: {}, body: "" };
 		}
-		return this.parseContent(r2.value);
+
+		// 2. Pass the raw data to the pure, reliable "core" function.
+		return this.parseContent(readResult.value);
 	}
 
 	/**
-	 * Extract minimal book metadata for indexing. Prioritizes metadata cache,
-	 * falls back to a partial file read and YAML parse.
+	 * [STATEFUL SHELL] Extracts minimal book metadata for indexing. This method
+	 * orchestrates getting the frontmatter (a side-effect) and then calls the
+	 * pure, static `extractBookMetadata` function to perform the transformation.
 	 */
 	public async extractMetadata(file: TFile): Promise<BookMetadata | null> {
 		try {
-			const cache = this.app.metadataCache.getFileCache(file);
-			if (cache?.frontmatter) {
-				return this.extractFromFrontmatter(cache.frontmatter, file.path);
-			}
-
-			const content = await this.readPartial(file, 4096);
-			const match = content.match(FrontmatterService.FRONTMATTER_REGEX);
-			if (!match) return null;
-
-			try {
-				const fm = parseYaml(match[1]) ?? {};
-				return this.extractFromFrontmatter(
-					fm as Record<string, unknown>,
-					file.path,
-				);
-			} catch (e) {
-				this.log.warn(`YAML parse failed for partial read of ${file.path}`, e);
-				return null;
-			}
+			const fm = await this.getFrontmatterFromFile(file);
+			return fm ? FrontmatterService.extractBookMetadata(fm, file.path) : null;
 		} catch (e) {
 			this.log.warn(`extractMetadata failed for ${file.path}`, e);
 			return null;
 		}
 	}
 
-	private extractFromFrontmatter(
+	/**
+	 * [FUNCTIONAL CORE] Pure function to extract book metadata from a frontmatter object.
+	 * This method is static, has no side-effects, and does not depend on `this`.
+	 * @param fm The frontmatter object.
+	 * @param vaultPath The path of the file, used for the returned metadata.
+	 * @returns `BookMetadata` or `null` if essential fields are missing.
+	 */
+	public static extractBookMetadata(
 		fm: Record<string, unknown>,
 		vaultPath: string,
 	): BookMetadata | null {
 		// Canonicalize keys first (friendly/case-insensitive -> canonical)
 		const canonical: Record<string, unknown> = {};
 		for (const [k, v] of Object.entries(fm)) {
-			const canon = FieldMappingService.normalize(k);
+			const canon = normalizeField(k);
 			canonical[canon] = v;
 		}
 		const title = String((canonical as any).title ?? "");
@@ -266,11 +302,35 @@ export class FrontmatterService implements FileMetadataExtractor {
 
 		if (!title && !authors) return null;
 
-		const authorSlug = normalizeFileNamePiece(authors).toLowerCase();
-		const titleSlug = normalizeFileNamePiece(title).toLowerCase();
+		const authorSlug = toFileSafe(authors, { lower: true, fallback: "" });
+		const titleSlug = toFileSafe(title, { lower: true, fallback: "" });
 		const key = `${authorSlug}::${titleSlug}`;
 
 		return { title, authors, key, vaultPath };
+	}
+
+	/**
+	 * [STATEFUL HELPER] Gets frontmatter from a file, prioritizing the metadata cache,
+	 * then falling back to a partial file read.
+	 */
+	private async getFrontmatterFromFile(
+		file: TFile,
+	): Promise<Record<string, unknown> | null> {
+		const cache = this.app.metadataCache.getFileCache(file);
+		if (cache?.frontmatter) {
+			return cache.frontmatter;
+		}
+
+		const content = await this.readPartial(file, 4096);
+		const match = content.match(FRONTMATTER_REGEX);
+		if (!match) return null;
+
+		try {
+			return (parseYaml(match[1]) as Record<string, unknown>) ?? null;
+		} catch (e) {
+			this.log.warn(`YAML parse failed for partial read of ${file.path}`, e);
+			return null;
+		}
 	}
 
 	private async readPartial(file: TFile, bytes: number): Promise<string> {
@@ -295,20 +355,7 @@ export class FrontmatterService implements FileMetadataExtractor {
 		frontmatter: FrontMatterCache;
 		body: string;
 	} {
-		const { yaml, body } = this.splitFrontmatter(content);
-		let frontmatter: FrontMatterCache = {};
-		if (yaml) {
-			try {
-				frontmatter = parseYaml(yaml) ?? {};
-			} catch (e) {
-				this.log.error(
-					"FrontmatterService: Failed to parse YAML block:",
-					e,
-					yaml,
-				);
-			}
-		}
-		return { frontmatter, body: body.trimStart() };
+		return coreParseFrontmatter(content);
 	}
 
 	/**
@@ -321,45 +368,7 @@ export class FrontmatterService implements FileMetadataExtractor {
 		data: Record<string, unknown>,
 		options: { useFriendlyKeys?: boolean; sortKeys?: boolean } = {},
 	): string {
-		if (!data || Object.keys(data).length === 0) {
-			return "";
-		}
-
-		const { useFriendlyKeys = true, sortKeys = true } = options;
-		const output: Record<string, unknown> = {};
-
-		let entries = Object.entries(data);
-		if (sortKeys) {
-			entries = entries.sort(([a], [b]) => a.localeCompare(b));
-		}
-
-		for (const [key, rawValue] of entries) {
-			if (rawValue === undefined || rawValue === null) continue;
-
-			// Normalize incoming key if it's a friendly key
-			const progKey = (FieldMappingService.normalize(key) ?? key) as ProgKey;
-
-			if (
-				useFriendlyKeys &&
-				(progKey === "highlightCount" || progKey === "noteCount") &&
-				rawValue === 0
-			) {
-				continue;
-			}
-
-			const formatter = metaFieldFormatters[progKey];
-			const value = formatter ? formatter(rawValue) : rawValue;
-
-			const keyOut = useFriendlyKeys
-				? FieldMappingService.toFriendly(progKey)
-				: progKey;
-
-			if (value !== "" && (!Array.isArray(value) || value.length > 0)) {
-				output[keyOut] = value;
-			}
-		}
-
-		return Object.keys(output).length > 0 ? stringifyYaml(output) : "";
+		return coreStringifyFrontmatter(data, options);
 	}
 
 	/**
@@ -372,178 +381,44 @@ export class FrontmatterService implements FileMetadataExtractor {
 		frontmatter: Record<string, unknown>,
 		body: string,
 	): string {
-		const yamlString = this.stringify(frontmatter, {
-			useFriendlyKeys: true,
-			sortKeys: true,
-		});
-
-		if (!yamlString) {
-			return body.trim();
-		}
-
-		return `---\n${yamlString}---\n\n${body.trim()}`;
-	}
-
-	/**
-	 * Pure function to compose body content from annotations using a pre-compiled template.
-	 * Callers are responsible for loading/compiling the template and providing settings.
-	 */
-	public composeBody(
-		annotations: Annotation[],
-		compiledTemplate: CompiledTemplate,
-		templateManager: TemplateManager,
-		commentStyle: CommentStyle,
-		maxHighlightGap: number,
-	): string {
-		const anns = annotations ?? [];
-		if (anns.length === 0) return "";
-
-		// 1) Group by chapter without mutating input
-		const grouped = new Map<string, Annotation[]>();
-		for (const ann of anns) {
-			const chapter = ann.chapter?.trim() || "Chapter Unknown";
-			const arr = grouped.get(chapter);
-			if (arr) arr.push(ann);
-			else grouped.set(chapter, [ann]);
-		}
-
-		// 2) Sort annotations within each chapter and compute chapter start page
-		const chapters = Array.from(grouped.entries()).map(
-			([chapterName, chapterAnnotations]) => {
-				const sorted = [...chapterAnnotations].sort(compareAnnotations);
-				// Clone to avoid mutating input while ensuring templates get chapter on each annotation
-				const withChapter = sorted.map((a) => ({ ...a, chapter: chapterName }));
-				const startPage = withChapter[0]?.pageno ?? 0;
-				return { name: chapterName, startPage, annotations: withChapter };
-			},
-		);
-
-		// 3) Sort chapters by start page
-		chapters.sort((a, b) => a.startPage - b.startPage);
-
-		// 4) Render each chapter
-		const renderedBlocks: string[] = [];
-		for (const chapter of chapters) {
-			if (!chapter.annotations || chapter.annotations.length === 0) continue;
-			const groups = groupSuccessiveHighlights(
-				chapter.annotations,
-				maxHighlightGap,
-			);
-			let isFirstInChapter = true;
-
-			for (const g of groups) {
-				const rendered = templateManager.renderGroup(
-					compiledTemplate,
-					g.annotations,
-					{
-						separators: g.separators,
-						isFirstInChapter,
-					},
-				);
-
-				// Add KOHL markers unless comment style is "none"
-				const block =
-					commentStyle !== "none"
-						? `${createKohlMarkers(g.annotations, commentStyle)}\n${rendered}`
-						: rendered;
-
-				renderedBlocks.push(block);
-				isFirstInChapter = false;
-			}
-		}
-
-		return renderedBlocks.join("\n\n");
-	}
-
-	/**
-	 * Provides a safe, serialized, and transactional Read-Modify-Write workflow for vault files.
-	 * This is the canonical method for performing content-aware file modifications.
-	 */
-	public async editFile(
-		file: TFile,
-		updater: NoteUpdater,
-		opts: EditFileOptions = {},
-	): Promise<Result<EditFileResult, AppFailure>> {
-		return this.editQueue.run(`edit:${file.path}`, async () => {
-			const initialMtime = opts.detectConcurrentModification
-				? file.stat.mtime
-				: null;
-
-			const parsed = await this.parseFile(file);
-			const currentDoc: NoteDoc = {
-				frontmatter: (parsed.frontmatter as Record<string, unknown>) ?? {},
-				body: parsed.body,
-			};
-
-			const nextDoc = await updater(currentDoc);
-			if (nextDoc === null || nextDoc === undefined) {
-				return ok({ changed: false, file });
-			}
-
-			const newContent = this.reconstructFileContent(
-				nextDoc.frontmatter ?? {},
-				nextDoc.body ?? "",
-			);
-			if (opts.skipIfNoChange) {
-				if (
-					currentDoc.body === (nextDoc.body ?? "") &&
-					this.areFrontmattersEqual(currentDoc.frontmatter, nextDoc.frontmatter)
-				) {
-					return ok({ changed: false, file });
-				}
-			}
-
-			if (initialMtime !== null && file.stat.mtime !== initialMtime) {
-				return err({
-					kind: "WriteFailed",
-					path: file.path,
-					cause: new Error(
-						"Concurrent modification detected: File was modified by another process during the operation.",
-					),
-				});
-			}
-
-			const ctx: EditContext = { file, newContent, currentDoc, nextDoc };
-
-			if (opts.beforeWrite) {
-				const hookResult = await opts.beforeWrite(ctx);
-				if (isErr(hookResult)) return hookResult;
-			}
-
-			const writeResult = await this.fs.writeVaultFile(file.path, newContent);
-			if (isErr(writeResult)) return writeResult;
-			const writtenFile = writeResult.value;
-
-			if (opts.afterWrite) {
-				try {
-					await opts.afterWrite({ ...ctx, file: writtenFile });
-				} catch (e) {
-					this.log.warn(
-						`Best-effort afterWrite hook failed for ${file.path}`,
-						e,
-					);
-				}
-			}
-
-			return ok({ changed: true, file: writtenFile });
-		});
+		return coreReconstructFileContent(frontmatter, body);
 	}
 
 	private areFrontmattersEqual(fm1: any, fm2: any): boolean {
 		try {
-			return JSON.stringify(fm1 ?? {}) === JSON.stringify(fm2 ?? {});
+			const a = coreStringifyFrontmatter(fm1 ?? {}, {
+				useFriendlyKeys: true,
+				sortKeys: true,
+			});
+			const b = coreStringifyFrontmatter(fm2 ?? {}, {
+				useFriendlyKeys: true,
+				sortKeys: true,
+			});
+			return a === b;
 		} catch {
 			return false;
 		}
 	}
+}
 
-	private splitFrontmatter(content: string): {
-		yaml: string | null;
-		body: string;
-	} {
-		const match = content.match(FrontmatterService.FRONTMATTER_REGEX);
-		if (!match) return { yaml: null, body: content };
-		return { yaml: match[1] ?? null, body: content.slice(match[0].length) };
+// ---------------------- Static Frontmatter Generators ----------------------
+export class _FrontmatterStaticHelpers {}
+
+export namespace FrontmatterService {
+	export function createFrontmatterData(
+		meta: LuaMetadata,
+		opts: FrontmatterSettings,
+		uid?: string,
+	): FrontmatterData {
+		return coreGenerateFrontmatter(meta, opts, uid);
+	}
+
+	export function mergeFrontmatterData(
+		existing: ParsedFrontmatter,
+		meta: LuaMetadata,
+		opts: FrontmatterSettings,
+	): FrontmatterData {
+		return coreMergeFrontmatter(existing, meta, opts);
 	}
 }
 
@@ -572,6 +447,6 @@ export type EditFileResult = {
 export type EditFileOptions = {
 	skipIfNoChange?: boolean;
 	detectConcurrentModification?: boolean;
-	beforeWrite?: (ctx: EditContext) => Promise<Result<void, AppFailure>>;
+	beforeWrite?: (ctx: EditContext) => Promise<AppResult<void>>;
 	afterWrite?: (ctx: EditContext) => Promise<void>;
 };

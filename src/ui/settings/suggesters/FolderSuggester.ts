@@ -48,29 +48,32 @@ export class FolderSuggest extends TextInputSuggest<ScoredFolder> {
 		return results.slice(0, 20);
 	}
 
-	renderSuggestion(item: ScoredFolder, el: HTMLElement): void {
+	protected renderItem(item: ScoredFolder, el: HTMLElement): void {
 		const path = `${item.folder.path}/`.replace("//", "/");
 		if (item.matchIndices && item.matchIndices.length > 0) {
-			el.innerHTML = this.highlightMatches(path, item.matchIndices);
+			this.highlightMatches(path, item.matchIndices, el);
 		} else {
 			el.setText(path);
 		}
 	}
 
-	private highlightMatches(text: string, indices: number[]): string {
+	private highlightMatches(
+		text: string,
+		indices: number[],
+		el: HTMLElement,
+	): void {
+		// Build DOM nodes to avoid any innerHTML injection risks
 		const set = new Set(indices);
-		let out = "";
 		for (let i = 0; i < text.length; i++) {
 			const ch = text[i];
-			if (set.has(i)) out += `<span class="suggestion-highlight">${ch}</span>`;
-			else out += ch;
+			const span = el.createSpan({ text: ch }); // ensures escaping
+			if (set.has(i)) span.addClass("suggestion-highlight");
 		}
-		return out;
 	}
 
-	selectSuggestion(item: ScoredFolder): void {
+	protected selectSuggestion(item: ScoredFolder): void {
 		this.inputEl.value = item.folder.path;
 		this.inputEl.trigger("input");
-		this.close();
+		// close handled by SuggestionList onSelect
 	}
 }

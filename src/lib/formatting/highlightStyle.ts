@@ -3,13 +3,14 @@
  * Guarantees at least 4.5:1 contrast for any generated mark element.  *
  ***********************************************************************/
 
+import { escapeHtml } from "src/lib/strings/stringUtils";
 import type { Annotation } from "src/types";
 
 /* ------------------------------------------------------------------ */
 /* 1 ▸ names & helpers                                                */
 /* ------------------------------------------------------------------ */
 
-export const colourNames = [
+export const colorNames = [
 	"red",
 	"orange",
 	"yellow",
@@ -21,15 +22,15 @@ export const colourNames = [
 	"gray",
 ] as const;
 
-export type ColourName = (typeof colourNames)[number];
+export type ColorName = (typeof colorNames)[number];
 
-const toBgVar = (n: ColourName) => `var(--khl-${n})`;
-const toFgVar = (n: ColourName) => `var(--on-khl-${n})`;
+const toBgVar = (n: ColorName) => `var(--khl-${n})`;
+const toFgVar = (n: ColorName) => `var(--on-khl-${n})`;
 
 /* read-only map (kept mostly for compatibility with old code) */
 export const KOReaderHighlightColors = Object.fromEntries(
-	colourNames.map((n) => [n, toBgVar(n)]),
-) as Record<ColourName, string>;
+	colorNames.map((n) => [n, toBgVar(n)]),
+) as Record<ColorName, string>;
 
 const RAW_HEX3 = /^#?([\da-f])([\da-f])([\da-f])$/i;
 const RAW_HEX6 = /^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i;
@@ -73,20 +74,6 @@ const contrast = (a: RGB, b: RGB) => {
 /* 3 ▸ Public API                                                     */
 /* ------------------------------------------------------------------ */
 
-const ESC_MAP: Record<string, string> = {
-	"&": "&amp;",
-	"<": "&lt;",
-	">": "&gt;",
-	'"': "&quot;",
-	"'": "&#39;",
-};
-/**
- * Escapes HTML special characters in a string.
- * @param s - String to escape
- * @returns HTML-safe string
- */
-const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ESC_MAP[c]);
-
 /**
  * Renders KOReader highlight text as HTML with appropriate styling.
  * Handles different highlight styles (underline, strikeout, invert, color).
@@ -103,19 +90,15 @@ export function styleHighlight(
 ): string {
 	if (!text.trim()) return "";
 
-	// 1. Process paragraphs using the now-confirmed backslash separator.
 	const paragraphs = text
-		// In a JS string literal, a single backslash is written as '\\'.
 		.split("\\")
-		.map((p) => esc(p.trim())) // Trim whitespace from each paragraph and escape it.
-		.filter(Boolean); // Remove any empty paragraphs resulting from the split.
+		.map((p) => escapeHtml(p.trim()))
+		.filter(Boolean);
 
-	// Join with inline-safe <br><br> to create visual paragraph breaks.
 	const processedText = paragraphs.join("<br><br>");
 
-	// 2. Determine the wrapper function. Default to no wrapper.
 	let wrapper: ((content: string) => string) | null = null;
-	const key = koColor?.toLowerCase().trim() as ColourName | undefined;
+	const key = koColor?.toLowerCase().trim() as ColorName | undefined;
 	const isPaletteColor = !!key && !!KOReaderHighlightColors[key];
 
 	switch (drawer) {
@@ -131,11 +114,14 @@ export function styleHighlight(
 				`<mark style="background:transparent;color:${fg};">${content}</mark>`;
 			break;
 		}
+		case "lighten":
+		case undefined:
 		default: {
 			if (drawer === "lighten" && key === "gray") {
-				break;
-			}
-			if (koColor && (isPaletteColor || toRgb(koColor))) {
+				// This is KOReader's default highlight.
+				wrapper = (content) => content;
+			} else if (koColor && (isPaletteColor || toRgb(koColor))) {
+				// This handles all other recognized colors for "lighten" and other drawers.
 				const bg = isPaletteColor ? KOReaderHighlightColors[key!] : koColor;
 				const fg = isPaletteColor ? toFgVar(key!) : bestBW(koColor);
 				wrapper = (content) =>
@@ -145,7 +131,6 @@ export function styleHighlight(
 		}
 	}
 
-	// 3. Apply the wrapper if determined, otherwise return the processed plain text.
 	return wrapper ? wrapper(processedText) : processedText;
 }
 

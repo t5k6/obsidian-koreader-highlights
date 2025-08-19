@@ -2,9 +2,9 @@ import path from "node:path";
 import initSqlJs, { type Database, type SqlJsStatic } from "sql.js";
 import { SQLITE_WASM } from "src/binaries/sql-wasm-base64";
 import { INDEX_DB_VERSION } from "src/constants";
-import { AsyncLazy } from "src/lib/concurrency/asyncLazy";
+import { asyncLazy } from "src/lib/concurrency";
 import { err, isErr, ok, type Result } from "src/lib/core/result";
-import type { AppFailure } from "src/lib/errors/resultTypes";
+import type { AppFailure } from "src/lib/errors";
 import type { Disposable } from "src/types";
 import type { FileSystemService } from "./FileSystemService";
 import type { LoggingService } from "./LoggingService";
@@ -16,7 +16,7 @@ export interface OpenDbOptions {
 
 export class SqlJsManager implements Disposable {
 	private readonly log;
-	private sqlJsLazy: AsyncLazy<SqlJsStatic>;
+	private getSqlJsLazy: () => Promise<SqlJsStatic>;
 	private dbCache = new Map<string, Database>();
 	private openInFlight = new Map<
 		string,
@@ -29,21 +29,25 @@ export class SqlJsManager implements Disposable {
 		private fsService: FileSystemService,
 	) {
 		this.log = this.loggingService.scoped("SqlJsManager");
-		this.sqlJsLazy = new AsyncLazy<SqlJsStatic>(async () => {
-			this.log.info("Initializing sql.js WASM...");
-			const nodeBuffer = Buffer.from(SQLITE_WASM, "base64");
-			const wasmBinary = nodeBuffer.buffer.slice(
-				nodeBuffer.byteOffset,
-				nodeBuffer.byteOffset + nodeBuffer.byteLength,
-			);
-			const sql = await initSqlJs({ wasmBinary });
-			this.log.info("sql.js WASM initialized.");
-			return sql;
-		});
+		this.getSqlJsLazy = asyncLazy<SqlJsStatic>(() =>
+			this.createSqlJsInstance(),
+		);
 	}
 
+	private createSqlJsInstance = async (): Promise<SqlJsStatic> => {
+		this.log.info("Initializing sql.js WASM...");
+		const nodeBuffer = Buffer.from(SQLITE_WASM, "base64");
+		const wasmBinary = nodeBuffer.buffer.slice(
+			nodeBuffer.byteOffset,
+			nodeBuffer.byteOffset + nodeBuffer.byteLength,
+		);
+		const sql = await initSqlJs({ wasmBinary });
+		this.log.info("sql.js WASM initialized.");
+		return sql;
+	};
+
 	public async getSqlJs(): Promise<SqlJsStatic> {
-		return this.sqlJsLazy.get();
+		return this.getSqlJsLazy();
 	}
 
 	/**
@@ -138,6 +142,12 @@ export class SqlJsManager implements Disposable {
 						`Database validation failed for ${filePath}. It may be corrupt.`,
 						e,
 					);
+					// Proactively evict to avoid keeping/overwriting a corrupt DB
+					try {
+						db.close();
+					} catch (_) {}
+					this.dbCache.delete(filePath);
+					this.dbIsDirty.set(filePath, false);
 					// treat validation failure as ReadFailed for this path
 					return err({ kind: "ReadFailed", path: filePath, cause: e as any });
 				}
@@ -234,6 +244,8 @@ export class SqlJsManager implements Disposable {
 			this.closeDatabase(filePath);
 		}
 
-		this.sqlJsLazy.reset();
+		this.getSqlJsLazy = asyncLazy<SqlJsStatic>(() =>
+			this.createSqlJsInstance(),
+		);
 	}
 }

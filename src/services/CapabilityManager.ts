@@ -1,4 +1,5 @@
 import { type App, Notice } from "obsidian";
+import { isErr } from "src/lib/core/result";
 import type { FileSystemService } from "./FileSystemService";
 import type { LoggingService } from "./LoggingService";
 
@@ -70,6 +71,30 @@ export class CapabilityManager {
 		} as Record<Capability, CapabilityState>;
 	}
 
+	// Define capability requirements declaratively (relative to plugin data dir)
+	private readonly capabilityConfigs: Record<
+		Capability,
+		{
+			probePath: string;
+			ensureDirs?: string[];
+			dependencies?: Capability[];
+		}
+	> = {
+		pluginDataWritable: {
+			probePath: ".__plugin_probe__",
+			ensureDirs: [""],
+		},
+		snapshotsWritable: {
+			probePath: "snapshots/.__snap_probe__",
+			ensureDirs: ["snapshots", "backups"],
+			dependencies: ["pluginDataWritable"],
+		},
+		indexPersistenceLikely: {
+			probePath: "highlight_index.sqlite.__probe__",
+			ensureDirs: [""],
+		},
+	};
+
 	// Public API
 
 	public getSnapshot(): CombinedCapabilitySnapshot {
@@ -102,10 +127,13 @@ export class CapabilityManager {
 		cap: Capability,
 		opts: EnsureOptions = {},
 	): Promise<boolean> {
-		// dependencies: snapshotsWritable depends on pluginDataWritable
-		if (cap === "snapshotsWritable") {
-			const ok = await this.ensure("pluginDataWritable", opts);
-			if (!ok) return this.handleEnsureResult("snapshotsWritable", false, opts);
+		// Handle declarative dependencies first
+		const config = this.capabilityConfigs[cap];
+		if (config?.dependencies?.length) {
+			for (const dep of config.dependencies) {
+				const ok = await this.ensure(dep, opts);
+				if (!ok) return this.handleEnsureResult(cap, false, opts);
+			}
 		}
 
 		if (!opts.forceRefresh && this.isFresh(cap)) {
@@ -234,56 +262,30 @@ export class CapabilityManager {
 		}
 	}
 
-	// New: Declarative configs for each capability (getter avoids using `this` before constructor runs)
-	private get capabilityConfigs(): Record<
-		Capability,
-		{ probePath: string; ensureDirs?: string[] }
-	> {
-		return {
-			pluginDataWritable: {
-				probePath: this.fs.joinPluginDataPath(".__plugin_probe__"),
-				ensureDirs: [this.fs.joinPluginDataPath()],
-			},
-			snapshotsWritable: {
-				probePath: this.fs.joinPluginDataPath("snapshots", ".__snap_probe__"),
-				ensureDirs: [
-					this.fs.joinPluginDataPath("snapshots"),
-					this.fs.joinPluginDataPath("backups"),
-				],
-			},
-			indexPersistenceLikely: {
-				probePath: this.fs.joinPluginDataPath(
-					"highlight_index.sqlite.__probe__",
-				),
-				ensureDirs: [this.fs.joinPluginDataPath()],
-			},
-		};
-	}
-
-	// New: Unified probe helper
-	private async probeWritablePath(config: {
-		probePath: string;
-		ensureDirs?: string[];
-	}): Promise<boolean> {
-		try {
-			if (config.ensureDirs) {
-				for (const dir of config.ensureDirs) {
-					await this.fs.ensureVaultFolder(dir);
-				}
-			}
-			const ok = await this.fs.writeProbe(config.probePath);
-			if (!ok) throw new Error("probe failed");
-			return true;
-		} catch (_e) {
-			return false;
-		}
-	}
-
 	private async probe(cap: Capability): Promise<boolean> {
 		try {
-			const config = this.capabilityConfigs[cap as Capability];
-			if (!config) return false; // Defensive
-			const ok = await this.probeWritablePath(config);
+			const config = this.capabilityConfigs[cap];
+			if (!config) return false;
+
+			// Ensure directories (relative to plugin data dir)
+			if (config.ensureDirs?.length) {
+				for (const dir of config.ensureDirs) {
+					const fullDir = this.fs.joinPluginDataPath(dir);
+					const ensured = (await this.fs.ensureVaultFolder(fullDir)) as any;
+					// Be tolerant of loose mocks returning undefined; only treat as error
+					// when the shape matches our Result type and isErr reports failure.
+					const looksLikeResult =
+						ensured && typeof ensured === "object" && "ok" in ensured;
+					if (looksLikeResult && isErr(ensured)) {
+						this.state[cap].lastError = ensured.error;
+						return false;
+					}
+				}
+			}
+
+			// Write probe file
+			const probePath = this.fs.joinPluginDataPath(config.probePath);
+			const ok = await this.fs.writeProbe(probePath);
 			this.state[cap].lastError = undefined;
 			return ok;
 		} catch (e) {

@@ -1,8 +1,8 @@
 import { Notice } from "obsidian";
 import { DEFAULT_LOGS_FOLDER } from "src/constants";
-import { runAsyncAction } from "src/lib/ui/actionUtils";
 import { LogLevel } from "src/services/LoggingService";
 import type { KoreaderHighlightImporterSettings } from "src/types";
+import { runAsyncAction } from "src/ui/utils/actionUtils";
 import { renderSettingsSection } from "../SettingsKit";
 import { SettingsSection } from "../SettingsSection";
 

@@ -1,4 +1,4 @@
-import { FileNameGenerator } from "src/services/vault/FileNameGenerator";
+import { validateFileNameTemplate } from "src/lib/pathing";
 import { FrontmatterFieldModal } from "src/ui/FrontmatterFieldModal";
 import { renderSettingsSection } from "../SettingsKit";
 import { SettingsSection } from "../SettingsSection";
@@ -26,12 +26,11 @@ export class FormattingSettingsSection extends SettingsSection {
 					desc: "Available placeholders: {{title}}, {{authors}}, {{importDate}}.",
 					if: () => this.plugin.settings.useCustomFileNameTemplate,
 					render: (s) => {
-						const validator = new FileNameGenerator(this.plugin.loggingService);
 						const validationEl = s.descEl.createDiv({
 							cls: "setting-item-description koreader-setting-validation",
 						});
 						const update = (value: string) => {
-							const { errors, warnings } = validator.validate(value);
+							const { errors, warnings } = validateFileNameTemplate(value);
 							const errorHtml = errors.map((e) => `<li>${e}</li>`).join("");
 							const warningHtml = warnings.map((w) => `<li>${w}</li>`).join("");
 							validationEl.innerHTML = `<ul>${errorHtml}${warningHtml}</ul>`;

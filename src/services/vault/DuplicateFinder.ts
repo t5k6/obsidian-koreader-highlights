@@ -1,19 +1,26 @@
 import {
 	type App,
 	normalizePath,
+	type TAbstractFile,
 	type TFile,
-	TFolder,
+	type TFolder,
 	type Vault,
 } from "obsidian";
-import type { CacheManager } from "src/lib/cache/CacheManager";
+import { runPool } from "src/lib/concurrency";
 import { isErr } from "src/lib/core/result";
 import {
-	bookKeyFromDocProps,
-	getHighlightKey,
-} from "src/lib/formatting/formatUtils";
+	analyzeAnnotations,
+	sortDuplicateMatches,
+} from "src/lib/duplicates/analysis";
+import {
+	buildExpectedFilenameKeys,
+	filenameMatchesKeys,
+	frontmatterMatchesBook,
+} from "src/lib/duplicates/matching";
+import { bookKeyFromDocProps } from "src/lib/formatting/formatUtils";
 import { isTFile, isTFolder } from "src/lib/obsidian/typeguards";
 import { extractHighlightsWithStyle } from "src/lib/parsing/highlightExtractor";
-import { toMatchKey } from "src/lib/pathing/pathingUtils";
+import { generateFileName } from "src/lib/pathing";
 import type KoreaderImporterPlugin from "src/main";
 import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
 import type {
@@ -21,55 +28,47 @@ import type {
 	DocProps,
 	DuplicateMatch,
 	DuplicateScanResult,
+	KoreaderHighlightImporterSettings,
 	LuaMetadata,
+	SettingsObserver,
 } from "src/types";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
-import type { FileNameGenerator } from "./FileNameGenerator";
-import type { LocalIndexService } from "./LocalIndexService";
-import type { NoteIdentityService } from "./NoteIdentityService";
-import type { SnapshotManager } from "./SnapshotManager";
+import type { IndexCoordinator } from "./index/IndexCoordinator";
+import type { NotePersistenceService } from "./NotePersistenceService";
 
-export class DuplicateFinder {
+export class DuplicateFinder implements SettingsObserver {
 	private readonly log;
-	private potentialDuplicatesCache: Map<string, TFile[]>;
-	// Cache frontmatter during a session to avoid reparsing on fallback scans
-	private fmCache: import("src/lib/cache/LruCache").LruCache<
-		string,
-		{ mtime: number; title?: string; authors?: string }
-	>;
 
 	constructor(
 		private app: App,
 		private vault: Vault,
 		private plugin: KoreaderImporterPlugin,
-		private fileNameGenerator: FileNameGenerator,
-		private LocalIndexService: LocalIndexService,
+		private localIndexService: IndexCoordinator,
 		private fmService: FrontmatterService,
-		private snapshotManager: SnapshotManager,
-		private identity: NoteIdentityService,
-		private cacheManager: CacheManager,
+		private persistence: NotePersistenceService,
 		private loggingService: LoggingService,
 		private fs: FileSystemService,
 	) {
-		this.potentialDuplicatesCache = this.cacheManager.createMap(
-			"duplicate.potential",
-		);
-		this.fmCache = this.cacheManager.createLru("duplicate.fm", 500);
-
 		this.log = this.loggingService.scoped("DuplicateFinder");
+
+		this.plugin.registerEvent(
+			this.vault.on("rename", () => this.invalidateCaches()),
+		);
+		this.plugin.registerEvent(
+			this.vault.on("delete", () => this.invalidateCaches()),
+		);
 	}
 
 	public async findBestMatch(
 		luaMetadata: LuaMetadata,
 	): Promise<DuplicateScanResult> {
-		// Step 1: Instant probe for exact expected filename
+		// 1) Instant filename probe (unchanged)
 		try {
-			const expectedFileName = this.fileNameGenerator.generate(
+			const expectedFileName = generateFileName(
 				{
 					useCustomTemplate: this.plugin.settings.useCustomFileNameTemplate,
 					template: this.plugin.settings.fileNameTemplate,
-					highlightsFolder: this.plugin.settings.highlightsFolder,
 				},
 				luaMetadata.docProps,
 				luaMetadata.originalFilePath,
@@ -93,73 +92,103 @@ export class DuplicateFinder {
 			this.log.warn("Instant filename probe failed (continuing with scan)", e);
 		}
 
-		const { files: potentialDuplicates, timedOut } =
-			await this.findPotentialDuplicates(luaMetadata.docProps);
-		if (potentialDuplicates.length === 0) {
-			return { match: null, confidence: timedOut ? "partial" : "full" };
+		// 2) Index vs degraded path (unchanged decision)
+		const bookKey = bookKeyFromDocProps(luaMetadata.docProps);
+		const degraded =
+			!this.localIndexService.isReady() ||
+			this.localIndexService.isRebuildingIndex();
+
+		if (!degraded) {
+			const match = await this.findAndAnalyzeBest(
+				() => this.findViaIndex(bookKey),
+				luaMetadata,
+			);
+			return { match, confidence: "full" };
 		}
 
-		const analyses: DuplicateMatch[] = await Promise.all(
-			potentialDuplicates.map((file) =>
-				this.analyzeDuplicate(file, luaMetadata.annotations, luaMetadata),
-			),
+		// 3) Degraded scan with controlled concurrency (unchanged structure; tuned limits)
+		const scan = await this.scanVaultForKey(
+			bookKey,
+			luaMetadata.docProps,
+			(this.plugin.settings.scanTimeoutSeconds ?? 8) * 1000,
 		);
 
-		// Sort to find the "best" match, defined as the one with the fewest changes.
-		analyses.sort(
-			(a, b) =>
-				a.newHighlights +
-				a.modifiedHighlights -
-				(b.newHighlights + b.modifiedHighlights),
+		const match = await this.findAndAnalyzeBest(
+			() => Promise.resolve(scan.files),
+			luaMetadata,
 		);
 
-		return {
-			match: analyses[0],
-			confidence: timedOut ? "partial" : "full",
-		};
+		return { match, confidence: "partial" };
 	}
 
-	private async findPotentialDuplicates(
+	/**
+	 * Unified pipeline: get candidates → analyze (batched) → sort → best
+	 * Uses bounded concurrency for analysis to avoid I/O bursts on large sets.
+	 */
+	private async findAndAnalyzeBest(
+		fileProvider: () => Promise<TFile[]>,
+		luaMetadata: LuaMetadata,
+	): Promise<DuplicateMatch | null> {
+		const candidateFiles = await fileProvider();
+		if (candidateFiles.length === 0) return null;
+
+		const ANALYSIS_CONCURRENCY =
+			typeof navigator !== "undefined" && (navigator as any).hardwareConcurrency
+				? Math.min(
+						6,
+						Math.max(2, Math.floor((navigator as any).hardwareConcurrency / 2)),
+					)
+				: 4;
+
+		const analyses = await runPool(
+			candidateFiles,
+			ANALYSIS_CONCURRENCY,
+			(file) =>
+				this.analyzeDuplicate(file, luaMetadata.annotations, luaMetadata),
+		);
+
+		const [best] = sortDuplicateMatches(
+			analyses,
+			this.plugin.settings.highlightsFolder,
+		);
+		return best ?? null;
+	}
+
+	/**
+	 * Find via index (no local cache; rely on IndexCoordinator caching).
+	 */
+	private async findViaIndex(bookKey: string): Promise<TFile[]> {
+		try {
+			const paths = await this.localIndexService.findExistingBookFiles(bookKey);
+			const files: TFile[] = [];
+			for (const p of paths) {
+				const f = this.vault.getAbstractFileByPath(p);
+				if (isTFile(f)) files.push(f);
+			}
+			return files;
+		} catch (e) {
+			this.log.warn("Index query failed", e);
+			return [];
+		}
+	}
+
+	/**
+	 * Degraded scan with adaptive concurrency limits and timeout.
+	 */
+	private async scanVaultForKey(
+		bookKey: string,
 		docProps: DocProps,
+		timeoutMs: number,
 	): Promise<{ files: TFile[]; timedOut: boolean }> {
-		const bookKey = bookKeyFromDocProps(docProps);
-		const cached = this.potentialDuplicatesCache.get(bookKey);
-		if (cached) {
-			this.log.info(`Cache hit for potential duplicates of key: ${bookKey}`);
-			return { files: cached, timedOut: false };
-		}
-
-		await this.LocalIndexService.whenReady();
-
-		// Strategy 1: The Index is the Source of Truth.
-		// The index is significantly faster and more accurate than a vault scan. We always query it first.
-		this.log.info(
-			`Querying index for existing files with book key: ${bookKey}`,
-		);
-		const paths = await this.LocalIndexService.findExistingBookFiles(bookKey);
-		const filesFromIndex = paths
-			.map((p) => this.vault.getAbstractFileByPath(p))
-			.filter((f): f is TFile => isTFile(f));
-
-		if (this.LocalIndexService.isIndexPersistent()) {
-			this.potentialDuplicatesCache.set(bookKey, filesFromIndex);
-			return { files: filesFromIndex, timedOut: false };
-		}
-
-		// If the index is in-memory but found candidates, we trust them. An in-memory index
-		// that has been rebuilt is still a far better signal than a slow, heuristic-based filename scan.
-		if (filesFromIndex.length > 0) {
-			this.potentialDuplicatesCache.set(bookKey, filesFromIndex);
-			return { files: filesFromIndex, timedOut: false };
-		}
-
-		// Strategy 2: Degraded Mode Fallback Scan (In-memory index found nothing).
-		this.log.info(
-			`Index is in-memory and yielded no results for key ${bookKey}. Falling back to vault scan.`,
-		);
-
 		const settingsFolder = this.plugin.settings.highlightsFolder ?? "";
-		const root = this.vault.getAbstractFileByPath(settingsFolder);
+
+		let root: TFolder | TAbstractFile | null;
+		if (settingsFolder === "") {
+			root = this.vault.getRoot();
+		} else {
+			root = this.vault.getAbstractFileByPath(settingsFolder);
+		}
+
 		if (!isTFolder(root)) {
 			this.log.warn(
 				`Highlights folder not found or not a directory: '${settingsFolder}'`,
@@ -167,199 +196,140 @@ export class DuplicateFinder {
 			return { files: [], timedOut: false };
 		}
 
-		const { files: potentialDuplicates, aborted } =
+		// Stage 1: collect files with a timeout signal
+		const collectionSignal = AbortSignal.timeout(timeoutMs);
+		const { files: potentialDuplicates, aborted: collectionAborted } =
 			await this.fs.getFilesInFolder(root, {
 				extensions: ["md"],
 				recursive: true,
+				signal: collectionSignal,
 			});
 
-		const startTime = Date.now();
-		const SCAN_TIMEOUT_MS =
-			(this.plugin.settings.scanTimeoutSeconds ?? 8) * 1000;
-
-		if (aborted) {
+		const expectedFilenameKeys = buildExpectedFilenameKeys(docProps);
+		if (collectionAborted) {
 			this.log.warn(
 				`Degraded duplicate scan was aborted during file collection.`,
 			);
 			return { files: [], timedOut: true };
 		}
 
-		const docTitleKey = toMatchKey(docProps.title);
-		const docAuthorsKey = toMatchKey(docProps.authors);
-		const expectedFilenameKeys = new Set<string>();
-		if (docTitleKey && docAuthorsKey) {
-			expectedFilenameKeys.add(`${docTitleKey} ${docAuthorsKey}`);
-			expectedFilenameKeys.add(`${docAuthorsKey} ${docTitleKey}`);
-		}
-		if (docTitleKey) {
-			expectedFilenameKeys.add(docTitleKey);
-		}
+		// Stage 2: filter candidates with adaptive concurrency under a separate timeout
+		const controller = new AbortController();
+		const timeoutId = setTimeout(() => {
+			this.log.warn(`Duplicate scan timed out after ${timeoutMs}ms.`);
+			controller.abort();
+		}, timeoutMs);
 
-		if (docAuthorsKey) {
-			expectedFilenameKeys.add(docAuthorsKey);
-		}
+		// Adaptive, clamped concurrency to avoid I/O thrash on big vaults
+		const hc =
+			typeof navigator !== "undefined" && (navigator as any).hardwareConcurrency
+				? (navigator as any).hardwareConcurrency
+				: 4;
+		const poolConcurrency = Math.min(8, Math.max(2, Math.ceil(hc / 2)));
 
-		const results: TFile[] = [];
-		let timedOut = false;
-		for (const file of potentialDuplicates) {
-			if (Date.now() - startTime > SCAN_TIMEOUT_MS) {
-				timedOut = true;
-				break;
+		const SEQUENTIAL_THRESHOLD = 100;
+		try {
+			if (potentialDuplicates.length < SEQUENTIAL_THRESHOLD) {
+				const matched: TFile[] = [];
+				for (const file of potentialDuplicates) {
+					if (controller.signal.aborted) break;
+					const res = await this._isPotentialMatch(
+						file,
+						bookKey,
+						expectedFilenameKeys,
+					);
+					if (res) matched.push(res);
+				}
+				return { files: matched, timedOut: controller.signal.aborted };
 			}
 
-			try {
-				// Step A: Prioritize matching via cached frontmatter (cheap).
-				const cachedMetadata = this.app.metadataCache.getFileCache(file);
-				const fm = cachedMetadata?.frontmatter;
-
-				if (fm?.title || fm?.authors) {
-					const fmTitle = typeof fm.title === "string" ? fm.title : undefined;
-					let fmAuthors: string | undefined;
-					if (typeof fm.authors === "string") fmAuthors = fm.authors;
-					else if (Array.isArray(fm.authors)) fmAuthors = fm.authors.join(", ");
-
-					const frontmatterBookKey = bookKeyFromDocProps({
-						title: fmTitle ?? "",
-						authors: fmAuthors ?? "",
-					});
-
-					if (frontmatterBookKey === bookKey) {
-						results.push(file);
-						continue; // Match found, no need to check filename.
-					}
-				}
-
-				// Step B: Fallback to matching via filename.
-				const stem = file.basename
-					.replace(/\s*[[(].*?[\])]\s*$/g, "") // strip [pdf]
-					.replace(/\s*\(\d+\)\s*$/g, ""); // strip (1)
-
-				const fileStemKey = toMatchKey(stem);
-
-				if (expectedFilenameKeys.has(fileStemKey)) {
-					results.push(file);
-				}
-			} catch (e) {
-				this.log.warn(
-					`Error processing ${file.path} during duplicate scan.`,
-					e,
-				);
+			const results = await runPool(
+				potentialDuplicates,
+				poolConcurrency,
+				(file) => this._isPotentialMatch(file, bookKey, expectedFilenameKeys),
+				controller.signal,
+			);
+			const matchedFiles = results.filter((f): f is TFile => f !== null);
+			return { files: matchedFiles, timedOut: controller.signal.aborted };
+		} catch (error) {
+			if (controller.signal.aborted) {
+				return { files: [], timedOut: true };
 			}
+			this.log.error("Unexpected error during parallel duplicate scan", error);
+			return { files: [], timedOut: false };
+		} finally {
+			clearTimeout(timeoutId);
 		}
-
-		if (!timedOut) {
-			this.potentialDuplicatesCache.set(bookKey, results);
-		}
-
-		return { files: results, timedOut };
 	}
 
-	/**
-	 * Analyzes an existing file to determine how it differs from new annotations.
-	 * Counts new and modified highlights to classify the duplicate type.
-	 * @param existingFile - The existing file to analyze
-	 * @param newAnnotations - New annotations from KOReader
-	 * @param luaMetadata - Complete metadata for the new import
-	 * @returns DuplicateMatch object with analysis results
-	 */
+	private async _isPotentialMatch(
+		file: TFile,
+		bookKey: string,
+		expectedFilenameKeys: Set<string>,
+	): Promise<TFile | null> {
+		try {
+			// Frontmatter fast-path
+			const cachedMetadata = this.app.metadataCache.getFileCache(file);
+			const fm = cachedMetadata?.frontmatter as
+				| { title?: unknown; authors?: unknown }
+				| undefined;
+
+			if (frontmatterMatchesBook(fm, bookKey)) {
+				return file;
+			}
+
+			// Filename heuristic fallback
+			if (filenameMatchesKeys(file.basename, expectedFilenameKeys)) {
+				return file;
+			}
+		} catch (e) {
+			this.log.warn(`Error processing ${file.path} during duplicate scan.`, e);
+		}
+		return null;
+	}
+
 	private async analyzeDuplicate(
 		existingFile: TFile,
 		newAnnotations: Annotation[],
 		luaMetadata: LuaMetadata,
 	): Promise<DuplicateMatch> {
-		const { body: existingBody } = this.fmService.parseContent(
-			await this.vault.read(existingFile),
-		);
+		const parsed = await this.fmService.parseFile(existingFile);
+		const existingBody = parsed.body;
+
 		const { annotations: existingHighlights }: { annotations: Annotation[] } =
 			extractHighlightsWithStyle(
 				existingBody,
 				this.plugin.settings.commentStyle,
 			);
 
-		let newHighlightCount = 0;
-		let modifiedHighlightCount = 0;
-
-		const existingHighlightsMap = new Map<string, Annotation>(
-			existingHighlights.map((h: Annotation) => [getHighlightKey(h), h]),
+		const { newHighlights, modifiedHighlights, matchType } = analyzeAnnotations(
+			existingHighlights,
+			newAnnotations,
 		);
 
-		for (const newHighlight of newAnnotations) {
-			const key = getHighlightKey(newHighlight);
-			const existingMatch = existingHighlightsMap.get(key);
-
-			if (!existingMatch) {
-				newHighlightCount++;
-			} else {
-				const textModified =
-					this.normalizeForComparison(existingMatch.text) !==
-					this.normalizeForComparison(newHighlight.text);
-				const noteModified =
-					this.normalizeForComparison(existingMatch.note) !==
-					this.normalizeForComparison(newHighlight.note);
-				if (textModified || noteModified) {
-					modifiedHighlightCount++;
-				}
-			}
-		}
-
-		const matchType = this.determineMatchType(
-			newHighlightCount,
-			modifiedHighlightCount,
-		);
 		let canMergeSafely = false;
 		let expectedUid: string | undefined;
 		try {
-			expectedUid = this.identity.tryGetId(existingFile);
+			expectedUid = this.persistence.tryGetId(existingFile);
 			if (expectedUid) {
-				const snapRes =
-					await this.snapshotManager.readSnapshotById(expectedUid);
+				const snapRes = await this.persistence.readSnapshotById(expectedUid);
 				canMergeSafely = !isErr(snapRes);
 			}
-		} catch (_) {
+		} catch {
 			canMergeSafely = false;
 		}
 
 		return {
 			file: existingFile,
 			matchType,
-			newHighlights: newHighlightCount,
-			modifiedHighlights: modifiedHighlightCount,
+			newHighlights,
+			modifiedHighlights,
 			luaMetadata,
 			expectedUid,
 			canMergeSafely,
 		};
 	}
 
-	/**
-	 * Determines the type of duplicate match based on differences.
-	 * @param newCount - Number of new highlights
-	 * @param modifiedCount - Number of modified highlights
-	 * @returns Match type: "exact", "updated", or "divergent"
-	 */
-	private determineMatchType(
-		newCount: number,
-		modifiedCount: number,
-	): DuplicateMatch["matchType"] {
-		if (newCount === 0 && modifiedCount === 0) return "exact";
-		if (modifiedCount > 0) return "divergent";
-		if (newCount > 0) return "updated";
-		return "exact";
-	}
-
-	private normalizeForComparison(text?: string): string {
-		return text?.trim().replace(/\s+/g, " ").toLowerCase() ?? "";
-	}
-
-	public clearCache(): void {
-		this.potentialDuplicatesCache.clear();
-		this.fmCache.clear();
-	}
-
-	/**
-	 * Public wrapper to analyze a known existing file against provided lua metadata.
-	 * Reuses the internal analyzeDuplicate logic so the modal shows accurate stats
-	 * and merge capability.
-	 */
 	public async analyzeExistingFile(
 		existingFile: TFile,
 		luaMetadata: LuaMetadata,
@@ -369,5 +339,28 @@ export class DuplicateFinder {
 			luaMetadata.annotations,
 			luaMetadata,
 		);
+	}
+
+	public invalidateCaches(): void {
+		// Centralize cache ownership in IndexCoordinator
+		this.localIndexService.invalidateIndexCaches();
+	}
+
+	// Kept for API compatibility; now a no-op.
+	public clearCache(): void {
+		/* no-op: cache moved to IndexCoordinator */
+	}
+
+	public onSettingsChanged(
+		newSettings: KoreaderHighlightImporterSettings,
+		oldSettings?: KoreaderHighlightImporterSettings,
+	): void {
+		if (
+			!oldSettings ||
+			newSettings.highlightsFolder !== oldSettings.highlightsFolder
+		) {
+			this.invalidateCaches();
+			this.log.info("Settings changed: invalidated index caches");
+		}
 	}
 }

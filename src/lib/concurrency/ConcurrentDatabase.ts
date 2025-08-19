@@ -1,5 +1,5 @@
 import type { Database } from "sql.js";
-import { Mutex } from "./concurrency";
+import { asyncLazy, Mutex } from "./concurrency";
 
 /**
  * Provides serialized access to a sql.js Database instance.
@@ -7,11 +7,14 @@ import { Mutex } from "./concurrency";
  */
 export class ConcurrentDatabase {
 	private mutex = new Mutex();
+	private readonly getDbLazy: () => Promise<Database>;
 
 	constructor(
 		private readonly getDb: () => Promise<Database>,
 		private readonly markDirty?: (isDirty: boolean) => void,
-	) {}
+	) {
+		this.getDbLazy = asyncLazy<Database>(this.getDb);
+	}
 
 	/**
 	 * Execute a callback with exclusive access to the database.
@@ -21,8 +24,10 @@ export class ConcurrentDatabase {
 		callback: (db: Database) => Promise<T> | T,
 		isWrite = false,
 	): Promise<T> {
+		// Initialize DB without holding the mutex; serialize the callback execution only.
+		// Invoke the lazy function directly.
+		const db = await this.getDbLazy();
 		return this.mutex.lock(async () => {
-			const db = await this.getDb();
 			const result = await callback(db);
 			if (isWrite && this.markDirty) {
 				this.markDirty(true);
@@ -39,8 +44,9 @@ export class ConcurrentDatabase {
 		callback: (db: Database) => Promise<T> | T,
 		isWrite = false,
 	): Promise<T | null> {
+		// Ensure DB is initialized (once) before attempting to acquire the lock.
+		const db = await this.getDbLazy();
 		return this.mutex.tryLock(async () => {
-			const db = await this.getDb();
 			const result = await callback(db);
 			if (isWrite && this.markDirty) {
 				this.markDirty(true);
@@ -77,12 +83,5 @@ export class ConcurrentDatabase {
 				throw e;
 			}
 		}, false);
-	}
-
-	/**
-	 * @deprecated Use writeTx instead. This is now an alias that behaves identically.
-	 */
-	public writeTxAsync<T>(fn: (db: Database) => Promise<T>): Promise<T> {
-		return this.writeTx(fn);
 	}
 }

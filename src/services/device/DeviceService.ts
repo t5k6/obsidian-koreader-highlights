@@ -1,10 +1,11 @@
 import pLimit from "p-limit";
 import type { Database, SqlValue } from "sql.js";
+import { memoizeAsync } from "src/lib/cache";
 import type { CacheManager } from "src/lib/cache/CacheManager";
-import { memoizeAsync } from "src/lib/cache/CacheManager";
-import type { LruCache } from "src/lib/cache/LruCache";
-import { AsyncLazy } from "src/lib/concurrency/asyncLazy";
+import type { IterableCache } from "src/lib/cache/types";
+import { asyncLazy } from "src/lib/concurrency";
 import { ConcurrentDatabase } from "src/lib/concurrency/ConcurrentDatabase";
+import { throwIfAborted } from "src/lib/concurrency/cancellation";
 import { isErr } from "src/lib/core/result";
 import type KoreaderImporterPlugin from "src/main";
 import type {
@@ -50,10 +51,18 @@ export class DeviceService implements SettingsObserver, Disposable {
 	private dbFilePath: string | null = null;
 	private inMemoryDb: Database | null = null;
 	private dbFileMtimeMs: number | null = null;
-	private cdbLazy: AsyncLazy<ConcurrentDatabase | null>;
+	private getCdbLazy: () => Promise<ConcurrentDatabase | null>;
 
-	private sdrDirCache: Map<string, Promise<string[]>>;
-	private metadataNameCache: Map<string, string | null>;
+	// Simplified discovery config
+	private readonly STATS_DB_PATTERNS = [
+		".adds/koreader/settings/statistics.sqlite3", // Kobo
+		"koreader/settings/statistics.sqlite3", // Generic
+	] as const;
+
+	private readonly MAX_WALK_UP_DEPTH = 3;
+
+	private sdrDirCache: IterableCache<string, Promise<string[]>>;
+	private metadataNameCache: IterableCache<string, string | null>;
 	private findSdrDirectoriesWithMetadataMemoized: (
 		scanPath: string,
 	) => Promise<string[]>;
@@ -61,7 +70,7 @@ export class DeviceService implements SettingsObserver, Disposable {
 		settingsKey: string,
 	) => Promise<KOReaderEnvironment | null>;
 
-	private statsCache: LruCache<string, BookStatisticsBundle | null>;
+	private statsCache: IterableCache<string, BookStatisticsBundle | null>;
 
 	private readonly limit = pLimit(MAX_PARALLEL_IO);
 
@@ -69,13 +78,13 @@ export class DeviceService implements SettingsObserver, Disposable {
 	private envInitialized = false;
 
 	constructor(
-		private plugin: KoreaderImporterPlugin,
+		private _plugin: KoreaderImporterPlugin,
 		private fs: FileSystemService,
 		private sqlJsManager: SqlJsManager,
 		private cacheManager: CacheManager,
 		loggingService: LoggingService,
 	) {
-		this.settings = plugin.settings;
+		this.settings = this._plugin.settings;
 		this.log = loggingService.scoped("DeviceService");
 
 		// Caches (merged from old services, single prefix)
@@ -93,40 +102,9 @@ export class DeviceService implements SettingsObserver, Disposable {
 			(_: string) => this._resolveEnvironment(),
 		);
 
-		this.cdbLazy = new AsyncLazy<ConcurrentDatabase | null>(async () => {
-			const filePath = await this.getStatsDbPath();
-			if (!filePath) {
-				this.log.info(
-					"Statistics DB path not found or configured. Stats disabled.",
-				);
-				return null;
-			}
-
-			const bytesRes = await this.fs.readBinaryAuto(filePath);
-			if (isErr(bytesRes)) {
-				this.log.error(
-					`Failed to read KOReader stats DB bytes: ${filePath}`,
-					(bytesRes as any).error ?? bytesRes,
-				);
-				return null;
-			}
-			const bytes = bytesRes.value;
-
-			const SQL = await this.sqlJsManager.getSqlJs();
-			const db = new SQL.Database(bytes); // strictly in-memory
-			this.prepareSessionIndexes(db); // only in-memory changes
-
-			this.inMemoryDb = db;
-			this.dbFilePath = filePath;
-
-			// capture mtime to support hot-reload if file changes
-			const stRes = await this.fs.getNodeStats(filePath);
-			this.dbFileMtimeMs = isErr(stRes) ? null : stRes.value.mtimeMs;
-
-			const cdb = new ConcurrentDatabase(async () => db);
-			this.log.info(`Loaded KOReader stats DB into memory: ${filePath}`);
-			return cdb;
-		});
+		this.getCdbLazy = asyncLazy<ConcurrentDatabase | null>(() =>
+			this.createCdbInstance(),
+		);
 	}
 
 	// SettingsObserver
@@ -139,7 +117,7 @@ export class DeviceService implements SettingsObserver, Disposable {
 				"Environment settings changed, resetting caches and DB connection.",
 			);
 			this.cacheManager.clear("device.*");
-			this.dispose(); // This also resets cdbLazy
+			this.dispose(); // This also resets getCdbLazy
 		}
 		this.settings = newSettings;
 	}
@@ -154,16 +132,16 @@ export class DeviceService implements SettingsObserver, Disposable {
 		this.inMemoryDb = null;
 		this.dbFilePath = null;
 		this.dbFileMtimeMs = null;
-		this.cdbLazy.reset();
+		this.getCdbLazy = asyncLazy<ConcurrentDatabase | null>(() =>
+			this.createCdbInstance(),
+		);
 		this.statsCache.clear();
 		this.envInitialized = false;
 	}
 
 	// --- Readiness Gate ---
 	async whenReady(): Promise<void> {
-		// Idempotent: trigger env resolution if not already done
 		if (!this.envInitialized) {
-			// Use memoized discovery; subsequent calls are fast
 			await this.getEnvironment();
 			this.envInitialized = true;
 		}
@@ -202,6 +180,136 @@ export class DeviceService implements SettingsObserver, Disposable {
 			return this._handleOverride(scanPath, override);
 		}
 		return this._discoverEnvironment(scanPath);
+	}
+
+	// --- Simplified Discovery & Validation (non-breaking addition) ---
+
+	/**
+	 * Validate that a scan path likely contains KOReader data.
+	 * Returns lightweight signals for UI without committing to full env discovery.
+	 */
+	public async validateScanPath(scanPath: string): Promise<{
+		valid: boolean;
+		statsDbPath: string | null;
+		hasSdrFolders: boolean;
+	}> {
+		const st = await this.fs.getNodeStats(scanPath);
+		if (!st.ok || !st.value.isDirectory()) {
+			return { valid: false, statsDbPath: null, hasSdrFolders: false };
+		}
+
+		const statsDbPath = await this.findStatsDatabase(scanPath);
+		const hasSdrFolders = await this.hasSdrFoldersQuickCheck(scanPath);
+
+		return {
+			valid: Boolean(statsDbPath) || hasSdrFolders,
+			statsDbPath,
+			hasSdrFolders,
+		};
+	}
+
+	/**
+	 * Directly search for the statistics database from the given path.
+	 * Tries direct patterns, then walks up a few levels, then performs a bounded deep search.
+	 */
+	private async findStatsDatabase(scanPath: string): Promise<string | null> {
+		// Try direct paths relative to provided scanPath
+		for (const pattern of this.STATS_DB_PATTERNS) {
+			const candidate = this.fs.joinSystemPath(scanPath, pattern);
+			if (await this.fs.nodeFileExists(candidate)) {
+				this.log.info(`Found stats DB via direct path: ${candidate}`);
+				return candidate;
+			}
+		}
+
+		// Walk up limited depth
+		let currentPath = scanPath;
+		for (let depth = 0; depth < this.MAX_WALK_UP_DEPTH; depth++) {
+			for (const pattern of this.STATS_DB_PATTERNS) {
+				const candidate = this.fs.joinSystemPath(currentPath, pattern);
+				if (await this.fs.nodeFileExists(candidate)) {
+					this.log.info(
+						`Found stats DB via walk-up at depth ${depth}: ${candidate}`,
+					);
+					return candidate;
+				}
+			}
+			const parent = this.fs.systemDirname(currentPath);
+			if (parent === currentPath) break;
+			currentPath = parent;
+		}
+
+		// Bounded deep search from scan path
+		return this.searchForStatsDb(scanPath);
+	}
+
+	/**
+	 * Breadth-first bounded search for statistics.sqlite3 under common subfolders.
+	 */
+	private async searchForStatsDb(
+		root: string,
+		maxDepth: number = 3,
+	): Promise<string | null> {
+		const queue: Array<[string, number]> = [[root, 0]];
+		while (queue.length > 0) {
+			const [dir, depth] = queue.shift()!;
+			if (depth > maxDepth) continue;
+
+			for (const pattern of this.STATS_DB_PATTERNS) {
+				const candidate = this.fs.joinSystemPath(dir, pattern);
+				if (await this.fs.nodeFileExists(candidate)) {
+					this.log.info(`Found stats DB via deep search: ${candidate}`);
+					return candidate;
+				}
+			}
+
+			try {
+				for await (const entry of this.fs.iterateNodeDirectory(dir)) {
+					if (!entry.isDirectory()) continue;
+					const name = entry.name.toLowerCase();
+					// Likely candidates or non-hidden
+					if (
+						name === ".adds" ||
+						name === "koreader" ||
+						!name.startsWith(".")
+					) {
+						queue.push([this.fs.joinSystemPath(dir, entry.name), depth + 1]);
+					}
+				}
+			} catch {
+				// Skip unreadable directories
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Quick bounded check for existence of any .sdr folders beneath the path.
+	 */
+	private async hasSdrFoldersQuickCheck(
+		scanPath: string,
+		maxCheck: number = 100,
+	): Promise<boolean> {
+		let checked = 0;
+		const checkDir = async (
+			dir: string,
+			depth: number = 0,
+		): Promise<boolean> => {
+			if (depth > 2 || checked > maxCheck) return false;
+			for await (const entry of this.fs.iterateNodeDirectory(dir)) {
+				if (++checked > maxCheck) return false;
+				if (entry.isDirectory() && entry.name.endsWith(".sdr")) return true;
+				if (entry.isDirectory() && !entry.name.startsWith(".")) {
+					const found = await checkDir(
+						this.fs.joinSystemPath(dir, entry.name),
+						depth + 1,
+					);
+					if (found) return true;
+				}
+			}
+			return false;
+		};
+		return checkDir(scanPath);
 	}
 
 	private async _validateScanPath(): Promise<string | null> {
@@ -295,9 +403,15 @@ export class DeviceService implements SettingsObserver, Disposable {
 		for (const file of await this.findSdrDirectoriesWithMetadata()) yield file;
 	}
 
-	async findSdrDirectoriesWithMetadata(): Promise<string[]> {
+	async findSdrDirectoriesWithMetadata(opts?: {
+		signal?: AbortSignal;
+	}): Promise<string[]> {
 		const scanPath = await this.getActiveScanPath();
 		if (!scanPath) return [];
+		// When a signal is provided, bypass memoization to ensure responsive cancellation.
+		if (opts?.signal) {
+			return this.scan(scanPath, opts);
+		}
 		return this.findSdrDirectoriesWithMetadataMemoized(scanPath);
 	}
 
@@ -330,7 +444,10 @@ export class DeviceService implements SettingsObserver, Disposable {
 		this.log.info("DeviceService caches cleared.");
 	}
 
-	private async scan(scanPath: string): Promise<string[]> {
+	private async scan(
+		scanPath: string,
+		opts?: { signal?: AbortSignal },
+	): Promise<string[]> {
 		const mountPoint = scanPath;
 
 		const { excludedFolders } = this.settings;
@@ -340,7 +457,7 @@ export class DeviceService implements SettingsObserver, Disposable {
 		);
 
 		const results: string[] = [];
-		await this.walk(root, excluded, results, mountPoint);
+		await this.walk(root, excluded, results, mountPoint, opts?.signal);
 		this.log.info(`Scan finished. Found ${results.length} metadata files.`);
 		return results;
 	}
@@ -350,10 +467,13 @@ export class DeviceService implements SettingsObserver, Disposable {
 		excluded: Set<string>,
 		out: string[],
 		mountPoint: string,
+		signal?: AbortSignal,
 	): Promise<void> {
+		throwIfAborted(signal);
 		const subdirTasks: Promise<void>[] = [];
 
 		for await (const entry of this.fs.iterateNodeDirectory(dir)) {
+			throwIfAborted(signal);
 			if (!entry.isDirectory()) continue;
 			if (excluded.has(entry.name.toLowerCase())) continue;
 
@@ -369,7 +489,9 @@ export class DeviceService implements SettingsObserver, Disposable {
 				}
 			} else if (!entry.name.startsWith(".") && entry.name !== "$RECYCLE.BIN") {
 				subdirTasks.push(
-					this.limit(() => this.walk(fullPath, excluded, out, mountPoint)),
+					this.limit(() =>
+						this.walk(fullPath, excluded, out, mountPoint, signal),
+					),
 				);
 			}
 		}
@@ -442,7 +564,7 @@ export class DeviceService implements SettingsObserver, Disposable {
 			const result: BookStatisticsBundle = {
 				book: bookRow,
 				readingSessions: sessions,
-				derived: this.calculateDerivedStatistics(bookRow, sessions),
+				derived: calculateDerivedStatistics(bookRow, sessions),
 			};
 
 			this.statsCache.set(cacheKey, result);
@@ -465,8 +587,43 @@ export class DeviceService implements SettingsObserver, Disposable {
 
 	private async getConcurrentDb(): Promise<ConcurrentDatabase | null> {
 		await this.refreshIfDeviceDbChanged().catch(() => {});
-		return this.cdbLazy.get();
+		return this.getCdbLazy();
 	}
+
+	private createCdbInstance = async (): Promise<ConcurrentDatabase | null> => {
+		const filePath = await this.getStatsDbPath();
+		if (!filePath) {
+			this.log.info(
+				"Statistics DB path not found or configured. Stats disabled.",
+			);
+			return null;
+		}
+
+		const bytesRes = await this.fs.readBinaryAuto(filePath);
+		if (isErr(bytesRes)) {
+			this.log.error(
+				`Failed to read KOReader stats DB bytes: ${filePath}`,
+				(bytesRes as any).error ?? bytesRes,
+			);
+			return null;
+		}
+		const bytes = bytesRes.value;
+
+		const SQL = await this.sqlJsManager.getSqlJs();
+		const db = new SQL.Database(bytes); // strictly in-memory
+		this.prepareSessionIndexes(db); // only in-memory changes
+
+		this.inMemoryDb = db;
+		this.dbFilePath = filePath;
+
+		// capture mtime to support hot-reload if file changes
+		const stRes = await this.fs.getNodeStats(filePath);
+		this.dbFileMtimeMs = isErr(stRes) ? null : stRes.value.mtimeMs;
+
+		const cdb = new ConcurrentDatabase(async () => db);
+		this.log.info(`Loaded KOReader stats DB into memory: ${filePath}`);
+		return cdb;
+	};
 
 	private findBook(
 		db: Database,
@@ -548,50 +705,6 @@ export class DeviceService implements SettingsObserver, Disposable {
 		return Number.isFinite(n) ? n : 0;
 	}
 
-	private calculateDerivedStatistics(
-		book: BookStatistics,
-		sessions: PageStatData[],
-	): ReadingProgress {
-		const totalReadPages = this.toNumber(book.total_read_pages);
-		const totalReadTime = this.toNumber(book.total_read_time);
-		const pages = this.toNumber(book.pages);
-		const rawPercent = pages > 0 ? (totalReadPages / pages) * 100 : 0;
-
-		const lastOpenSec = this.toNumber(book.last_open);
-		const lastOpenDate = lastOpenSec > 0 ? new Date(lastOpenSec * 1000) : null;
-
-		const firstStartSec = sessions[0]
-			? this.toNumber(sessions[0].start_time)
-			: 0;
-		const firstReadDate =
-			firstStartSec > 0 ? new Date(firstStartSec * 1000) : null;
-
-		const lastReadDate =
-			lastOpenDate && firstReadDate && lastOpenDate < firstReadDate
-				? firstReadDate
-				: (lastOpenDate ?? firstReadDate);
-
-		const percentComplete = Math.max(0, Math.min(100, Math.round(rawPercent)));
-
-		const readingStatus: ReadingStatus =
-			sessions.length === 0
-				? "unstarted"
-				: percentComplete >= 100
-					? "completed"
-					: "ongoing";
-
-		return {
-			percentComplete,
-			averageTimePerPage:
-				totalReadPages > 0 && totalReadTime > 0
-					? totalReadTime / totalReadPages
-					: 0,
-			firstReadDate,
-			lastReadDate,
-			readingStatus,
-		};
-	}
-
 	private mapBookRow(o: any): BookStatistics {
 		if (
 			!o ||
@@ -625,4 +738,56 @@ export class DeviceService implements SettingsObserver, Disposable {
 			language: o.language ? String(o.language) : undefined,
 		};
 	}
+}
+
+function toNumber(value: unknown): number {
+	const n =
+		typeof value === "number"
+			? value
+			: typeof value === "string"
+				? Number(value)
+				: 0;
+	return Number.isFinite(n) ? n : 0;
+}
+
+function calculateDerivedStatistics(
+	book: BookStatistics,
+	sessions: PageStatData[],
+): ReadingProgress {
+	const totalReadPages = toNumber(book.total_read_pages);
+	const totalReadTime = toNumber(book.total_read_time);
+	const pages = toNumber(book.pages);
+	const rawPercent = pages > 0 ? (totalReadPages / pages) * 100 : 0;
+
+	const lastOpenSec = toNumber(book.last_open);
+	const lastOpenDate = lastOpenSec > 0 ? new Date(lastOpenSec * 1000) : null;
+
+	const firstStartSec = sessions[0] ? toNumber(sessions[0].start_time) : 0;
+	const firstReadDate =
+		firstStartSec > 0 ? new Date(firstStartSec * 1000) : null;
+
+	const lastReadDate =
+		lastOpenDate && firstReadDate && lastOpenDate < firstReadDate
+			? firstReadDate
+			: (lastOpenDate ?? firstReadDate);
+
+	const percentComplete = Math.max(0, Math.min(100, Math.round(rawPercent)));
+
+	const readingStatus: ReadingStatus =
+		sessions.length === 0
+			? "unstarted"
+			: percentComplete >= 100
+				? "completed"
+				: "ongoing";
+
+	return {
+		percentComplete,
+		averageTimePerPage:
+			totalReadPages > 0 && totalReadTime > 0
+				? totalReadTime / totalReadPages
+				: 0,
+		firstReadDate,
+		lastReadDate,
+		readingStatus,
+	};
 }

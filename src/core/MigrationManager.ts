@@ -1,30 +1,24 @@
-import {
-	normalizePath,
-	type Plugin,
-	type TFile,
-	type TFolder,
-	type Vault,
-} from "obsidian";
-import { isTFile, isTFolder } from "src/lib/obsidian/typeguards";
+import { type App, Notice, type Plugin, type TFile } from "obsidian";
+import { isErr } from "src/lib/core/result";
 import type { FileSystemService } from "src/services/FileSystemService";
 import type { LoggingService } from "src/services/LoggingService";
-import type { NoteIdentityService } from "src/services/vault/NoteIdentityService";
-import type { SnapshotManager } from "src/services/vault/SnapshotManager";
+import type { IndexCoordinator } from "src/services/vault/index/IndexCoordinator";
+import type { NotePersistenceService } from "src/services/vault/NotePersistenceService";
 import type { KoreaderHighlightImporterSettings, PluginData } from "src/types";
+import { withProgress } from "src/ui/utils/progress";
 import type { PluginDataStore } from "./PluginDataStore";
 import { normalizeSettings } from "./settingsSchema";
 
 // --- Migration Manager ---
 
 type MigrationContext = {
-	vault: Vault;
+	app: App;
 	fs: FileSystemService;
 	log: LoggingService;
 	data: PluginData;
-	// optional deps; if absent, corresponding migrations will no-op
-	snapshotManager?: SnapshotManager;
-	noteIdentityService?: NoteIdentityService;
-	settings?: KoreaderHighlightImporterSettings;
+	settings: KoreaderHighlightImporterSettings;
+	notePersistenceService: NotePersistenceService;
+	localIndexService: IndexCoordinator;
 };
 
 type MigrationFn = (ctx: MigrationContext) => Promise<PluginData>;
@@ -34,85 +28,49 @@ export class MigrationManager {
 	private readonly migrations: Record<string, MigrationFn>;
 
 	constructor(
-		private vault: Vault,
+		private app: App,
 		private fs: FileSystemService,
 		private loggingService: LoggingService,
-		// Optionally provided for diagnostics; if available, stored on data.lastPluginMigratedTo
 		private pluginVersion?: string,
 	) {
 		this.log = this.loggingService.scoped("MigrationManager");
+
+		// Ordered migrations for the architecture upgrade
 		this.migrations = {
-			"2024-12-clean-legacy-logs": async ({ vault, log, data }) => {
-				await this.cleanupOldLogFiles(vault, log);
-				return data;
-			},
-			"2025-01-detox-hidden-folders": async ({ data }) => {
-				// Placeholder for a future idempotent migration that may adjust settings paths.
-				return data;
-			},
-			"1.3.0": async ({ vault, log, data }) => {
-				await this.cleanupLegacyUserData(vault, log);
-				return data;
-			},
-			// One-time migration: move legacy path-hash snapshots to UID-based snapshots (idempotent)
-			"2025-08-migrate-legacy-snapshots": async (ctx) => {
-				const { data, settings, snapshotManager, noteIdentityService } = ctx;
-				if (!snapshotManager || !noteIdentityService) return data;
-				const folder = settings?.highlightsFolder ?? "";
-				const files = await this.listMarkdownInFolder(folder, {
-					recursive: true,
-				});
-				for (const f of files) {
-					try {
-						const uid = (await this.tryEnsureUidFor(f, ctx)) ?? null;
-						if (!uid) continue;
-						await snapshotManager.migrateSingleLegacySnapshot(f, uid);
-					} catch (e) {
-						this.log.warn(`Legacy snapshot migration failed for ${f.path}`, e);
-					}
-				}
-				return data;
-			},
-			// Detect and resolve UID collisions by reassigning newer duplicates
-			"2025-08-resolve-uid-collisions": async (ctx) => {
-				const { data, settings, noteIdentityService } = ctx;
-				if (!noteIdentityService) return data;
-				const folder = settings?.highlightsFolder ?? "";
-				const summary = await noteIdentityService.resolveInFolder(folder, {
-					recursive: true,
-				});
-				if (summary.collisions > 0) {
-					this.log.info(
-						`UID collision resolution: ${summary.collisions} uid(s), ${summary.filesReassigned} files reassigned.`,
-					);
-				}
-				return data;
-			},
+			"1.3.0-backfill-uids": this.migrateBackfillUids.bind(this),
+			"1.3.0-rename-snapshots-to-uid": this.migrateSnapshotsToUid.bind(this),
+			"1.3.0-resolve-uid-collisions":
+				this.migrateResolveUidCollisions.bind(this),
+			"1.3.0-upgrade-index-database": this.migrateIndexDatabase.bind(this),
 		};
 	}
 
 	public async runAll(
 		data: PluginData,
-		deps?: {
-			noteIdentityService?: NoteIdentityService;
-			snapshotManager?: SnapshotManager;
-			settings?: KoreaderHighlightImporterSettings;
+		deps: {
+			notePersistenceService: NotePersistenceService;
+			localIndexService: IndexCoordinator;
+			settings: KoreaderHighlightImporterSettings;
 		},
 	): Promise<PluginData> {
 		let out = { ...data };
-		for (const [id, fn] of Object.entries(this.migrations)) {
-			if (out.appliedMigrations.includes(id)) continue;
+		const migrationsToRun = Object.entries(this.migrations).filter(
+			([id]) => !out.appliedMigrations.includes(id),
+		);
+
+		if (migrationsToRun.length === 0) return out;
+
+		this.log.info(`Found ${migrationsToRun.length} new migrations to apply.`);
+		for (const [id, fn] of migrationsToRun) {
 			try {
 				this.log.info(`Running migration: ${id}`);
 				// eslint-disable-next-line no-await-in-loop
 				out = await fn({
-					vault: this.vault,
+					app: this.app,
 					fs: this.fs,
 					log: this.loggingService,
 					data: out,
-					settings: deps?.settings,
-					noteIdentityService: deps?.noteIdentityService,
-					snapshotManager: deps?.snapshotManager,
+					...deps,
 				});
 				out = {
 					...out,
@@ -120,57 +78,153 @@ export class MigrationManager {
 					lastPluginMigratedTo: this.pluginVersion ?? out.lastPluginMigratedTo,
 				};
 			} catch (e) {
-				this.log.error(`Migration failed: ${id}. Will not mark as applied.`, e);
-				break;
+				this.log.error(
+					`Migration failed: ${id}. Aborting further migrations.`,
+					e,
+				);
+				return out; // stop to prevent partial migration corruption
 			}
 		}
+		this.log.info("All pending migrations applied successfully.");
 		return out;
 	}
 
-	private async tryEnsureUidFor(
-		file: TFile,
+	// --- Migration Implementations ---
+
+	private async migrateBackfillUids(
 		ctx: MigrationContext,
-	): Promise<string | null> {
-		const ids = ctx.noteIdentityService;
-		if (!ids) return null;
-		try {
-			const existing = ids.tryGetId(file as any);
-			if (existing) return existing;
-			const uid = await ids.ensureId(file as any);
-			return uid;
-		} catch (_e) {
-			return null;
-		}
-	}
-	// Local helper to list markdown files in a folder (recursive by default)
-	private async listMarkdownInFolder(
-		folder: string | TFolder,
-		opts: { recursive?: boolean } = {},
-	): Promise<TFile[]> {
-		const recursive = opts.recursive ?? true;
-		let root: TFolder | null = null;
-		if (typeof folder === "string") {
-			const af = this.vault.getAbstractFileByPath(folder);
-			if (isTFolder(af)) root = af;
-		} else {
-			root = folder;
-		}
-		if (!root) return [];
+	): Promise<PluginData> {
+		const files = await this.getHighlightFiles(ctx.settings.highlightsFolder);
+		if (files.length === 0) return ctx.data;
 
-		const out: TFile[] = [];
-		const stack: (TFile | TFolder)[] = [root];
-		while (stack.length) {
-			const cur = stack.pop()!;
-			if (isTFile(cur)) {
-				if (cur.extension === "md") out.push(cur);
-				continue;
-			}
-			for (const child of cur.children) {
-				if (!recursive && isTFolder(child)) continue;
-				stack.push(child as TFile | TFolder);
+		await withProgress(
+			ctx.app,
+			files.length,
+			async (tick, signal) => {
+				tick.setStatus("Upgrading notes with unique IDs...");
+				for (const file of files) {
+					if (signal.aborted) return;
+					const r = await ctx.notePersistenceService.ensureId(file);
+					if (isErr(r)) {
+						this.log.warn(
+							`Failed to assign UID to ${file.path} during migration`,
+							r.error,
+						);
+					}
+					tick();
+				}
+			},
+			{ title: "KOReader Importer Upgrade" },
+		);
+
+		return ctx.data;
+	}
+
+	private async migrateSnapshotsToUid(
+		ctx: MigrationContext,
+	): Promise<PluginData> {
+		const files = await this.getHighlightFiles(ctx.settings.highlightsFolder);
+		if (files.length === 0) return ctx.data;
+
+		await withProgress(
+			ctx.app,
+			files.length,
+			async (tick, signal) => {
+				tick.setStatus("Migrating highlight snapshots...");
+				for (const file of files) {
+					if (signal.aborted) return;
+					try {
+						const uid = ctx.notePersistenceService.tryGetId(file);
+						if (uid) {
+							await ctx.notePersistenceService.migrateSingleLegacySnapshot(
+								file,
+								uid,
+							);
+						}
+					} catch (e) {
+						this.log.warn(`Failed to migrate snapshot for ${file.path}`, e);
+					}
+					tick();
+				}
+			},
+			{ title: "KOReader Importer Upgrade" },
+		);
+
+		return ctx.data;
+	}
+
+	private async migrateResolveUidCollisions(
+		ctx: MigrationContext,
+	): Promise<PluginData> {
+		// Scan all markdown files in the highlights folder
+		const scan = await ctx.fs.getFilesInFolder(ctx.settings.highlightsFolder, {
+			extensions: ["md"],
+			recursive: true,
+		});
+		const files = scan.files;
+		if (files.length === 0) return ctx.data;
+
+		// Build UID -> files map using fast cache reads
+		const byUid = new Map<string, TFile[]>();
+		for (const f of files) {
+			const uid = ctx.notePersistenceService.tryGetId(f);
+			if (!uid) continue;
+			const arr = byUid.get(uid) ?? [];
+			arr.push(f);
+			byUid.set(uid, arr);
+		}
+
+		let collisions = 0;
+		let filesReassigned = 0;
+		for (const [, arr] of byUid.entries()) {
+			if (arr.length <= 1) continue;
+			// Keep oldest by ctime, reassign others
+			arr.sort((a, b) => a.stat.ctime - b.stat.ctime);
+			const toReassign = arr.slice(1);
+			collisions++;
+			for (const f of toReassign) {
+				const r = await ctx.notePersistenceService.assignNewId(f);
+				if (isErr(r)) {
+					this.log.warn(
+						`Failed to reassign UID for ${f.path} during migration`,
+						r.error,
+					);
+					continue;
+				}
+				filesReassigned++;
 			}
 		}
-		return out;
+
+		if (collisions > 0) {
+			this.log.info(
+				`UID collision resolution complete: ${collisions} collision(s) found, ${filesReassigned} file(s) reassigned.`,
+			);
+			new Notice(
+				`KOReader Importer: Resolved ${collisions} duplicate note ID(s).`,
+			);
+		}
+		return ctx.data;
+	}
+
+	private async migrateIndexDatabase(
+		ctx: MigrationContext,
+	): Promise<PluginData> {
+		this.log.info(
+			"Triggering index database schema upgrade and data backfill...",
+		);
+		await ctx.localIndexService.whenReady();
+		this.log.info("Index database migration check complete.");
+		return ctx.data;
+	}
+
+	// --- Helpers ---
+
+	private async getHighlightFiles(folderPath: string): Promise<TFile[]> {
+		const scan = await this.fs.getFilesInFolder(folderPath, {
+			extensions: ["md"],
+			recursive: true,
+		});
+		return scan.files;
 	}
 
 	/**
@@ -196,107 +250,6 @@ export class MigrationManager {
 				"Legacy settings migration failed; proceeding without it.",
 				e,
 			);
-		}
-	}
-
-	/* ---------------- Migration Implementations ------------------- */
-
-	private async cleanupOldLogFiles(
-		vault: Vault,
-		log: LoggingService,
-	): Promise<void> {
-		const LEGACY_DIRS = ["koreader/logs", "koreader_importer_logs"];
-		let removed = 0;
-
-		for (const dir of LEGACY_DIRS) {
-			const folder = vault.getAbstractFileByPath(dir);
-			if (!isTFolder(folder)) continue;
-
-			const victims = folder.children.filter(
-				(c): c is TFile =>
-					isTFile(c) && c.name.startsWith("koreader-importer_"),
-			);
-
-			await Promise.all(
-				victims.map(async (f) => {
-					try {
-						await vault.delete(f);
-						removed++;
-					} catch (e) {
-						log.warn(`Could not delete old log ${f.path}`, e);
-					}
-				}),
-			);
-		}
-		if (removed > 0) {
-			log.info(`Removed ${removed} old log files during migration.`);
-		}
-	}
-
-	/**
-	 * Removes legacy files from the plugin data directory after unified SQLite migration.
-	 * - Deletes old JSON import index and backup.
-	 * - Deletes any legacy index sqlite files except the current highlight_index.sqlite.
-	 * - Deletes probe artifacts.
-	 */
-	private async cleanupLegacyUserData(
-		vault: Vault,
-		_log: LoggingService,
-	): Promise<void> {
-		try {
-			const adapter = (vault as any).adapter as import("obsidian").DataAdapter;
-			// Prefer FileSystemService for the correct plugin data directory.
-			const pluginDataDir = normalizePath(this.fs.getPluginDataDir());
-
-			// Determine the current database and its journal files dynamically.
-			const currentDbPath = this.fs.joinPluginDataPath("index.db");
-			const currentDbName = currentDbPath.split("/").pop()!;
-			const currentDbJournalFiles = new Set<string>([
-				`${currentDbName}-shm`,
-				`${currentDbName}-wal`,
-			]);
-
-			const exists = await adapter.exists(pluginDataDir);
-			if (!exists) return;
-
-			const { files } = await adapter.list(pluginDataDir);
-			let removed = 0;
-
-			const isLegacySqlite = (p: string): boolean => {
-				const name = p.split("/").pop() ?? p;
-				// Keep the current DB and its journals
-				if (name === currentDbName) return false;
-				if (currentDbJournalFiles.has(name)) return false;
-				// Legacy patterns to delete (old DB names and backups)
-				return (
-					/index.*\.sqlite(\.(bak|old))?$/i.test(name) ||
-					name === "highlight_index.sqlite"
-				);
-			};
-
-			for (const f of files) {
-				const name = f.split("/").pop() ?? f;
-				if (
-					name === "import-index.json" ||
-					name === "import-index.json.bak" ||
-					name === "highlight_index.sqlite.__probe__" ||
-					name === "index.db.__probe__" ||
-					isLegacySqlite(f)
-				) {
-					try {
-						await adapter.remove(f);
-						removed++;
-					} catch (_e) {
-						this.log.warn(`Could not delete legacy user data file: ${f}`);
-					}
-				}
-			}
-
-			if (removed > 0) {
-				this.log.info(`Removed ${removed} legacy files from plugin data dir.`);
-			}
-		} catch (_e) {
-			this.log.warn("cleanupLegacyUserData failed", _e);
 		}
 	}
 }

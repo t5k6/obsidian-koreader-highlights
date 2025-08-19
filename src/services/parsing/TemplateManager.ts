@@ -1,55 +1,43 @@
-import { debounce, Notice, normalizePath, TFile, type Vault } from "obsidian";
+import { debounce, normalizePath, parseYaml, type Vault } from "obsidian";
 import { DEFAULT_TEMPLATES_FOLDER } from "src/constants";
+import type { IterableCache } from "src/lib/cache";
 import type { CacheManager } from "src/lib/cache/CacheManager";
-import type { LruCache } from "src/lib/cache/LruCache";
+import { err, isErr, ok, type Result } from "src/lib/core/result";
+import type { TemplateFailure } from "src/lib/errors";
 import {
-	formatDate,
-	formatDateAsDailyNote,
-	formatDateLocale,
-} from "src/lib/formatting/dateUtils";
-import { styleHighlight } from "src/lib/formatting/highlightStyle";
+	extractFrontmatter,
+	stripFrontmatter,
+} from "src/lib/frontmatter/frontmatterUtils";
 import { isTFile } from "src/lib/obsidian/typeguards";
+import {
+	compile as compileTemplate,
+	validateTemplate as engineValidate,
+} from "src/lib/template/templateCore";
 import type KoreaderImporterPlugin from "src/main";
 import type {
-	Annotation,
 	KoreaderHighlightImporterSettings,
-	RenderContext,
 	SettingsObserver,
 	TemplateData,
 	TemplateDefinition,
 } from "src/types";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
-import { TemplateValidator } from "./TemplateValidator";
 
 export const FALLBACK_TEMPLATE_ID = "default";
 const DARK_THEME_CLASS = "theme-dark";
 
-const NOTE_LINE_REGEX = /^\s*>\s*/;
-const TEMPLATE_FRONTMATTER_REGEX = /^---.*?---\s*/s;
 /** Injected by esbuild.define (see esbuild.config.js) */
 declare const KOREADER_BUILTIN_TEMPLATES: string;
 
 export type CompiledTemplate = (data: TemplateData) => string;
-type TemplateToken =
-	| { type: "text"; value: string }
-	| { type: "var"; key: string }
-	| { type: "cond"; key: string; body: TemplateToken[] };
 
-const MAX_TEMPLATE_NESTING = 20;
-
-export interface TemplateValidationResult {
-	isValid: boolean;
-	errors: string[];
-	warnings: string[];
-	suggestions: string[];
-}
+// Validation result type re-exported from engine via import above
 
 export class TemplateManager implements SettingsObserver {
 	private readonly log;
 	private isDarkTheme: boolean = true;
-	private rawTemplateCache: LruCache<string, string>;
-	private compiledTemplateCache: LruCache<string, CompiledTemplate>;
+	private rawTemplateCache: IterableCache<string, string>;
+	private compiledTemplateCache: IterableCache<string, CompiledTemplate>;
 	private readonly updateThemeDebounced: (() => void) & { cancel: () => void };
 	public builtInTemplates: Map<string, TemplateDefinition> = new Map();
 
@@ -75,6 +63,32 @@ export class TemplateManager implements SettingsObserver {
 			this.plugin.app.workspace.on("css-change", this.updateThemeDebounced),
 		);
 		this.log.info(`Initialized. Dark theme: ${this.isDarkTheme}`);
+
+		// Invalidate template caches when the selected custom template file is modified or deleted.
+		this.plugin.registerEvent(
+			this.plugin.app.vault.on("modify", (file) => {
+				const { useCustomTemplate, selectedTemplate } =
+					this.plugin.settings.template;
+				if (!useCustomTemplate) return;
+				const normalized = normalizePath(selectedTemplate || "");
+				if (file.path === normalized) {
+					this.cacheManager.clear("template.*");
+					this.log.info(`Template file modified; cleared template caches.`);
+				}
+			}),
+		);
+		this.plugin.registerEvent(
+			this.plugin.app.vault.on("delete", (file) => {
+				const { useCustomTemplate, selectedTemplate } =
+					this.plugin.settings.template;
+				if (!useCustomTemplate) return;
+				const normalized = normalizePath(selectedTemplate || "");
+				if (file.path === normalized) {
+					this.cacheManager.clear("template.*");
+					this.log.info(`Template file deleted; cleared template caches.`);
+				}
+			}),
+		);
 	}
 
 	public onSettingsChanged(
@@ -123,132 +137,13 @@ export class TemplateManager implements SettingsObserver {
 	}
 
 	/**
-	 * Tokenizes a template string into a sequence of tokens without executing code.
-	 * Supports text, variables {{var}}, and simple conditionals {{#key}}...{{/key}}.
-	 * Recursion depth is limited to prevent pathological nesting.
+	 * Single source of truth for template cache key generation.
 	 */
-	private tokenizeTemplate(
-		template: string,
-		depth: number = 0,
-	): TemplateToken[] {
-		if (depth > MAX_TEMPLATE_NESTING) {
-			// Exceeded nesting; treat the whole string as text to avoid stack/DoS
-			return [{ type: "text", value: template }];
-		}
-
-		const tokens: TemplateToken[] = [];
-		let i = 0;
-		const len = template.length;
-
-		const pushText = (text: string) => {
-			if (text) tokens.push({ type: "text", value: text });
-		};
-
-		while (i < len) {
-			const open = template.indexOf("{{", i);
-			if (open === -1) {
-				pushText(template.slice(i));
-				break;
-			}
-			if (open > i) pushText(template.slice(i, open));
-
-			const isCondOpen = template.startsWith("{{#", open);
-			const isClose = template.startsWith("{{/", open);
-			const end = template.indexOf("}}", open + 2);
-			if (end === -1) {
-				// Unclosed tag: treat remainder as text
-				pushText(template.slice(open));
-				break;
-			}
-
-			if (isCondOpen) {
-				const key = template.slice(open + 3, end).trim();
-				const after = end + 2;
-				const closeTag = `{{/${key}}}`;
-				const closeIdx = template.indexOf(closeTag, after);
-				if (closeIdx === -1) {
-					// No closing tag; treat as text
-					pushText(template.slice(open, end + 2));
-					i = end + 2;
-					continue;
-				}
-				const inner = template.slice(after, closeIdx);
-				const body = this.tokenizeTemplate(inner, depth + 1);
-				tokens.push({ type: "cond", key, body });
-				i = closeIdx + closeTag.length;
-				continue;
-			}
-
-			if (isClose) {
-				// Unbalanced close; treat literally
-				pushText(template.slice(open, end + 2));
-				i = end + 2;
-				continue;
-			}
-
-			const name = template.slice(open + 2, end).trim();
-			if (name && !name.startsWith("#") && !name.startsWith("/")) {
-				tokens.push({ type: "var", key: name });
-			} else {
-				pushText(template.slice(open, end + 2));
-			}
-			i = end + 2;
-		}
-
-		return tokens;
-	}
-
-	/**
-	 * Compiles a template string into an executable function.
-	 * Handles variable substitution and conditional blocks.
-	 * @param templateString - The raw template string
-	 * @returns Compiled template function that accepts TemplateData
-	 */
-	public compile(templateString: string): CompiledTemplate {
-		// Determine how to render note lines based on template usage
-		const noteLineHasQuote = /^[ \t]*>[^\n]*\{\{note\}\}/m.test(templateString);
-		const noteLines = templateString
-			.split(/\r?\n/)
-			.filter((l) => l.includes("{{note}}"));
-		const userHandlesPrefix = noteLines.some((l) => NOTE_LINE_REGEX.test(l));
-		const autoPrefixNotes = !userHandlesPrefix;
-
-		const tokens = this.tokenizeTemplate(templateString);
-
-		const renderNote = (raw: unknown): string => {
-			const s = typeof raw === "string" ? raw : raw == null ? "" : String(raw);
-			if (!s) return "";
-			const lines = s.split("\n");
-			if (noteLineHasQuote) {
-				return lines.map((l, idx) => (idx === 0 ? l : `> ${l}`)).join("\n");
-			}
-			if (autoPrefixNotes) {
-				return lines.map((l) => `> ${l}`).join("\n");
-			}
-			return s;
-		};
-
-		const renderTokens = (ts: TemplateToken[], d: TemplateData): string => {
-			let out = "";
-			for (const t of ts) {
-				if (t.type === "text") {
-					out += t.value;
-				} else if (t.type === "var") {
-					if (t.key === "note") {
-						out += renderNote((d as any).note);
-					} else {
-						const v = (d as any)[t.key];
-						out += v == null ? "" : String(v);
-					}
-				} else if (t.type === "cond") {
-					const cond = (d as any)[t.key];
-					if (cond) out += renderTokens(t.body, d);
-				}
-			}
-			return out;
-		};
-
-		return (d: TemplateData) => renderTokens(tokens, d);
+	private cacheKey(): string {
+		const { useCustomTemplate, selectedTemplate } =
+			this.plugin.settings.template;
+		const id = selectedTemplate || FALLBACK_TEMPLATE_ID;
+		return useCustomTemplate ? id : `builtin_${id}`;
 	}
 
 	/**
@@ -268,11 +163,22 @@ export class TemplateManager implements SettingsObserver {
 				const name = id
 					.replace(/-/g, " ")
 					.replace(/\b\w/g, (l) => l.toUpperCase());
-				const fmMatch = content.match(/^---\s*description:\s*(.*?)\s*---/s);
-				const description = fmMatch
-					? fmMatch[1].trim()
-					: `The ${name} template.`;
-				const templateContent = content.replace(TEMPLATE_FRONTMATTER_REGEX, "");
+				const fmContent = extractFrontmatter(content);
+				let description = `The ${name} template.`;
+				if (fmContent) {
+					try {
+						const fm = parseYaml(fmContent) ?? {};
+						if (
+							typeof (fm as any).description === "string" &&
+							(fm as any).description.trim()
+						) {
+							description = (fm as any).description.trim();
+						}
+					} catch {
+						// ignore parse errors; keep default description
+					}
+				}
+				const templateContent = stripFrontmatter(content);
 				this.builtInTemplates.set(id, {
 					id,
 					name,
@@ -287,123 +193,54 @@ export class TemplateManager implements SettingsObserver {
 	}
 
 	/**
-	 * Validates a template to ensure it contains required variables.
-	 * Checks for presence of {{highlight}} and {{pageno}} at minimum.
-	 * @param content - The template content to validate
-	 * @returns Validation result with errors, warnings, and suggestions
+	 * Purely loads and validates the current template (built-in or custom) as a Result.
+	 * Performs no logging, fallbacks, or side effects. Callers are responsible for handling Err cases.
 	 */
-	public validateTemplate(content: string): TemplateValidationResult {
-		const validator = new TemplateValidator();
-		const v = validator.validate(content);
-		// Preserve existing HTML warning behavior
-		if (/<[a-z][\s\S]*>/i.test(content)) {
-			v.warnings.push("HTML detected; may require custom CSS.");
-		}
-		return {
-			isValid: v.isValid,
-			errors: v.errors,
-			warnings: v.warnings,
-			suggestions: v.suggestions,
-		};
-	}
-
-	/**
-	 * Loads the currently selected template, either built-in or custom.
-	 * Falls back to default template if selected template is invalid or missing.
-	 * @returns Promise resolving to the template string content
-	 */
-	async loadTemplate(): Promise<string> {
+	public async loadTemplateResult(): Promise<Result<string, TemplateFailure>> {
 		await this.loadBuiltInTemplates();
 		const { useCustomTemplate, selectedTemplate } =
 			this.plugin.settings.template;
 		const templateId = selectedTemplate || FALLBACK_TEMPLATE_ID;
 
-		const cacheKey = useCustomTemplate ? templateId : `builtin_${templateId}`;
-		const cached = this.rawTemplateCache.get(cacheKey);
-		if (cached) return cached;
+		const contentRes = !useCustomTemplate
+			? this._getBuiltInTemplateContent(templateId)
+			: await this._loadCustomTemplateContent(templateId);
 
-		let templateContent: string;
-		if (!useCustomTemplate) {
-			const builtIn = this.builtInTemplates.get(templateId);
-			templateContent =
-				builtIn?.content ??
-				this.builtInTemplates.get(FALLBACK_TEMPLATE_ID)?.content ??
-				"";
-		} else {
-			const loadedFromVault = await this.loadTemplateFromVault(templateId);
-			if (!loadedFromVault) {
-				new Notice(
-					`Custom template "${templateId}" not found. Falling back to Default.`,
-				);
-				templateContent =
-					this.builtInTemplates.get(FALLBACK_TEMPLATE_ID)?.content ?? "";
-			} else {
-				templateContent = loadedFromVault.replace(
-					TEMPLATE_FRONTMATTER_REGEX,
-					"",
-				);
-			}
-		}
+		if (isErr(contentRes)) return contentRes;
 
-		const validation = this.validateTemplate(templateContent);
+		const rawContent = useCustomTemplate
+			? stripFrontmatter(contentRes.value)
+			: contentRes.value;
+
+		const validation = engineValidate(rawContent);
 		if (!validation.isValid) {
-			new Notice(
-				`Template "${templateId}" has errors. Falling back to Default.`,
-			);
-			this.log.error("Template validation failed:", validation.errors);
-			templateContent =
-				this.builtInTemplates.get(FALLBACK_TEMPLATE_ID)?.content ?? "";
+			return err({
+				kind: "TemplateInvalid",
+				id: templateId,
+				errors: validation.errors,
+			});
 		}
 
-		this.rawTemplateCache.set(cacheKey, templateContent);
-		return templateContent;
+		return ok(rawContent);
 	}
 
 	/**
-	 * Gets the compiled version of the current template.
-	 * Uses caching to avoid recompilation on repeated calls.
-	 * @returns Promise resolving to the compiled template function
+	 * Purely gets a compiled version of the current template as a Result.
+	 * Performs no logging or fallbacks. Caches the compiled function on success.
 	 */
-	public async getCompiledTemplate(): Promise<CompiledTemplate> {
-		const { useCustomTemplate, selectedTemplate } =
-			this.plugin.settings.template;
-		const templateId = selectedTemplate || FALLBACK_TEMPLATE_ID;
-		const cacheKey = useCustomTemplate ? templateId : `builtin_${templateId}`;
-
+	public async getCompiledTemplateResult(): Promise<
+		Result<CompiledTemplate, TemplateFailure>
+	> {
+		const cacheKey = this.cacheKey();
 		const cached = this.compiledTemplateCache.get(cacheKey);
-		if (cached) return cached;
+		if (cached) return ok(cached);
 
-		const rawTemplate = await this.loadTemplate();
-		const compiledFn = this.compile(rawTemplate);
+		const rawResult = await this.loadTemplateResult();
+		if (isErr(rawResult)) return rawResult;
 
+		const compiledFn = compileTemplate(rawResult.value);
 		this.compiledTemplateCache.set(cacheKey, compiledFn);
-		return compiledFn;
-	}
-
-	/**
-	 * Loads a custom template file from the vault.
-	 * @param vaultPath - Path to the template file in the vault
-	 * @returns Promise resolving to template content or null if not found
-	 */
-	public async loadTemplateFromVault(
-		vaultPath: string,
-	): Promise<string | null> {
-		const normalizedPath = normalizePath(vaultPath);
-		const file = this.vault.getAbstractFileByPath(normalizedPath);
-		if (isTFile(file)) return this.vault.read(file);
-		this.log.warn(`Custom template file not found: "${vaultPath}"`);
-		return null;
-	}
-
-	/**
-	 * Renders a template string with the provided data.
-	 * @param templateString - The template string to render
-	 * @param data - The data object containing values for template variables
-	 * @returns The rendered output string
-	 */
-	public render(templateString: string, data: TemplateData): string {
-		const compiled = this.compile(templateString);
-		return compiled(data).trim();
+		return ok(compiledFn);
 	}
 
 	/**
@@ -416,17 +253,14 @@ export class TemplateManager implements SettingsObserver {
 			this.plugin.settings.template.templateDir || DEFAULT_TEMPLATES_FOLDER,
 		);
 
-		try {
-			// Await the folder creation.
-			await this.fs.ensureVaultFolder(templateDir);
-		} catch (err) {
-			// If we can't even create the directory, we can't proceed.
+		// Ensure the directory exists using Result-based API.
+		const ensured = await this.fs.ensureVaultFolder(templateDir);
+		if (isErr(ensured)) {
 			this.log.error(
 				`Failed to create template directory at ${templateDir}`,
-				err,
+				(ensured as any).error ?? ensured,
 			);
-			new Notice(`Failed to create template directory: ${templateDir}`);
-			return; // Exit the function.
+			return;
 		}
 
 		// Load built-in templates if they haven't been already.
@@ -440,29 +274,16 @@ export class TemplateManager implements SettingsObserver {
 				const filePath = normalizePath(`${templateDir}/${template.id}.md`);
 
 				// Check if the file already exists to avoid unnecessary writes.
-				if (!(await this.fs.vaultExists(filePath))) {
+				const existsRes = await this.fs.vaultExists(filePath);
+				if (isErr(existsRes) || !existsRes.value) {
 					this.log.info(`Creating built-in template file: ${filePath}`);
 					const fileContent = `---\ndescription: ${template.description}\n---\n\n${template.content}`;
 
-					try {
-						await this.vault.create(filePath, fileContent);
-					} catch (writeError) {
-						// Gracefully handle races where the file was created by another process
-						// between our existence check and the create() call.
-						const code = (writeError as NodeJS.ErrnoException)?.code;
-						if (
-							code === "EEXIST" ||
-							(writeError instanceof Error &&
-								/already exists/i.test(writeError.message))
-						) {
-							this.log.info(
-								`Template file already exists (race handled): ${filePath}`,
-							);
-							return; // Skip logging as error
-						}
+					const res = await this.fs.writeVaultTextAtomic(filePath, fileContent);
+					if (isErr(res)) {
 						this.log.error(
 							`Failed to write template file ${filePath}`,
-							writeError,
+							(res as any).error ?? res,
 						);
 					}
 				}
@@ -473,95 +294,27 @@ export class TemplateManager implements SettingsObserver {
 		await Promise.all(writePromises);
 	}
 
-	/**
-	 * Renders a group of annotations using the compiled template.
-	 * Merges highlights and notes within the group based on context.
-	 * @param compiledFn - The compiled template function
-	 * @param group - Array of annotations to render together
-	 * @param ctx - Render context with separators and chapter info
-	 * @returns The rendered string for the annotation group
-	 */
-	public renderGroup(
-		compiledFn: CompiledTemplate,
-		group: Annotation[],
-		ctx: RenderContext,
-	): string {
-		const head = group[0];
-		const data: TemplateData = {
-			pageno: head.pageno ?? 0,
-			date: formatDate(head.datetime), // Stable en-US date
-			localeDate: formatDateLocale(head.datetime), // User's system locale date
-			dailyNoteLink: formatDateAsDailyNote(head.datetime), // [[YYYY-MM-DD]] link
-			chapter: head.chapter?.trim() || "",
-			isFirstInChapter: (ctx as any).isFirstInChapter ?? false,
-			highlight: this.mergeHighlightText(
-				group,
-				ctx.separators ?? new Array(group.length - 1).fill(" "),
-			),
-			note: this.mergeNotes(group),
-			notes: group
-				.map((g) => g.note)
-				.filter((note): note is string => typeof note === "string"),
-		};
-		return compiledFn(data);
+	/** [private] Purely retrieves built-in template content. */
+	private _getBuiltInTemplateContent(
+		id: string,
+	): Result<string, TemplateFailure> {
+		const builtIn = this.builtInTemplates.get(id);
+		if (!builtIn) {
+			return err({ kind: "TemplateNotFound", path: `builtin:${id}` });
+		}
+		return ok(builtIn.content);
 	}
 
-	/**
-	 * Merges multiple highlight texts with appropriate separators.
-	 * Handles styling and gap indicators between non-contiguous highlights.
-	 * @param group - Array of annotations to merge
-	 * @param separators - Array of separators (" " or " [...] ")
-	 * @returns Merged and styled highlight text
-	 */
-	private mergeHighlightText(
-		group: Annotation[],
-		separators: (" " | " [...] ")[],
-	): string {
-		if (group.length === 0) {
-			return "";
+	/** [private] Purely loads custom template content from the vault. */
+	private async _loadCustomTemplateContent(
+		vaultPath: string,
+	): Promise<Result<string, TemplateFailure>> {
+		const normalizedPath = normalizePath(vaultPath);
+		const file = this.vault.getAbstractFileByPath(normalizedPath);
+		if (!isTFile(file)) {
+			return err({ kind: "TemplateNotFound", path: vaultPath });
 		}
-
-		// First, style each annotation individually. `styleHighlight` already handles
-		// internal paragraphs correctly with `<br><br>`.
-		const styledHighlights = group.map((ann) =>
-			styleHighlight(ann.text ?? "", ann.color, ann.drawer),
-		);
-
-		if (styledHighlights.length === 1) {
-			return styledHighlights[0];
-		}
-
-		// Now, join the already-styled highlights with the correct inter-highlight separator.
-		let result = styledHighlights[0];
-
-		for (let i = 1; i < styledHighlights.length; i++) {
-			const separator = separators[i - 1]; // Separator between (i-1) and (i)
-
-			if (separator === " ") {
-				// Contiguous highlights, just join with a space.
-				result += ` ${styledHighlights[i]}`;
-			} else {
-				// A significant gap exists. Use a visual separator with paragraph breaks.
-				// Normalize any trailing breaks to avoid duplication.
-				result = result.replace(/<br><br>$/, "");
-				// The <br><br> ensures a blank line appears.
-				result += `[...]${styledHighlights[i]}`;
-			}
-		}
-
-		return result;
-	}
-
-	/**
-	 * Merges notes from multiple annotations with dividers.
-	 * @param group - Array of annotations containing notes
-	 * @returns Merged notes separated by horizontal rules
-	 */
-	private mergeNotes(group: Annotation[]): string {
-		const notes = group
-			.map((g) => g.note)
-			.filter((n): n is string => typeof n === "string" && n.trim() !== "");
-		if (!notes.length) return "";
-		return notes.join("\n---\n");
+		const content = await this.vault.read(file);
+		return ok(content);
 	}
 }

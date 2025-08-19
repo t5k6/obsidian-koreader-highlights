@@ -1,12 +1,11 @@
-import { createHash } from "node:crypto";
-import { normalizeFileNamePiece } from "src/lib/pathing/pathingUtils";
-import type { LoggingService } from "src/services/LoggingService";
-import type { Annotation, DocProps } from "src/types";
+import { sha1Hex } from "src/lib/core/crypto";
+import { err, ok, type Result } from "src/lib/core/result";
+import type { CfiParseError } from "src/lib/errors";
+import { toMatchKey } from "src/lib/pathing";
+import { normalizeWhitespace } from "src/lib/strings/stringUtils";
+import type { Annotation, DocProps, PositionObject } from "src/types";
 
-interface PositionObject {
-	x: number;
-	y: number;
-}
+// PositionObject is imported from src/types to avoid duplicate structural types
 
 /**
  * Generates a deterministic key from document properties.
@@ -15,8 +14,8 @@ interface PositionObject {
  * @returns Normalized key in format "author::title"
  */
 export function bookKeyFromDocProps(props: DocProps): string {
-	const authorSlug = normalizeFileNamePiece(props.authors).toLowerCase();
-	const titleSlug = normalizeFileNamePiece(props.title).toLowerCase();
+	const authorSlug = toMatchKey(props.authors);
+	const titleSlug = toMatchKey(props.title);
 	return `${authorSlug}::${titleSlug}`;
 }
 
@@ -76,15 +75,13 @@ export function parsePosition(
  * Parses EPUB CFI (Canonical Fragment Identifier) strings.
  * Extracts path and offset information for precise location.
  * @param cfi - The CFI string to parse
- * @returns Parsed CFI parts or null if invalid
+ * @returns A Result containing the parsed parts or a structured error.
  */
-export function parseCfi(cfi: string, logger: LoggingService): CfiParts | null {
-	const log = logger.scoped("formatUtils:CFI");
+export function parseCfi(cfi: string): Result<CfiParts, CfiParseError> {
 	const match = cfi.match(CFI_REGEX_COMBINED);
 
 	if (!match) {
-		log.warn(`Could not parse CFI string: "${cfi}"`);
-		return null;
+		return err({ kind: "CFI_PARSE_FAILED", cfi });
 	}
 
 	const basePath = match[1] || "";
@@ -100,24 +97,22 @@ export function parseCfi(cfi: string, logger: LoggingService): CfiParts | null {
 		textNodeIndexStr = match[5];
 		offsetStr = match[6];
 	} else {
-		log.warn(`Could not determine offset structure in CFI: "${cfi}"`);
-		return null;
+		return err({ kind: "CFI_PARSE_FAILED", cfi });
 	}
 
 	const textNodeIndex = Number.parseInt(textNodeIndexStr, 10);
 	const offset = Number.parseInt(offsetStr, 10);
 
 	if (Number.isNaN(offset) || Number.isNaN(textNodeIndex)) {
-		log.warn(`Error parsing offset/text node index from CFI: "${cfi}"`);
-		return null;
+		return err({ kind: "CFI_PARSE_FAILED", cfi });
 	}
 
 	const fullPath = `${basePath}${nodeSteps},/${textNodeIndex}`;
 
-	return {
+	return ok({
 		fullPath: fullPath,
 		offset: offset,
-	};
+	});
 }
 
 /**
@@ -153,6 +148,11 @@ export function areHighlightsSuccessive(
 	return pos2_start.offset - pos1_end.offset <= maxGap;
 }
 
+// Helper function to extract numbers from a string for sorting
+function getNumericSortKey(s: string): number[] {
+	return (s.match(/\d+/g) || []).map(Number);
+}
+
 /**
  * Comparison function for sorting annotations.
  * Sorts by: page number, position on page, then datetime.
@@ -168,21 +168,33 @@ export function compareAnnotations(a: Annotation, b: Annotation): number {
 		return a.pageno - b.pageno;
 	}
 
-	// Secondary sort: character position on the page.
+	// Secondary sort: position on page
 	const posA = parsePosition(a.pos0);
 	const posB = parsePosition(b.pos0);
 
 	if (posA && posB) {
 		if (posA.node !== posB.node) {
+			// Compare node paths numerically first
+			const keyA = getNumericSortKey(posA.node);
+			const keyB = getNumericSortKey(posB.node);
+			for (let i = 0; i < Math.min(keyA.length, keyB.length); i++) {
+				if (keyA[i] !== keyB[i]) {
+					return keyA[i] - keyB[i];
+				}
+			}
+			// If numeric keys are same-length and equal, fall back to lexical compare
+			const lenDiff = keyA.length - keyB.length;
+			if (lenDiff !== 0) return lenDiff;
 			return posA.node.localeCompare(posB.node);
 		}
+		// Tertiary sort: offset within the same node
 		if (posA.offset !== posB.offset) {
 			return posA.offset - posB.offset;
 		}
 	} else if (posA) {
-		return -1;
+		return -1; // a comes first if b has no position
 	} else if (posB) {
-		return 1;
+		return 1; // b comes first if a has no position
 	}
 
 	// Fallback sort: datetime, for identical positions.
@@ -197,15 +209,6 @@ export function compareAnnotations(a: Annotation, b: Annotation): number {
 	}
 
 	return 0;
-}
-
-/**
- * Formats a percentage value.
- * @param percent - Percentage value (0-100)
- * @returns Formatted string like "75%"
- */
-export function formatPercent(percent: number): string {
-	return `${Math.round(percent)}%`;
 }
 
 /**
@@ -242,11 +245,6 @@ export function isWithinGap(
 	return a.pageno === b.pageno && distanceBetweenHighlights(a, b) <= maxGap;
 }
 
-function normalizeForHashing(text?: string): string {
-	if (!text) return "";
-	return text.trim().replace(/\s+/g, " ");
-}
-
 /**
  * Generates a unique ID for an annotation based on its content.
  * Uses SHA1 hash of position and text data.
@@ -255,9 +253,11 @@ function normalizeForHashing(text?: string): string {
  */
 export function computeAnnotationId(annotation: Annotation): string {
 	const { pageno, pos0, pos1, text, note } = annotation;
-	// Use the normalized text and note for the hash
-	const input = `${pageno}|${pos0}|${pos1}|${normalizeForHashing(text)}|${normalizeForHashing(note)}`;
-	return createHash("sha1").update(input).digest("hex").slice(0, 16);
+	// Use the canonical normalizeWhitespace function for text and note normalization
+	const normalizedText = normalizeWhitespace(text || "");
+	const normalizedNote = normalizeWhitespace(note || "");
+	const input = `${pageno}|${pos0}|${pos1}|${normalizedText}|${normalizedNote}`;
+	return sha1Hex(input, { normalizeEol: true }).slice(0, 16);
 }
 
 /**

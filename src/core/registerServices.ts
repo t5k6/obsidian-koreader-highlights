@@ -1,27 +1,21 @@
 import type { App } from "obsidian";
 import { CacheManager } from "src/lib/cache/CacheManager";
-import { initPathingCaches } from "src/lib/pathing/pathingUtils";
 import type KoreaderImporterPlugin from "src/main";
 import { CapabilityManager } from "src/services/CapabilityManager";
 import { CommandManager } from "src/services/command/CommandManager";
 import { DeviceService } from "src/services/device/DeviceService";
 import { FileSystemService } from "src/services/FileSystemService";
-import { ImportPipelineService } from "src/services/ImportPipelineService";
-import { ImportExecutorService } from "src/services/import/ImportExecutorService";
-import { ImportPlannerService } from "src/services/import/ImportPlannerService";
+import { ImportService } from "src/services/import/ImportService";
 import { LoggingService } from "src/services/LoggingService";
 import { FrontmatterService } from "src/services/parsing/FrontmatterService";
 import { TemplateManager } from "src/services/parsing/TemplateManager";
 import { SqlJsManager } from "src/services/SqlJsManager";
 import { PromptService } from "src/services/ui/PromptService";
 import { DuplicateFinder } from "src/services/vault/DuplicateFinder";
-import { FileNameGenerator } from "src/services/vault/FileNameGenerator";
-import { LocalIndexService } from "src/services/vault/LocalIndexService";
+import { IndexCoordinator } from "src/services/vault/index/IndexCoordinator";
+import { IndexDatabase } from "src/services/vault/index/IndexDatabase";
 import { MergeHandler } from "src/services/vault/MergeHandler";
-import { MergeService } from "src/services/vault/MergeService";
-import { NoteCreationService } from "src/services/vault/NoteCreationService";
-import { NoteIdentityService } from "src/services/vault/NoteIdentityService";
-import { SnapshotManager } from "src/services/vault/SnapshotManager";
+import { NotePersistenceService } from "src/services/vault/NotePersistenceService";
 import type { DuplicateHandlingSession, DuplicateMatch } from "src/types";
 import { DuplicateHandlingModal } from "src/ui/DuplicateModal";
 import { StatusBarManager } from "src/ui/StatusBarManager";
@@ -56,19 +50,18 @@ export function registerServices(
 
 	// --- Level 0.5: Depends on LoggingService ---
 	container.register(CacheManager, [LoggingService]);
-	// Register pathing slug caches with the central CacheManager so global clears affect them.
-	initPathingCaches(container.resolve(CacheManager));
-	container.register(FileNameGenerator, [LoggingService]);
 	container.register(FrontmatterService, [
 		APP_TOKEN,
 		LoggingService,
 		FileSystemService,
 	]);
-	container.register(NoteIdentityService, [
+
+	container.register(NotePersistenceService, [
 		APP_TOKEN,
 		FrontmatterService,
-		LoggingService,
 		FileSystemService,
+		LoggingService,
+		CapabilityManager,
 	]);
 
 	// --- Level 1: Depends on Level 0 or Tokens ---
@@ -93,15 +86,6 @@ export function registerServices(
 		FileSystemService,
 		LoggingService,
 	]);
-	container.register(SnapshotManager, [
-		APP_TOKEN,
-		PLUGIN_TOKEN,
-		FileSystemService,
-		LoggingService,
-		FrontmatterService,
-		NoteIdentityService,
-		CapabilityManager,
-	]);
 	container.register(TemplateManager, [
 		PLUGIN_TOKEN,
 		VAULT_TOKEN,
@@ -114,7 +98,7 @@ export function registerServices(
 	container.register(StatusBarManager, [
 		APP_TOKEN,
 		PLUGIN_TOKEN,
-		LocalIndexService,
+		IndexCoordinator,
 		CommandManager,
 	]);
 
@@ -123,110 +107,75 @@ export function registerServices(
 	container.register(PromptService, [APP_TOKEN]);
 
 	// --- Level 2: Depends on Level 1 ---
-	container.register(MergeService, [
-		PLUGIN_TOKEN,
-		SnapshotManager,
-		FrontmatterService,
-		LoggingService,
-		FileSystemService,
-		NoteIdentityService,
-		TemplateManager,
-	]);
 
 	container.register(MergeHandler, [
 		APP_TOKEN,
 		PLUGIN_TOKEN,
 		DUPLICATE_MODAL_FACTORY_TOKEN,
-		MergeService,
-		SnapshotManager,
-		FileSystemService,
-		LoggingService,
-		CapabilityManager,
-		NoteIdentityService,
-	]);
-	container.register(LocalIndexService, [
-		PLUGIN_TOKEN,
-		APP_TOKEN,
-		FileSystemService,
-		CacheManager,
-		SqlJsManager,
-		LoggingService,
 		FrontmatterService,
-		CapabilityManager,
+		TemplateManager,
+		NotePersistenceService,
+		LoggingService,
 	]);
+	// Index components
+	container.register(IndexDatabase, [
+		SqlJsManager,
+		FileSystemService,
+		LoggingService,
+	]);
+
+	// IndexCoordinator handles orchestration and events
+	container.register(IndexCoordinator, [
+		APP_TOKEN,
+		PLUGIN_TOKEN,
+		IndexDatabase,
+		FrontmatterService,
+		FileSystemService,
+		LoggingService,
+		CacheManager,
+	]);
+
+	// LocalIndexService removed – use IndexCoordinator directly.
 
 	// --- Level 2.5: Duplicate Finding
 	container.register(DuplicateFinder, [
 		APP_TOKEN,
 		VAULT_TOKEN,
 		PLUGIN_TOKEN,
-		FileNameGenerator,
-		LocalIndexService,
+		IndexCoordinator,
 		FrontmatterService,
-		SnapshotManager,
-		NoteIdentityService,
-		CacheManager,
+		NotePersistenceService,
 		LoggingService,
 		FileSystemService,
 	]);
 
-	// Helper for creating notes (used by executor)
-	container.register(NoteCreationService, [
-		FileSystemService,
-		FrontmatterService,
-		FileNameGenerator,
-		SnapshotManager,
-		NoteIdentityService,
-		LoggingService,
-		TemplateManager,
-		PLUGIN_TOKEN,
-	]);
-
-	// New import pipeline services
-	container.register(ImportPlannerService, [
-		APP_TOKEN,
-		PLUGIN_TOKEN,
-		FileSystemService,
-		LocalIndexService,
-		DeviceService,
-		DuplicateFinder,
-		LoggingService,
-	]);
-	container.register(ImportExecutorService, [
-		PLUGIN_TOKEN,
-		MergeHandler,
-		NoteCreationService,
-		FrontmatterService,
-		LoggingService,
-		FileSystemService,
-		FileNameGenerator,
-		SnapshotManager,
-	]);
-
-	// Lean orchestrator depending on planner + executor
-	container.register(ImportPipelineService, [
+	// Consolidated ImportService
+	container.register(ImportService, [
 		APP_TOKEN,
 		PLUGIN_TOKEN,
 		DeviceService,
-		LocalIndexService,
-		SnapshotManager,
+		IndexCoordinator,
+		NotePersistenceService,
 		LoggingService,
 		PromptService,
-		ImportPlannerService,
-		ImportExecutorService,
+		FileSystemService,
+		DuplicateFinder,
+		FrontmatterService,
+		TemplateManager,
+		MergeHandler,
 	]);
 
 	// --- Level 3: Depends on Level 2 ---
 	container.register(CommandManager, [
 		APP_TOKEN,
 		PLUGIN_TOKEN,
-		ImportPipelineService,
+		ImportService,
 		DeviceService,
 		CacheManager,
 		LoggingService,
-		LocalIndexService,
+		IndexCoordinator,
+		FileSystemService,
 		CapabilityManager,
 		FrontmatterService,
-		FileSystemService,
 	]);
 }

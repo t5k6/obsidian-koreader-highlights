@@ -1,12 +1,12 @@
 import { Notice } from "obsidian";
-import { FileSystemService } from "src/services/FileSystemService";
+import { normalizeSystemPath } from "src/lib/pathing";
 
 export async function pickDirectory(
 	title: string,
 ): Promise<string | undefined> {
 	// Normalize picked system path using shared utility, then ensure trailing slash
 	const normalizePickedDir = (p: string): string => {
-		const sys = FileSystemService.normalizeSystemPath(p ?? "");
+		const sys = normalizeSystemPath(p ?? "");
 		return sys ? `${sys}/` : "";
 	};
 

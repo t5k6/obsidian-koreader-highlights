@@ -214,6 +214,13 @@ export interface DuplicateHandlingSession {
 	choice: DuplicateChoice | null;
 }
 
+export type StaleLocationChoice = "merge-stale" | "skip-stale";
+
+export interface StaleLocationSession {
+	applyToAll: boolean;
+	choice: StaleLocationChoice | null;
+}
+
 export interface IDuplicateHandlingModal {
 	openAndGetChoice(): Promise<{
 		choice: DuplicateChoice | null; // choice can be null if modal is closed
@@ -232,6 +239,7 @@ export interface RenderContext {
  */
 export interface TemplateData {
 	readonly highlight?: string;
+	readonly highlightPlain?: string;
 	readonly chapter?: string;
 	readonly pageno?: number;
 	readonly isFirstInChapter?: boolean;
@@ -240,6 +248,13 @@ export interface TemplateData {
 	readonly date?: string; // Stable "en-US" format
 	readonly localeDate?: string; // system locale format
 	readonly dailyNoteLink?: string; // daily note link format
+
+	// Color-related variables derived from KOReader metadata
+	readonly color?: string; // normalized palette color (red, orange, yellow, green, olive, cyan, blue, purple, gray)
+	readonly drawer?: DrawerType; // KOReader drawer style
+	readonly khlBg?: string; // e.g., "var(--khl-yellow)"
+	readonly khlFg?: string; // e.g., "var(--on-khl-yellow)"
+	readonly callout?: string; // alias for color for templates preferring {{callout}}
 }
 /**
  * Narrow set of allowed keys for variables/blocks in templates.
@@ -284,7 +299,7 @@ export const addSummary = (a: Summary, b: Summary): Summary => ({
 
 /**
  * A generic interface for a key-value cache.
- * Both the built-in `Map` and our custom `LruCache` conform to this structure.
+ * Implementations include the built-in `Map` and our consolidated `SimpleCache` (LRU-capable).
  */
 export interface Cache<K, V> {
 	get(key: K): V | undefined;

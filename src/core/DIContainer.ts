@@ -4,6 +4,7 @@ import type {
 	KoreaderHighlightImporterSettings,
 	SettingsObserver,
 } from "src/types";
+import { SETTINGS_TOKEN } from "./tokens";
 
 export type Ctor<T> = new (...args: any[]) => T;
 export type Token<T> = Ctor<T> | symbol;
@@ -132,6 +133,11 @@ export class DIContainer {
 		oldSettings: KoreaderHighlightImporterSettings,
 	): void {
 		this.lastKnownSettings = { new: newSettings, old: oldSettings };
+
+		if (this.values.has(SETTINGS_TOKEN)) {
+			this.values.set(SETTINGS_TOKEN, newSettings);
+		}
+
 		let notifiedCount = 0;
 		for (const instance of this.instances.values()) {
 			if (isSettingsObserver(instance)) {

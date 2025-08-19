@@ -8,21 +8,34 @@ import type {
 import { AsyncFileSink } from "./AsyncFileSink";
 import type { FileSystemService } from "./FileSystemService";
 
-function formatArgs(args: unknown[]): string {
-	return args
-		.map((x) => {
-			if (x instanceof Error) return `${x.message}\n${x.stack ?? ""}`;
-			if (typeof x === "object" && x !== null) {
-				try {
-					return JSON.stringify(x);
-				} catch {
-					return "[Unserializable Object]";
+// Pure formatting functions (functional core)
+export const LogFormatters = {
+	formatArgs(args: unknown[]): string {
+		return args
+			.map((x) => {
+				if (x instanceof Error) return `${x.message}\n${x.stack ?? ""}`;
+				if (typeof x === "object" && x !== null) {
+					try {
+						return JSON.stringify(x);
+					} catch {
+						return "[Unserializable Object]";
+					}
 				}
-			}
-			return String(x);
-		})
-		.join(" ");
-}
+				return String(x);
+			})
+			.join(" ");
+	},
+
+	formatLogLine(
+		timestamp: string,
+		level: "INFO" | "WARN" | "ERROR",
+		prefix: string,
+		scope: string,
+		message: string,
+	): string {
+		return `${timestamp} ${level.padEnd(5, " ")} ${prefix} [${scope}] ${message}`;
+	},
+};
 
 /* ------------------------------------------------------------------ */
 /*                      MAIN SERVICE CLASS                            */
@@ -40,20 +53,31 @@ export class LoggingService implements SettingsObserver, Disposable {
 	private level: LogLevel = LogLevel.NONE;
 	private sink: AsyncFileSink | null = null;
 	private fs: FileSystemService | null = null;
+	private lastLogDir: string | null = null;
+	private currentSettings: KoreaderHighlightImporterSettings | null = null;
 
 	constructor(private vault: Vault) {}
 
 	public setFileSystem(fs: FileSystemService): void {
 		this.fs = fs;
+		// If settings already requested file logging, enable sink now.
+		if (this.currentSettings?.logToFile && !this.sink) {
+			const logDir = this.currentSettings.logsFolder || DEFAULT_LOGS_FOLDER;
+			this.sink = new AsyncFileSink(this.fs, logDir, 10, 800);
+			this.lastLogDir = logDir;
+			this.info("LoggingService", "File logging enabled (late FS injection).");
+		}
 	}
 
 	public onSettingsChanged(settings: KoreaderHighlightImporterSettings): void {
+		this.currentSettings = settings;
 		this.level = settings.logLevel;
 
 		const shouldEnableSink = settings.logToFile;
 		const logDir = settings.logsFolder || DEFAULT_LOGS_FOLDER;
+		const dirChanged = this.lastLogDir !== logDir;
 
-		if (shouldEnableSink && !this.sink) {
+		if (shouldEnableSink) {
 			if (!this.fs) {
 				// Cannot enable file sink without FileSystemService
 				this.level = Math.min(this.level, LogLevel.WARN);
@@ -63,16 +87,17 @@ export class LoggingService implements SettingsObserver, Disposable {
 				);
 				return;
 			}
-			this.sink = new AsyncFileSink(
-				this.fs,
-				logDir,
-				/*retentionFiles*/ 10,
-				/*flushDelayMs*/ 800,
-			);
-			this.info("LoggingService", "File logging enabled.");
-		} else if (!shouldEnableSink && this.sink) {
+			if (!this.sink || dirChanged) {
+				const old = this.sink;
+				this.sink = new AsyncFileSink(this.fs, logDir, 10, 800);
+				this.lastLogDir = logDir;
+				if (old) void old.dispose();
+				this.info("LoggingService", `File logging enabled at ${logDir}.`);
+			}
+		} else if (this.sink) {
 			const old = this.sink;
 			this.sink = null;
+			this.lastLogDir = null;
 			this.info("LoggingService", "File logging disabled.");
 			void old.dispose();
 		}
@@ -113,19 +138,17 @@ export class LoggingService implements SettingsObserver, Disposable {
 		if (this.level < level) return;
 
 		const timestamp = new Date().toISOString();
-		const scopeStr = `[${scope}]`;
-		const msg = formatArgs(args);
+		const msg = LogFormatters.formatArgs(args);
+		const line = LogFormatters.formatLogLine(
+			timestamp,
+			tag,
+			this.LOG_PREFIX,
+			scope,
+			msg,
+		);
 
-		// Canonical formatted line used for both console and file sink
-		const line = `${timestamp} ${tag.padEnd(5, " ")} ${this.LOG_PREFIX} ${scopeStr} ${msg}`;
-
-		const consoleFn =
-			level === LogLevel.ERROR
-				? console.error
-				: level === LogLevel.WARN
-					? console.warn
-					: console.log;
-
+		// Side effects in the shell
+		const consoleFn = this.getConsoleFn(level);
 		consoleFn(line);
 		this.sink?.append(line);
 
@@ -133,5 +156,13 @@ export class LoggingService implements SettingsObserver, Disposable {
 		if (level === LogLevel.ERROR) {
 			void this.sink?.flush();
 		}
+	}
+
+	private getConsoleFn(level: LogLevel): (message: string) => void {
+		return level === LogLevel.ERROR
+			? console.error
+			: level === LogLevel.WARN
+				? console.warn
+				: console.log;
 	}
 }

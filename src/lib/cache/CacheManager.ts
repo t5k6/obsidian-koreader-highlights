@@ -1,139 +1,136 @@
 import type { LoggingService } from "src/services/LoggingService";
 import type { AsyncLoader, Cache, Disposable } from "src/types";
-import { LruCache } from "./LruCache";
+import { memoizeAsync, SimpleCache } from "./SimpleCache";
+import type { IterableCache } from "./types";
 
 /**
  * A DI-managed service to create, track, and invalidate all caches for the plugin.
- * This centralizes cache management, removing duplicated logic from other services.
+ * This is the single, public entry point for cache management within services.
  */
 export class CacheManager implements Disposable {
-	private readonly log;
-	private caches = new Map<string, Cache<unknown, unknown>>();
+	private readonly log; // This can be undefined
+	private readonly registry = new Map<string, Cache<unknown, unknown>>();
 
-	constructor(private loggingService: LoggingService) {
-		this.log = this.loggingService.scoped("CacheManager");
+	constructor(private loggingService?: LoggingService) {
+		this.log = this.loggingService?.scoped("CacheManager");
 	}
 
-	/* ---------- Factory Methods ---------- */
-
-	/**
-	 * Creates and registers a new LruCache.
-	 * @param name A unique, namespaced identifier (e.g., "template.raw").
-	 * @param max The maximum number of items in the cache.
-	 */
-	public createLru<K, V>(name: string, max = 100): LruCache<K, V> {
-		const cache = new LruCache<K, V>(max);
+	/** Creates and registers a new LRU-like cache. */
+	public createLru<K, V>(name: string, max = 100): IterableCache<K, V> {
+		const cache = new SimpleCache<K, V>(max);
 		return this.register(name, cache);
 	}
 
-	/**
-	 * Creates and registers a new standard Map that conforms to the Cache interface.
-	 * @param name A unique, namespaced identifier (e.g., "sdr.dir").
-	 */
-	public createMap<K, V>(name: string): Map<K, V> {
-		// A standard Map already implements the Cache interface.
-		return this.register(name, new Map<K, V>());
+	/** Creates and registers a new Map-backed cache without eviction. */
+	public createMap<K, V>(name: string): IterableCache<K, V> {
+		const cache = new SimpleCache<K, V>();
+		return this.register(name, cache);
 	}
 
-	/* ---------- Core API ---------- */
-
-	/**
-	 * Registers an existing cache instance with the manager.
-	 * @param name A unique identifier for the cache.
-	 * @param cache The cache instance to register.
-	 */
-	public register<T extends Cache<unknown, unknown>>(
-		name: string,
-		cache: T,
-	): T {
-		if (this.caches.has(name)) {
-			this.log.warn(`Overwriting already registered cache "${name}"`);
+	/** Registers an existing cache instance. */
+	public register<T extends Cache<any, any>>(name: string, cache: T): T {
+		if (this.registry.has(name)) {
+			this.log?.warn(`Overwriting already registered cache "${name}"`);
 		}
-		this.caches.set(name, cache);
+		this.registry.set(name, cache);
 		return cache;
 	}
 
-	/**
-	 * Retrieves a registered cache by its name.
-	 * @throws If no cache with the given name is found.
-	 */
-	public get<T extends Cache<unknown, unknown>>(name: string): T {
-		const c = this.caches.get(name);
+	/** Alias for register() to emphasize adopting third-party caches. */
+	public adopt<T extends Cache<any, any>>(name: string, cache: T): T {
+		return this.register(name, cache);
+	}
+
+	/** Retrieves a registered cache by name. */
+	public get<T extends Cache<any, any>>(name: string): T {
+		const c = this.registry.get(name) as T | undefined;
 		if (!c) throw new Error(`Cache "${name}" not found`);
-		return c as T;
+		return c;
 	}
 
-	/**
-	 * Clears caches. If no pattern is provided, clears all caches.
-	 * Supports simple wildcard `*` matching for targeted clearing.
-	 * @param pattern An optional pattern (e.g., "sdr.*" or "template.raw").
-	 */
-	public clear(pattern?: string): void {
+	/** Clears caches by pattern; returns number cleared. Supports wildcards * and ?. */
+	public clear(pattern?: string): number {
+		let clearedCount = 0;
 		if (!pattern) {
-			for (const cache of this.caches.values()) {
+			clearedCount = this.registry.size;
+			for (const cache of this.registry.values()) {
 				try {
-					(cache as any)?.clear?.();
+					cache.clear();
 				} catch (e) {
-					this.log.warn(
-						"Encountered error while clearing a cache; continuing.",
-						e,
-					);
+					this.log?.warn(`Error while clearing cache`, e);
 				}
 			}
-			this.log.info(`Cleared all ${this.caches.size} caches.`);
-			return;
+		} else {
+			const regex = new RegExp(
+				"^" +
+					pattern
+						.replace(/[.+^${}()|[\]\\]/g, "\\$&")
+						.replace(/\*/g, ".*")
+						.replace(/\?/g, ".") +
+					"$",
+			);
+			for (const [name, cache] of this.registry) {
+				if (regex.test(name)) {
+					try {
+						cache.clear();
+						clearedCount++;
+					} catch (e) {
+						this.log?.warn(`Error while clearing cache "${name}"`, e);
+					}
+				}
+			}
 		}
 
-		const regex = new RegExp(`^${pattern.replace(/\*/g, ".*")}$`);
-		for (const [name, cache] of this.caches.entries()) {
-			if (regex.test(name)) {
-				try {
-					(cache as any)?.clear?.();
-				} catch (e) {
-					this.log.warn(
-						`Encountered error while clearing cache "${name}"; continuing.`,
-						e,
-					);
-				}
-				this.log.info(`Cleared cache "${name}" via pattern "${pattern}"`);
-			}
-		}
+		this.log?.info(
+			pattern
+				? `Cleared ${clearedCount} cache(s) via pattern "${pattern}".`
+				: `Cleared all ${clearedCount} cache(s).`,
+		);
+		return clearedCount;
 	}
 
-	/**
-	 * Clears all registered caches on disposal.
-	 */
+	/** Predicate-based clearing for advanced scenarios. */
+	public clearWhere(
+		pred: (name: string, cache: Cache<unknown, unknown>) => boolean,
+	): number {
+		let clearedCount = 0;
+		for (const [name, cache] of this.registry) {
+			if (pred(name, cache)) {
+				try {
+					cache.clear();
+					clearedCount++;
+				} catch (e) {
+					this.log?.warn(`Error while clearing cache "${name}"`, e);
+				}
+			}
+		}
+		if (clearedCount > 0) {
+			this.log?.info(`Cleared ${clearedCount} cache(s) via predicate.`);
+		}
+		return clearedCount;
+	}
+
+	/** Wrap a loader with in-flight caching using a registered LRU Promise cache. */
+	public createMemoized<K, V>(
+		name: string,
+		loader: AsyncLoader<K, V>,
+		max = 100,
+	): (key: K) => Promise<V> {
+		const promiseCache = this.createLru<K, Promise<V>>(name, max);
+		return memoizeAsync(promiseCache, loader);
+	}
+
+	public keys(): string[] {
+		return Array.from(this.registry.keys());
+	}
+
+	/** Clears all registered caches on disposal. */
 	public dispose(): void {
-		this.clear();
-		this.caches.clear();
-		this.log.info("Disposed and cleared registry.");
-	}
-}
-
-/**
- * A higher-order function that wraps an async loader with in-flight
- * promise caching to prevent redundant concurrent calls for the same key.
- * @param cache A cache to store the promises.
- * @param loader The async function that loads the data.
- */
-export function memoizeAsync<K, V>(
-	cache: Cache<K, Promise<V>>,
-	loader: AsyncLoader<K, V>,
-): (key: K) => Promise<V> {
-	return (key: K) => {
-		let hit = cache.get(key);
-		if (hit) {
-			return hit;
+		const count = this.registry.size;
+		for (const cache of this.registry.values()) {
+			cache.clear();
 		}
-
-		hit = loader(key).catch((err) => {
-			// On failure, remove the failed promise from the cache
-			// so that subsequent calls can retry.
-			cache.delete(key);
-			throw err;
-		});
-
-		cache.set(key, hit);
-		return hit;
-	};
+		this.registry.clear();
+		this.log?.info(`Disposed and cleared all ${count} caches.`);
+	}
 }

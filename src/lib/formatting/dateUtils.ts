@@ -1,99 +1,128 @@
-import type { LoggingService } from "src/services/LoggingService";
+import { SimpleCache } from "src/lib/cache";
+import { err, ok, type Result } from "src/lib/core/result";
+import type { ParseFailure } from "../errors";
+
+const MASK_CACHE = new SimpleCache<string, (d: Date) => string>(64);
+
+function compileMask(mask: string): (date: Date) => string {
+	return (date) =>
+		mask
+			.replace(/YYYY/g, String(date.getFullYear()))
+			.replace(/MM/g, String(date.getMonth() + 1).padStart(2, "0"))
+			.replace(/DD/g, String(date.getDate()).padStart(2, "0"));
+}
 
 /**
  * A centralized, safe date formatter using toLocaleDateString.
  * @param date The Date object to format.
  * @param locale The locale string (e.g., "en-US") or undefined for system locale.
- * @param logger Optional logging service for error reporting.
- * @returns A formatted date string or an empty string on error.
+ * @returns Result with formatted date string, or a DateParseError on error.
  */
-function _toLocaleDate(
+function toLocaleDateSafe(
 	date: Date,
 	locale: string | undefined,
-	logger?: LoggingService,
-): string {
+): Result<string, ParseFailure> {
 	try {
 		if (Number.isNaN(date.getTime())) {
-			throw new Error("Invalid date object");
+			return err({ kind: "DateParseError", input: String(date) });
 		}
-		return date.toLocaleDateString(locale, {
+		const s = date.toLocaleDateString(locale, {
 			year: "numeric",
 			month: "short",
 			day: "numeric",
 		});
-	} catch (e) {
-		logger?.warn("dateUtils:Date", `Could not format date "${date}"`, e);
-		return "";
+		return ok(s);
+	} catch {
+		return err({ kind: "DateParseError", input: String(date) });
 	}
 }
 
-/**
- * Formats a date string to US English format.
- * @param dateStr - ISO date string
- * @returns Formatted date like "Jan 1, 2025"
- */
-export function formatDate(dateStr: string): string {
-	return _toLocaleDate(new Date(dateStr), "en-US");
+function _coerceToDate(input: string | number | Date): Date {
+	if (input instanceof Date) return input;
+	if (typeof input === "number") return new Date(input);
+	return new Date(input);
 }
 
 /**
- * Formats a given date string using a custom format string.
- *
- * Supported tokens:
- * - YYYY: Full year (e.g., 2025)
- * - MM:   Month with leading zero (01-12)
- * - DD:   Day with leading zero (01-31)
- *
- * @param dateStr The ISO-like date string to format.
- * @param format The format string.
- * @returns The formatted date string, or an empty string on error.
+ * Primary date formatter.
+ * - No format: stable en-US short date (existing behavior)
+ * - format = 'locale': user's system locale
+ * - format = 'daily-note': [[YYYY-MM-DD]]
+ * - format = custom mask supporting tokens YYYY, MM, DD
  */
-export function formatDateWithFormat(
-	dateStr: string,
-	format: string,
-	logger?: LoggingService,
+export function formatDate(
+	dateInput: string | number | Date,
+	format?: "locale" | "daily-note" | string,
 ): string {
-	if (!dateStr || !format) return "";
-	try {
-		const date = new Date(dateStr);
-		if (Number.isNaN(date.getTime())) {
-			throw new Error("Invalid date");
+	const date = _coerceToDate(dateInput);
+	if (Number.isNaN(date.getTime())) {
+		return "";
+	}
+
+	if (!format) {
+		// Backward-compatible default: en-US
+		const r = toLocaleDateSafe(date, "en-US");
+		return r.ok ? r.value : "";
+	}
+
+	if (format === "locale") {
+		const r = toLocaleDateSafe(date, undefined);
+		return r.ok ? r.value : "";
+	}
+
+	if (format === "daily-note") {
+		const y = String(date.getFullYear());
+		const m = String(date.getMonth() + 1).padStart(2, "0");
+		const d = String(date.getDate()).padStart(2, "0");
+		return `[[${y}-${m}-${d}]]`;
+	}
+
+	// Custom mask
+	let fn = MASK_CACHE.get(format);
+	if (!fn) {
+		fn = compileMask(format);
+		MASK_CACHE.set(format, fn);
+	}
+	return fn(date);
+}
+
+/**
+ * Pure variant that returns a Result for callers that want structured errors.
+ */
+export function formatDateResult(
+	dateInput: string | number | Date,
+	format?: "locale" | "daily-note" | string,
+): Result<string, ParseFailure> {
+	const date = _coerceToDate(dateInput);
+	if (Number.isNaN(date.getTime())) {
+		return err({ kind: "DateParseError", input: String(dateInput) });
+	}
+
+	if (!format) {
+		return toLocaleDateSafe(date, "en-US");
+	}
+	if (format === "locale") {
+		return toLocaleDateSafe(date, undefined);
+	}
+	if (format === "daily-note") {
+		const y = String(date.getFullYear());
+		const m = String(date.getMonth() + 1).padStart(2, "0");
+		const d = String(date.getDate()).padStart(2, "0");
+		return ok(`[[${y}-${m}-${d}]]`);
+	}
+	if (format !== "locale" && format !== "daily-note") {
+		let fn = MASK_CACHE.get(format);
+		if (!fn) {
+			fn = compileMask(format);
+			MASK_CACHE.set(format, fn);
 		}
-		return format
-			.replace(/YYYY/g, String(date.getFullYear()))
-			.replace(/MM/g, String(date.getMonth() + 1).padStart(2, "0"))
-			.replace(/DD/g, String(date.getDate()).padStart(2, "0"));
-	} catch (e) {
-		logger?.warn(
-			"dateUtils:Date",
-			`Could not parse or format date "${dateStr}" with format "${format}"`,
-			e,
-		);
-		return "";
+		return ok(fn(date));
 	}
-}
-
-/**
- * Formats a date string according to the user's system locale settings.
- * @param dateStr The ISO-like date string.
- * @returns A locale-specific date string.
- */
-export function formatDateLocale(
-	dateStr: string,
-	logger?: LoggingService,
-): string {
-	return _toLocaleDate(new Date(dateStr), undefined, logger);
-}
-
-/**
- * Creates a formatted Obsidian daily note link from a date string.
- * e.g., [[2025-07-22]]
- * @param dateStr The ISO-like date string.
- * @returns A string containing the Markdown link.
- */
-export function formatDateAsDailyNote(dateStr: string): string {
-	const formattedDate = formatDateWithFormat(dateStr, "YYYY-MM-DD");
-	return formattedDate ? `[[${formattedDate}]]` : "";
+	const s = format
+		.replace(/YYYY/g, String(date.getFullYear()))
+		.replace(/MM/g, String(date.getMonth() + 1).padStart(2, "0"))
+		.replace(/DD/g, String(date.getDate()).padStart(2, "0"));
+	return ok(s);
 }
 
 /**
@@ -111,7 +140,8 @@ export function formatDateForDailyNote(date: Date = new Date()): string {
  * @param date Optional Date (defaults to now)
  */
 export function formatDateForTimestamp(date: Date = new Date()): string {
-	// Replace colon and dot which are problematic on some filesystems
+	// Format: YYYY-MM-DDTHH-mm-ss-sssZ (filesystem-safe, derived from ISO 8601)
+	// We replace colon and dot which are problematic on some filesystems.
 	return date.toISOString().replace(/[:.]/g, "-");
 }
 
@@ -121,7 +151,8 @@ export function formatDateForTimestamp(date: Date = new Date()): string {
  * @returns Formatted date like "Jan 1, 2025"
  */
 export function formatUnixTimestamp(timestamp: number): string {
-	return _toLocaleDate(new Date(timestamp * 1000), "en-US");
+	const r = toLocaleDateSafe(new Date(timestamp * 1000), "en-US");
+	return r.ok ? r.value : "";
 }
 
 /**

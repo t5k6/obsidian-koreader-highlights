@@ -2,9 +2,11 @@ import { Notice, normalizePath, type Setting } from "obsidian";
 import { DEFAULT_TEMPLATES_FOLDER } from "src/constants";
 import type KoreaderImporterPlugin from "src/main";
 import type { TemplateManager } from "src/services/parsing/TemplateManager";
+import { notifyOnError } from "src/services/ShellUtils";
 import type { TemplateDefinition } from "src/types";
 import { PromptModal } from "src/ui/PromptModal";
 import { TemplatePreviewModal } from "src/ui/TemplatePreviewModal";
+import { runAsyncAction } from "src/ui/utils/actionUtils";
 import { renderSettingsSection, type SettingSpec } from "../SettingsKit";
 import { SettingsSection } from "../SettingsSection";
 
@@ -101,7 +103,11 @@ export class TemplateSettingsSection extends SettingsSection {
 							.setButtonText("Preview")
 							.setDisabled(!template.selectedTemplate)
 							.onClick(() =>
-								this.showPreviewModal(template.selectedTemplate, true),
+								runAsyncAction(
+									btn,
+									() => this.showPreviewModal(template.selectedTemplate, true),
+									{ inProgress: "Opening preview..." },
+								),
 							),
 					);
 				},
@@ -131,13 +137,19 @@ export class TemplateSettingsSection extends SettingsSection {
 						btn
 							.setButtonText("Preview")
 							.onClick(() =>
-								this.showPreviewModal(template.selectedTemplate, false),
+								runAsyncAction(
+									btn,
+									() => this.showPreviewModal(template.selectedTemplate, false),
+									{ inProgress: "Opening preview..." },
+								),
 							),
 					);
 					s.addButton((btn) =>
-						btn
-							.setButtonText("Create from Built-in...")
-							.onClick(async () => this.handleCreateFromBuiltIn()),
+						btn.setButtonText("Create from Built-in...").onClick(() =>
+							runAsyncAction(btn, () => this.handleCreateFromBuiltIn(), {
+								inProgress: "Creating...",
+							}),
+						),
 					);
 				},
 			},
@@ -156,15 +168,21 @@ export class TemplateSettingsSection extends SettingsSection {
 		let definition: Omit<TemplateDefinition, "id">;
 
 		if (isCustom) {
-			const content = await templateManager.loadTemplateFromVault(templateId);
-			if (!content) {
-				new Notice(`Could not load custom template: ${templateId}`);
-				return;
-			}
+			const res = await notifyOnError(templateManager.loadTemplateResult(), {
+				message: (e) => {
+					const anyErr = e as any;
+					const path =
+						anyErr && typeof anyErr === "object" && "path" in anyErr
+							? String(anyErr.path)
+							: templateId;
+					return `Could not load custom template: ${path}`;
+				},
+			});
+			if (res.ok === false) return;
 			definition = {
 				name: templateId.split("/").pop()?.replace(/\.md$/, "") || templateId,
 				description: "A custom template from your vault.",
-				content: content,
+				content: res.value,
 			};
 		} else {
 			const builtIn = templateManager.builtInTemplates.get(templateId);

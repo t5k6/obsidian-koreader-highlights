@@ -83,10 +83,11 @@ export class AsyncFileSink {
 		this.curFilePath = normalizePath(`${this.dir}/log_${today}.md`);
 
 		// Idempotent file ensure with a simple header (if creating)
-		const exists = await this.fs.vaultExists(this.curFilePath);
+		const existsRes = await this.fs.vaultExists(this.curFilePath);
+		const exists = !isErr(existsRes) && Boolean(existsRes.value);
 		if (!exists) {
 			await ensureDir(this.fs, this.dir);
-			const r = await this.fs.writeVaultFile(
+			const r = await this.fs.writeVaultTextAtomic(
 				this.curFilePath,
 				`# KOReader Importer Log (${today})\n\n`,
 			);

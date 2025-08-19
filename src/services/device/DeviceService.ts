@@ -1,4 +1,3 @@
-import path, { join as joinPath } from "node:path";
 import pLimit from "p-limit";
 import type { Database, SqlValue } from "sql.js";
 import type { CacheManager } from "src/lib/cache/CacheManager";
@@ -259,7 +258,7 @@ export class DeviceService implements SettingsObserver, Disposable {
 		explain.push("Fast-path: scan path is not a recognized KOReader root.");
 
 		// Walk-up
-		let currentPath = path.resolve(scanPath);
+		let currentPath = this.fs.systemResolve(scanPath);
 		for (let i = 0; i < 25; i++) {
 			explain.push(`Walk-up: probing at '${currentPath}'`);
 			const res = await detectLayout(this.fs, currentPath);
@@ -270,7 +269,7 @@ export class DeviceService implements SettingsObserver, Disposable {
 				);
 				return { scanPath, ...res, discoveredBy: res.layout, explain };
 			}
-			const parent = path.dirname(currentPath);
+			const parent = this.fs.systemDirname(currentPath);
 			if (parent === currentPath) break;
 			currentPath = parent;
 		}
@@ -312,7 +311,7 @@ export class DeviceService implements SettingsObserver, Disposable {
 		const name = await this.getMetadataFileName(sdrDir, mountPoint);
 		if (!name) return null;
 
-		const fullPath = joinPath(sdrDir, name);
+		const fullPath = this.fs.joinSystemPath(sdrDir, name);
 		this.log.info("Reading metadata:", fullPath);
 		const res = await this.fs.readNodeFile(fullPath, false);
 		if (isErr(res)) {
@@ -358,7 +357,7 @@ export class DeviceService implements SettingsObserver, Disposable {
 			if (!entry.isDirectory()) continue;
 			if (excluded.has(entry.name.toLowerCase())) continue;
 
-			const fullPath = joinPath(dir, entry.name);
+			const fullPath = this.fs.joinSystemPath(dir, entry.name);
 
 			if (entry.name.endsWith(SDR_SUFFIX)) {
 				const metadataFileName = await this.getMetadataFileName(
@@ -366,7 +365,7 @@ export class DeviceService implements SettingsObserver, Disposable {
 					mountPoint,
 				);
 				if (metadataFileName) {
-					out.push(joinPath(fullPath, metadataFileName));
+					out.push(this.fs.joinSystemPath(fullPath, metadataFileName));
 				}
 			} else if (!entry.name.startsWith(".") && entry.name !== "$RECYCLE.BIN") {
 				subdirTasks.push(

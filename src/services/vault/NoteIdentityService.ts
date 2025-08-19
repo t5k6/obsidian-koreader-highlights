@@ -1,9 +1,13 @@
 import type { App, FrontMatterCache, TFile, TFolder } from "obsidian";
-import { KeyedQueue } from "src/lib/concurrency/concurrency";
-import { isErr } from "src/lib/core/result";
+import { err, isErr, ok, type Result } from "src/lib/core/result";
+import type { AppFailure } from "src/lib/errors/resultTypes";
 import type { FileSystemService } from "src/services/FileSystemService";
 import type { LoggingService } from "src/services/LoggingService";
-import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
+import type {
+    FrontmatterService,
+    NoteDoc,
+    NoteUpdater,
+} from "src/services/parsing/FrontmatterService";
 import type { SnapshotManager } from "./SnapshotManager";
 
 export type UidCollisionSummary = {
@@ -16,239 +20,237 @@ export type UidCollisionSummary = {
 };
 
 export class NoteIdentityService {
-	public static readonly UID_KEY = "kohl-uid" as const;
+    public static readonly UID_KEY = "kohl-uid" as const;
+    public static readonly PREV_UIDS_KEY = "kohl-prev-uids" as const;
 
-	private readonly log;
-	// Optional snapshot manager reference, set by SnapshotManager to avoid DI cycles
-	private snapshot?: SnapshotManager;
-	// Serialize operations per file to prevent overlapping UID reassignments
-	private readonly fileQueue = new KeyedQueue();
+    private readonly log;
+    // Optional snapshot manager reference, set by SnapshotManager to avoid DI cycles
+    private snapshot?: SnapshotManager;
 
-	constructor(
-		private readonly app: App,
-		private readonly fmService: FrontmatterService,
-		private readonly loggingService: LoggingService,
-		private readonly fs: FileSystemService,
-	) {
-		this.log = this.loggingService.scoped("NoteIdentityService");
-	}
+    constructor(
+        private readonly app: App,
+        private readonly fmService: FrontmatterService,
+        private readonly loggingService: LoggingService,
+        private readonly fs: FileSystemService,
+    ) {
+        this.log = this.loggingService.scoped("NoteIdentityService");
+    }
 
-	/** Wire-in SnapshotManager after construction to avoid DI cycles. */
-	public setSnapshotManager(sm: SnapshotManager) {
-		this.snapshot = sm;
-	}
+    /** Wire-in SnapshotManager after construction to avoid DI cycles. */
+    public setSnapshotManager(sm: SnapshotManager) {
+        this.snapshot = sm;
+    }
 
-	/**
-	 * Returns the UID from Obsidian's in-memory metadata cache, if present.
-	 * Never performs I/O. Returns undefined if not present in cache.
-	 */
-	public tryGetId(file: TFile): string | undefined {
-		const fm: FrontMatterCache | undefined =
-			this.app.metadataCache.getFileCache(file)?.frontmatter;
-		const raw = fm?.[NoteIdentityService.UID_KEY];
-		return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
-	}
+    /**
+     * Returns the UID from Obsidian's in-memory metadata cache, if present.
+     * Never performs I/O. Returns undefined if not present in cache.
+     */
+    public tryGetId(file: TFile): string | undefined {
+        const fm: FrontMatterCache | undefined =
+            this.app.metadataCache.getFileCache(file)?.frontmatter;
+        const raw = fm?.[NoteIdentityService.UID_KEY];
+        return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
+    }
 
-	/**
-	 * Ensures that the given file has a UID. If missing, writes one to frontmatter.
-	 * Returns the existing or newly created UID.
-	 */
-	public async ensureId(file: TFile): Promise<string> {
-		const existingUid = this.tryGetId(file);
-		if (this.isValidUid(existingUid)) {
-			return existingUid!;
-		}
-		// UID is missing or invalid, assign a new one.
-		return this.assignNewId(file);
-	}
+    /**
+     * Ensures that the given file has a UID. If missing, writes one to frontmatter.
+     * Returns the existing or newly created UID. Throws on failure for compatibility.
+     */
+    public async ensureId(file: TFile): Promise<string> {
+        const existingUid = this.tryGetId(file);
+        if (this.isValidUid(existingUid)) {
+            return existingUid!;
+        }
+        // UID is missing or invalid, assign a new one via Result and unwrap.
+        const result = await this.assignNewId(file);
+        if (isErr(result)) {
+            throw new Error(`Failed to ensure ID for ${file.path}`, {
+                cause: result.error,
+            });
+        }
+        return result.value;
+    }
 
-	/**
-	 * Force-assigns a brand new UID, replacing any existing value.
-	 * Two-phase flow: prepare (snapshot) -> commit (frontmatter) -> publish (event).
-	 * Serialized per-file to avoid overlapping operations.
-	 */
-	public async assignNewId(file: TFile): Promise<string> {
-		return this.fileQueue.run(`nid:${file.path}`, async () => {
-			const oldUid = this.tryGetId(file) ?? null;
-			const newUid = this.generateUid();
+    /**
+     * Force-assigns a brand new UID, replacing any existing value.
+     * Delegates the RMW lifecycle to FrontmatterService.editFile with transactional hooks.
+     * Returns a Result so callers can handle failures gracefully.
+     */
+    public async assignNewId(
+        file: TFile,
+    ): Promise<Result<string, AppFailure>> {
+        const newUid = this.generateUid();
+        let oldUid: string | undefined;
 
-			// Build patched content once (in-memory): new UID + prev list cleanup
-			const readRes = await this.fs.readVaultTextWithRetry(file);
-			if (isErr(readRes)) {
-				this.log.error("Failed to read file while assigning UID", {
-					file: file.path,
-					error: (readRes as any).error ?? readRes,
-				});
-				throw (
-					(readRes as any).error ?? new Error("readVaultTextWithRetry failed")
-				);
-			}
-			const currentContent = readRes.value;
-			const { frontmatter, body } = this.fmService.parseContent(currentContent);
-			(frontmatter as any)[NoteIdentityService.UID_KEY] = newUid;
-			try {
-				const prevRaw = (frontmatter as any)["kohl-prev-uids"];
-				const prevArr: string[] = Array.isArray(prevRaw)
-					? prevRaw.filter((x: any) => typeof x === "string" && x.trim())
-					: typeof prevRaw === "string" && prevRaw.trim()
-						? [prevRaw.trim()]
-						: [];
-				const merged = [...prevArr, ...(oldUid ? [oldUid] : [])];
-				(frontmatter as any)["kohl-prev-uids"] = Array.from(
-					new Set(merged),
-				).slice(-5);
-			} catch {
-				/* best-effort */
-			}
-			for (const key in frontmatter as any) {
-				if (
-					Object.hasOwn(frontmatter as any, key) &&
-					key.includes("kohl-uid") &&
-					key !== NoteIdentityService.UID_KEY
-				) {
-					delete (frontmatter as any)[key];
-				}
-			}
-			const patchedContent = this.fmService.reconstructFileContent(
-				frontmatter as any,
-				body,
-			);
+        const updater: NoteUpdater = (doc: NoteDoc) => {
+            const fm = { ...doc.frontmatter } as Record<string, unknown>;
+            // Read old UID from cache to avoid I/O; if missing, we still proceed.
+            oldUid = this.tryGetId(file);
 
-			// 1) Prepare: snapshot-first using the patched content; abort if it fails
-			let snapshotPrepared = false;
-			if (this.snapshot) {
-				const res = await this.snapshot.createSnapshotFromContent(
-					file,
-					patchedContent,
-					newUid,
-				);
-				if (isErr(res)) {
-					this.log.warn("Snapshot write before UID change failed", {
-						file: file.path,
-						error: (res as any).error ?? res,
-					});
-					throw new Error(
-						"Failed to prepare snapshot for new UID; aborting UID change",
-					);
-				}
-				snapshotPrepared = true;
-			} else {
-				this.log.warn(
-					"SnapshotManager is not set; proceeding without snapshot-first.",
-				);
-			}
+            // 1) Set new UID
+            (fm as any)[NoteIdentityService.UID_KEY] = newUid;
 
-			// 2) Commit: write the same patched content; rollback snapshot on failure
-			try {
-				await this.fmService.overwriteFile(file, patchedContent);
-			} catch (e) {
-				if (snapshotPrepared) {
-					try {
-						await this.snapshot?.removeSnapshotById?.(newUid);
-					} catch {
-						/* best-effort */
-					}
-				}
-				this.log.error("Failed to overwrite file while assigning UID", {
-					file: file.path,
-					error: e,
-				});
-				throw new Error(`Failed to assign new UID to ${file.path}`);
-			}
+            // 2) Maintain history of previous UIDs
+            const prevRaw = (fm as any)[NoteIdentityService.PREV_UIDS_KEY];
+            const prevArr = Array.isArray(prevRaw)
+                ? prevRaw.filter((x: unknown): x is string =>
+                      typeof x === "string" && !!x.trim(),
+                  )
+                : [];
+            const merged = [
+                ...new Set([
+                    ...prevArr,
+                    ...(oldUid ? [oldUid] : []),
+                ]),
+            ].slice(-5);
+            if (merged.length > 0) {
+                (fm as any)[NoteIdentityService.PREV_UIDS_KEY] = merged;
+            } else {
+                // Remove the key if no history to keep the YAML clean
+                delete (fm as any)[NoteIdentityService.PREV_UIDS_KEY];
+            }
 
-			// 3) Cleanup: best-effort removal of the old snapshot.
-			// The new snapshot is guaranteed to exist at this point (snapshot-first).
-			if (oldUid && this.snapshot) {
-				const cleanupRes = await this.snapshot.removeSnapshotById(oldUid);
-				if (isErr(cleanupRes)) {
-					this.log.warn(`Failed to clean up old snapshot for ${oldUid}`, {
-						file: file.path,
-						error: cleanupRes.error,
-					});
-				}
-			}
-			return newUid;
-		});
-	}
+            // 3) Clean up any other stray kohl-uid keys
+            for (const key in fm) {
+                if (
+                    Object.prototype.hasOwnProperty.call(fm, key) &&
+                    key.includes("kohl-uid") &&
+                    key !== NoteIdentityService.UID_KEY
+                ) {
+                    delete (fm as any)[key];
+                }
+            }
+            return { frontmatter: fm, body: doc.body };
+        };
 
-	public generateUid(): string {
-		try {
-			const g: any = globalThis as any;
-			if (g?.crypto?.randomUUID) return g.crypto.randomUUID();
-			this.log.error("crypto.randomUUID is not available in this environment");
-			throw new Error("crypto.randomUUID not available");
-		} catch (e) {
-			this.log.error("Failed to generate UID", e);
-			throw e;
-		}
-	}
+        const editResult = await this.fmService.editFile(file, updater, {
+            detectConcurrentModification: true,
+            beforeWrite: async (ctx) => {
+                if (!this.snapshot) return ok(void 0);
+                const snapResult = await this.snapshot.createSnapshotFromContent(
+                    ctx.file,
+                    ctx.newContent,
+                    newUid,
+                );
+                if (isErr(snapResult)) {
+                    // Map to AppFailure for FrontmatterService contract
+                    return err({
+                        kind: "WriteFailed",
+                        path: ctx.file.path,
+                        cause: snapResult.error,
+                    });
+                }
+                return ok(void 0);
+            },
+            afterWrite: async () => {
+                if (oldUid && this.snapshot) {
+                    // Best-effort cleanup of old snapshot
+                    try {
+                        await this.snapshot.removeSnapshotById(oldUid);
+                    } catch (e) {
+                        this.log.warn(
+                            `Failed best-effort cleanup of old snapshot ${oldUid}`,
+                            e,
+                        );
+                    }
+                }
+            },
+        });
 
-	/**
-	 * Scan a vault folder for duplicate kohl-uid values and reassign new UIDs
-	 * to all but the oldest file for each collision set.
-	 */
-	public async resolveInFolder(
-		folder: string | TFolder,
-		opts?: { recursive?: boolean },
-	): Promise<UidCollisionSummary> {
-		const recursive = opts?.recursive ?? true;
-		const summary: UidCollisionSummary = {
-			scanned: 0,
-			withUid: 0,
-			uniqueUids: 0,
-			collisions: 0,
-			filesReassigned: 0,
-			details: [],
-		};
+        if (isErr(editResult)) {
+            // Rollback: remove the new snapshot if it was created but write failed
+            if (this.snapshot) {
+                try {
+                    await this.snapshot.removeSnapshotById(newUid);
+                } catch {
+                    // best-effort
+                }
+            }
+            this.log.error(`Failed to assign new UID to ${file.path}`, editResult.error);
+            return err(editResult.error);
+        }
 
-		const files = await this.fs.listMarkdownFiles(folder, { recursive });
-		summary.scanned = files.length;
-		if (!files.length) return summary;
+        return ok(newUid);
+    }
 
-		// Build UID map using metadata cache (fast, no file I/O)
-		const byUid = new Map<string, TFile[]>();
-		for (const f of files) {
-			const uid = this.tryGetId(f);
-			if (!uid) continue;
-			summary.withUid++;
-			const arr = byUid.get(uid) ?? [];
-			arr.push(f);
-			byUid.set(uid, arr);
-		}
+    public generateUid(): string {
+        try {
+            const g: any = globalThis as any;
+            if (g?.crypto?.randomUUID) return g.crypto.randomUUID();
+            this.log.error("crypto.randomUUID is not available in this environment");
+            throw new Error("crypto.randomUUID not available");
+        } catch (e) {
+            this.log.error("Failed to generate UID", e);
+            throw e;
+        }
+    }
 
-		summary.uniqueUids = byUid.size;
+    /**
+     * Scan a vault folder for duplicate kohl-uid values and reassign new UIDs
+     * to all but the oldest file for each collision set.
+     */
+    public async resolveInFolder(
+        folder: string | TFolder,
+        opts?: { recursive?: boolean },
+    ): Promise<UidCollisionSummary> {
+        const recursive = opts?.recursive ?? true;
+        const summary: UidCollisionSummary = {
+            scanned: 0,
+            withUid: 0,
+            uniqueUids: 0,
+            collisions: 0,
+            filesReassigned: 0,
+            details: [],
+        };
 
-		for (const [uid, arr] of byUid.entries()) {
-			if (arr.length <= 1) continue;
+        const files = await this.fs.listMarkdownFiles(folder, { recursive });
+        summary.scanned = files.length;
+        if (!files.length) return summary;
 
-			// Keep oldest by ctime, reassign others
-			arr.sort((a, b) => a.stat.ctime - b.stat.ctime);
-			const keep = arr[0];
-			const toReassign = arr.slice(1);
-			summary.collisions++;
+        // Build UID map using metadata cache (fast, no file I/O)
+        const byUid = new Map<string, TFile[]>();
+        for (const f of files) {
+            const uid = this.tryGetId(f);
+            if (!uid) continue;
+            summary.withUid++;
+            const arr = byUid.get(uid) ?? [];
+            arr.push(f);
+            byUid.set(uid, arr);
+        }
 
-			const reassignedPaths: string[] = [];
-			await Promise.all(
-				toReassign.map(async (f) => {
-					try {
-						await this.assignNewId(f);
-						summary.filesReassigned++;
-						reassignedPaths.push(f.path);
-					} catch (e) {
-						this.log.error(`Failed to reassign UID for ${f.path}`, e);
-					}
-				}),
-			);
+        summary.uniqueUids = byUid.size;
 
-			summary.details.push({
-				uid,
-				kept: keep.path,
-				reassigned: reassignedPaths,
-			});
-		}
+        for (const [uid, arr] of byUid.entries()) {
+            if (arr.length <= 1) continue;
 
-		return summary;
-	}
+            // Keep oldest by ctime, reassign others
+            arr.sort((a, b) => a.stat.ctime - b.stat.ctime);
+            const keep = arr[0];
+            const toReassign = arr.slice(1);
+            summary.collisions++;
+
+            const reassignedPaths: string[] = [];
+            await Promise.all(
+                toReassign.map(async (f) => {
+                    const r = await this.assignNewId(f);
+                    if (isErr(r)) {
+                        this.log.error(`Failed to reassign UID for ${f.path}`, r.error);
+                        return;
+                    }
+                    summary.filesReassigned++;
+                    reassignedPaths.push(f.path);
+                }),
+            );
+
+            summary.details.push({
+                uid,
+                kept: keep.path,
+                reassigned: reassignedPaths,
+            });
+        }
+
+        return summary;
+    }
 
 	private isValidUid(s?: string): s is string {
 		return (

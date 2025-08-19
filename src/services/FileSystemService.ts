@@ -237,6 +237,16 @@ export class FileSystemService {
 		return path.basename(p);
 	}
 
+	/** Get relative path from one OS-native system path to another. */
+	public systemRelative(from: string, to: string): string {
+		return path.relative(from, to);
+	}
+
+	/** Resolve OS-native system path segments to an absolute path. */
+	public systemResolve(...segments: string[]): SystemPath {
+		return brandSystem(path.resolve(...segments));
+	}
+
 	/** Dev-only assertion for vault paths (no-op in production builds). */
 	public assertVaultPath(p: string, ctx?: string): void {
 		if (process.env.NODE_ENV === "development") {

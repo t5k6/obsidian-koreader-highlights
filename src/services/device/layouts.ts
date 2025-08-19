@@ -1,4 +1,3 @@
-import path from "node:path";
 import type { FileSystemService } from "src/services/FileSystemService";
 import type { KOReaderLayout, ProbeResult } from "./types";
 
@@ -31,11 +30,11 @@ export async function detectLayout(
 	fs: FileSystemService,
 	candidatePath: string,
 ): Promise<ProbeResult | null> {
-	const root = path.resolve(candidatePath);
+	const root = fs.systemResolve(candidatePath);
 
 	for (const spec of LAYOUT_SPECS) {
 		const markerChecks = spec.rootMarkers.map((marker) =>
-			fs.nodeFileExists(path.join(root, marker)),
+			fs.nodeFileExists(fs.joinSystemPath(root, marker)),
 		);
 		const markerExistsList = await Promise.all(markerChecks);
 		const markerFoundIdx = markerExistsList.findIndex(Boolean);
@@ -45,13 +44,13 @@ export async function detectLayout(
 		}
 
 		const statsChecks = spec.statsRelPaths.map((relPath) =>
-			fs.nodeFileExists(path.join(root, relPath)),
+			fs.nodeFileExists(fs.joinSystemPath(root, relPath)),
 		);
 		const statsExistsList = await Promise.all(statsChecks);
 		const statsFoundIdx = statsExistsList.findIndex(Boolean);
 		const statsDbPath =
 			statsFoundIdx >= 0
-				? path.join(root, spec.statsRelPaths[statsFoundIdx])
+				? fs.joinSystemPath(root, spec.statsRelPaths[statsFoundIdx])
 				: null;
 
 		const explain = [

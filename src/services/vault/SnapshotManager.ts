@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import path from "node:path";
 import type { App, TFile } from "obsidian";
 import { KeyedQueue } from "src/lib/concurrency/concurrency";
 import { err, isErr, ok, type Result } from "src/lib/core/result";
@@ -163,7 +162,7 @@ export class SnapshotManager {
 
 	private getSnapshotPathForUid(uid: string): string {
 		const snapshotFileName = this.generateSnapshotFileNameForUid(uid);
-		return path.join(this.snapshotDir, snapshotFileName);
+		return this.fs.joinVaultPath(this.snapshotDir, snapshotFileName);
 	}
 
 	private snapshotPathKeyFor(uid: string): string {
@@ -181,7 +180,7 @@ export class SnapshotManager {
 			.digest("hex")
 			.slice(0, 8);
 		const backupFileName = `${safeBaseName}-${pathHash}-${timestamp}.md`;
-		return path.join(this.backupDir, backupFileName);
+		return this.fs.joinVaultPath(this.backupDir, backupFileName);
 	}
 
 	private async createVersion(
@@ -453,7 +452,10 @@ export class SnapshotManager {
 	> {
 		const newPath = this.getSnapshotPathForUid(uid);
 		const legacyHash = createHash("sha1").update(file.path).digest("hex");
-		const legacyPath = path.join(this.snapshotDir, `${legacyHash}.md`);
+		const legacyPath = this.fs.joinVaultPath(
+			this.snapshotDir,
+			`${legacyHash}.md`,
+		);
 
 		try {
 			const legacyExists = await this.fs.vaultExists(legacyPath);

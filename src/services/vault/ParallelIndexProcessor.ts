@@ -1,8 +1,11 @@
 import type { TFile } from "obsidian";
-import pLimit from "p-limit";
-import { Mutex } from "src/lib/concurrency/concurrency";
-import { err, ok } from "src/lib/core/result";
-import type { AppFailure, AppResult } from "src/lib/errors";
+import {
+	getOptimalConcurrency,
+	isAbortError,
+	runPool,
+} from "src/lib/concurrency";
+import { err, isErr, ok } from "src/lib/core/result";
+import type { AppFailure, AppResult } from "src/lib/errors/types";
 import type { LoggingService } from "src/services/LoggingService";
 import type { BookMetadata, FileMetadataExtractor } from "src/types";
 
@@ -38,76 +41,59 @@ export class ParallelIndexProcessor {
 			batchSize?: number;
 		},
 	) {
-		this.WORKER_COUNT = Math.max(1, opts?.workers ?? 6);
+		this.WORKER_COUNT = Math.max(1, opts?.workers ?? getOptimalConcurrency());
 		this.BATCH_SIZE = Math.max(1, opts?.batchSize ?? 64);
 		this.log = logging;
 		this.writer = writer;
 	}
 
-	/**
-	 * Process a list of files with concurrency and batch writes.
-	 * onProgress is invoked as (current, total) after each file completes extraction.
-	 * Returns Result to indicate success or failure instead of throwing exceptions.
-	 */
-	async processFiles(
-		files: TFile[],
-		onProgress?: (current: number, total: number) => void,
+	public async processFiles(
+		filesStream: AsyncIterable<TFile> | Iterable<TFile>,
+		onProgress: (current: number) => void,
 		signal?: AbortSignal,
 	): Promise<AppResult<ProcessResult>> {
+		// Move declarations outside the try block to widen their scope.
+		let processedCount = 0;
+		const errors: { file: string; error: unknown }[] = [];
+
 		try {
-			if (signal?.aborted) {
-				return ok({ processed: 0, failed: 0, errors: [] });
-			}
-			const limiter = pLimit(this.WORKER_COUNT);
-			const total = files.length;
-			let processedCount = 0;
-			const errors: { file: string; error: unknown }[] = [];
+			const batch: BookMetadata[] = [];
 
-			const buffer: BookMetadata[] = [];
-			const flushLock = new Mutex();
-			let allTasksDone = false;
-
-			const pushAndMaybeFlush = async (item?: BookMetadata) => {
-				if (item) buffer.push(item);
-				if (
-					buffer.length >= this.BATCH_SIZE ||
-					(allTasksDone && buffer.length > 0)
-				) {
-					await flushLock.lock(async () => {
-						if (buffer.length === 0) return;
-						const batch = buffer.splice(0, buffer.length);
-						const flushResult = await this.flushBatch(batch);
-						if (flushResult.failed) {
-							this.log.warn(
-								`Failed to flush batch of size ${batch.length}`,
-								flushResult.error,
-							);
-						}
-					});
-				}
-			};
-
-			const tasks = files.map((file) =>
-				limiter(async () => {
-					if (signal?.aborted) return;
-					try {
-						const meta = await this.extractor.extractMetadata(file);
-						if (meta) await pushAndMaybeFlush(meta);
-					} catch (e) {
-						errors.push({ file: file.path, error: e });
-					} finally {
-						processedCount++;
-						onProgress?.(processedCount, total);
-					}
-				}),
+			const resultsStream = runPool(
+				filesStream,
+				(file: TFile) => this.extractor.extractMetadata(file),
+				{ concurrency: this.WORKER_COUNT, signal },
 			);
 
-			await Promise.all(tasks);
-			allTasksDone = true;
-			await pushAndMaybeFlush();
+			for await (const res of resultsStream) {
+				processedCount++;
+				onProgress(processedCount);
+
+				if (isErr(res)) {
+					const errorItem = res.error.item as TFile | undefined;
+					errors.push({
+						file: errorItem?.path ?? "unknown",
+						error: res.error.error,
+					});
+				} else if (res.value) {
+					batch.push(res.value);
+					if (batch.length >= this.BATCH_SIZE) {
+						await this.writer(batch.splice(0, batch.length));
+					}
+				}
+			}
+
+			if (batch.length > 0) {
+				await this.writer(batch);
+			}
 
 			return ok({ processed: processedCount, failed: errors.length, errors });
 		} catch (e) {
+			if (isAbortError(e)) {
+				this.log.info("Parallel processing was aborted by user.");
+				return ok({ processed: processedCount, failed: errors.length, errors });
+			}
+
 			this.log.error(
 				"ParallelIndexProcessor.processFiles failed unexpectedly",
 				e,
@@ -117,19 +103,6 @@ export class ParallelIndexProcessor {
 				message: "Failed to process files",
 				cause: e,
 			} as AppFailure);
-		}
-	}
-
-	private async flushBatch(batch: BookMetadata[]): Promise<{
-		failed: boolean;
-		error?: unknown;
-	}> {
-		if (batch.length === 0) return { failed: false };
-		try {
-			await this.writer(batch);
-			return { failed: false };
-		} catch (e) {
-			return { failed: true, error: e };
 		}
 	}
 }

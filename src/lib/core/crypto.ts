@@ -18,7 +18,11 @@ export type CanonicalizeOptions = {
  */
 export function canonicalize(
 	input: string,
-	opts: CanonicalizeOptions = {},
+	opts: CanonicalizeOptions = {
+		normalizeEol: true,
+		trim: false,
+		collapseWhitespace: false,
+	},
 ): string {
 	const {
 		normalizeEol = true,
@@ -60,7 +64,7 @@ function _nodeHash(algorithm: string, canonicalizedInput: string): string {
 
 /**
  * Synchronously computes a SHA-1 hash of the input string.
- * Uses Node.js's built-in crypto module. Suitable for server-side/Electron environments.
+ * Uses Node.js's built-in crypto module.
  */
 export function sha1Hex(input: string, opts?: CanonicalizeOptions): string {
 	const s = canonicalize(input, opts);
@@ -117,6 +121,38 @@ export async function sha256HexAsync(
 }
 
 /**
+ * Asynchronously computes a SHA-1 hash of an ArrayBuffer, returning a Result.
+ * Prefers the Web Crypto API (`crypto.subtle`) if available, falling back to a non-cryptographic hash.
+ * This is the preferred method for hashing in potentially browser-like environments.
+ *
+ * @returns A `Result` containing the hex string on success, or an `Error` on failure.
+ */
+export async function sha1HexOfBuffer(
+	buf: ArrayBuffer,
+): Promise<Result<string, Error>> {
+	try {
+		const cryptoObj: Crypto | undefined = (globalThis as any)?.crypto;
+		if (cryptoObj?.subtle?.digest) {
+			const out = await cryptoObj.subtle.digest("SHA-1", buf);
+			const bytes = new Uint8Array(out);
+			const hex = Array.from(bytes)
+				.map((b) => b.toString(16).padStart(2, "0"))
+				.join("");
+			return ok(hex);
+		}
+	} catch (e) {
+		return err(new Error("Hashing failed"));
+	}
+	// Fallback: non-cryptographic quick hash (best effort in environments w/o subtle.crypto)
+	const bytes = new Uint8Array(buf);
+	let h = 0;
+	for (let i = 0; i < bytes.length; i++) {
+		h = ((h << 5) - h + bytes[i]!) | 0;
+	}
+	return ok(h.toString(16));
+}
+
+/**
  * A consolidated object of cryptographic utilities for easy injection or namespacing.
  */
 export const CryptoUtils = {
@@ -124,4 +160,5 @@ export const CryptoUtils = {
 	sha1Hex,
 	sha256Hex,
 	sha256HexAsync,
+	sha1HexOfBuffer,
 };

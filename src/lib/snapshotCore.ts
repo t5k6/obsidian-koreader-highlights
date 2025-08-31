@@ -1,42 +1,23 @@
-import { createHash } from "node:crypto";
-import { sha1Hex } from "src/lib/core/crypto";
+import { sha1Hex, sha256Hex } from "src/lib/core/crypto";
 import { err, ok, type Result } from "src/lib/core/result";
 import { formatDateForTimestamp } from "src/lib/formatting";
+import type { AppFailure, SnapshotError } from "./errors/types";
+import { composeFrontmatter, parseFrontmatter } from "./frontmatter";
 import { toFileSafe } from "./pathing";
+
+const SNAPSHOT_HASH_CANONICALIZE_OPTS = { normalizeEol: true };
 
 // ================================================================
 // TYPES AND INTERFACES
 // ================================================================
 
 export type Uid = string;
-export type SnapshotKind = "snapshot" | "backup";
-
-export interface SnapshotMeta {
-	uid: Uid;
-	kind: SnapshotKind;
-	createdTs: number; // epoch ms
-	hash: string; // computed from content (implementation-specific)
-}
 
 export interface SnapshotPaths {
 	dir: string;
 	fileName: string; // e.g., `${uid}.md`
 	fullPath: string; // `${dir}/${fileName}`
 }
-
-export type SnapshotError =
-	| { kind: "NOT_FOUND"; message: string }
-	| { kind: "READ_FAILED"; message: string; cause?: unknown }
-	| { kind: "WRITE_FAILED"; message: string; cause?: unknown }
-	| { kind: "INTEGRITY_FAILED"; message: string; cause?: unknown }
-	| { kind: "CAPABILITY_UNAVAILABLE"; message: string }
-	| { kind: "TARGET_FILE_MISSING"; message: string }
-	| { kind: "SNAPSHOT_MISSING"; message: string }
-	| { kind: "WRITE_FORBIDDEN"; message: string; cause?: unknown }
-	| { kind: "READ_FORBIDDEN"; message: string; cause?: unknown }
-	| { kind: "UID_MISSING"; message: string }
-	| { kind: "UID_MISMATCH"; message: string }
-	| { kind: "MIGRATION_FAILED"; message: string; cause?: unknown };
 
 // ================================================================
 // ERROR FACTORY FUNCTIONS
@@ -100,29 +81,6 @@ export const snapshotErrors = {
 };
 
 // ================================================================
-// UTILITY FUNCTIONS (PURE, SELF-CONTAINED)
-// ================================================================
-
-/**
- * Pure string canonicalization for consistent hashing.
- * Mirrors existing behavior: canonicalizes line endings prior to hashing.
- */
-function canonicalize(input: string, normalizeEol = true): string {
-	let s = String(input ?? "");
-	if (normalizeEol) s = s.replace(/\r\n/g, "\n");
-	return s;
-}
-
-/**
- * Generate SHA-256 hash of input string.
- * Used for content integrity verification.
- */
-function sha256Hex(input: string, normalizeEol = true): string {
-	const s = canonicalize(input, normalizeEol);
-	return createHash("sha256").update(s, "utf8").digest("hex");
-}
-
-// ================================================================
 // PATH GENERATION LOGIC (PURE FUNCTIONS)
 // ================================================================
 
@@ -174,82 +132,96 @@ export function generateBackupFileName(
  * Mirrors existing behavior: canonicalizes line endings prior to hashing.
  */
 export function computeSnapshotHash(body: string): string {
-	return sha256Hex(body, true);
+	// This line will now be type-safe
+	return sha256Hex(body, SNAPSHOT_HASH_CANONICALIZE_OPTS);
 }
 
 /**
  * Parse snapshot content to extract hash and body.
- * Returns null hash if no header is present.
+ * Uses robust frontmatter parsing that handles all valid YAML variations.
+ * For snapshots, remove the standard frontmatter separator (\n\n) added by composeFrontmatter,
+ * preserving any additional leading whitespace from manually edited snapshots.
  */
 export function parseSnapshotContent(content: string): {
 	hash: string | null;
 	body: string;
 } {
-	if (!content.startsWith("---\n")) {
+	const parseResult = parseFrontmatter(content);
+
+	if (!parseResult.ok) {
+		// If YAML parsing fails, treat as content without frontmatter
 		return { hash: null, body: content };
 	}
 
-	const sep = "---\n\n";
-	const sepIdx = content.indexOf(sep);
-	if (sepIdx === -1) {
-		return { hash: null, body: content };
-	}
-
-	const headerSection = content.substring(0, sepIdx);
-	const body = content.substring(sepIdx + sep.length);
-
-	// Extract sha256 from header lines
-	const lines = headerSection.split("\n");
-	for (const line of lines) {
-		const trimmed = line.trim();
-		if (trimmed.startsWith("sha256:")) {
-			const hash = trimmed.substring(7).trim();
-			return { hash: hash || null, body };
-		}
-	}
-
-	return { hash: null, body };
+	const body = parseResult.value.body;
+	// Remove the canonical frontmatter separator if it exists at the very beginning.
+	const trimmedBody = body.startsWith("\n\n") ? body.slice(2) : body;
+	return {
+		hash: parseResult.value.hash,
+		body: trimmedBody,
+	};
 }
 
 /**
- * Verify snapshot integrity by checking the embedded hash against computed hash.
- * Returns Result with body on success or SnapshotError on integrity failure.
- *
- * NOTE: For backward compatibility with existing tests, we return READ_FAILED
- * when integrity checks fail, rather than INTEGRITY_FAILED.
+ * Pure function to verify snapshot hash.
+ * Only responsible for comparing expected vs computed hashes.
  */
-export function verifySnapshotIntegrity(
-	content: string,
+export function verifySnapshotHash(
+	body: string,
+	expectedHash: string | null,
 ): Result<string, SnapshotError> {
-	const { hash, body } = parseSnapshotContent(content);
-
-	// No hash means no integrity check needed
-	if (!hash) {
-		return ok(body);
-	}
-
+	if (!expectedHash) return ok(body);
 	const computed = computeSnapshotHash(body);
-	if (computed !== hash) {
-		return err(
-			snapshotErrors.readFailed("Snapshot integrity check failed", {
-				expected: hash,
-				actual: computed,
-			}),
-		);
+	if (computed !== expectedHash) {
+		// Return a generic error, caller adds context
+		return err(snapshotErrors.integrityFailed("Snapshot hash mismatch."));
 	}
-
 	return ok(body);
 }
 
 /**
+ * Verify snapshot integrity with enhanced diagnostics.
+ */
+export function verifySnapshotIntegrity(
+	content: string,
+	context?: { path?: string },
+): Result<string, AppFailure> {
+	const parseResult = parseFrontmatter(content);
+	if (!parseResult.ok) {
+		// Return the original parse error, enriched with context.
+		const error = parseResult.error;
+		Object.assign(error, { path: context?.path });
+		return err(error);
+	}
+
+	const body = parseResult.value.body;
+	// Remove the canonical frontmatter separator if it exists at the very beginning.
+	const trimmedBody = body.startsWith("\n\n") ? body.slice(2) : body;
+
+	const verification = verifySnapshotHash(trimmedBody, parseResult.value.hash);
+	if (!verification.ok) {
+		// Augment the error with contextual info in the cause
+		const diagnosticInfo = {
+			bodyLength: trimmedBody.length,
+			expected: parseResult.value.hash,
+			actual: computeSnapshotHash(trimmedBody),
+		};
+		return err(
+			snapshotErrors.integrityFailed("Snapshot hash mismatch.", {
+				path: context?.path,
+				diagnostics: diagnosticInfo,
+			}),
+		);
+	}
+	return ok(verification.value);
+}
+
+/**
  * Compose snapshot content with frontmatter header containing integrity hash.
+ * Uses shared frontmatter composition for consistency.
  */
 export function composeSnapshotContent(hash: string, body: string): string {
-	return `---
-sha256: ${hash}
----
-
-${body}`;
+	return composeFrontmatter({ sha256: hash }, body);
 }
 
 /**
@@ -262,7 +234,6 @@ export function legacySnapshotPathFor(
 	baseDir: string,
 	targetFilePath: string,
 ): string {
-	const legacyHash = sha1Hex(targetFilePath);
-	// Vault paths always use forward slashes
+	const legacyHash = sha1Hex(targetFilePath, { normalizeEol: true });
 	return `${baseDir}/${legacyHash}.md`;
 }

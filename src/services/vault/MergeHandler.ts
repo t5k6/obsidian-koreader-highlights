@@ -1,36 +1,32 @@
-import { MergeResult } from "node-diff3";
-import type { App, TFile } from "obsidian";
-import { Notice } from "obsidian";
+import { type App, Notice, type TFile } from "obsidian";
 import { KeyedQueue, throwIfAborted } from "src/lib/concurrency";
 import { err, isErr, ok, type Result } from "src/lib/core/result";
-import type { AppFailure, MergeFailure } from "src/lib/errors";
-import { formatAppFailure } from "src/lib/errors";
+import type { AppFailure } from "src/lib/errors/types";
 import {
-	formatConflictRegions,
-	mergeAnnotations,
-	performDiff3,
+	buildPromptMessage,
+	createMergeContext,
+	determineMergeStrategy,
 } from "src/lib/merge/mergeCore";
-import { extractHighlightsWithStyle } from "src/lib/parsing/highlightExtractor";
-import { renderAnnotations } from "src/lib/template/templateCore";
+import * as noteCore from "src/lib/noteCore";
 import type KoreaderImporterPlugin from "src/main";
 import type { LoggingService } from "src/services/LoggingService";
 import type {
-	Annotation,
 	DuplicateChoice,
 	DuplicateHandlingSession,
 	DuplicateMatch,
 	IDuplicateHandlingModal,
 	LuaMetadata,
-	ParsedFrontmatter,
 } from "src/types";
-import {
-	FrontmatterService,
-	type NoteUpdater,
-} from "../parsing/FrontmatterService";
 import type { TemplateManager } from "../parsing/TemplateManager";
 import type { NotePersistenceService } from "./NotePersistenceService";
 
 type MergeMode = "replace" | "merge";
+
+// Define a clear result type for the successful result of handleDuplicate.
+type MergeActionResult = {
+	status: "created" | "merged" | "automerged" | "skipped" | "keep-both";
+	file: TFile | null;
+};
 
 // Define a clear result type for a successful merge operation.
 type MergeSuccessResult = {
@@ -52,7 +48,6 @@ export class MergeHandler {
 			message: string,
 			session: DuplicateHandlingSession,
 		) => IDuplicateHandlingModal,
-		private fmService: FrontmatterService,
 		private templateManager: TemplateManager,
 		private persistence: NotePersistenceService,
 		private loggingService: LoggingService,
@@ -66,57 +61,72 @@ export class MergeHandler {
 		session: DuplicateHandlingSession,
 		message?: string,
 		opts?: { signal?: AbortSignal },
-	): Promise<{
-		status: "created" | "merged" | "automerged" | "skipped" | "keep-both";
-		file: TFile | null;
-	}> {
+	): Promise<Result<MergeActionResult, AppFailure>> {
 		throwIfAborted(opts?.signal);
-		this.log.info("Handling duplicate", {
-			path: analysis.file.path,
-			matchType: analysis.matchType,
-			canMergeSafely: analysis.canMergeSafely,
+
+		// Pure strategy determination
+		const context = createMergeContext(analysis, {
+			autoMergeOnAddition: this.plugin.settings.autoMergeOnAddition,
 		});
+		const strategy = determineMergeStrategy(context);
 
-		const autoMergeEnabled = this.plugin.settings.autoMergeOnAddition;
-		const isUpdateOnly =
-			analysis.matchType === "updated" && analysis.modifiedHighlights === 0;
-
-		if (autoMergeEnabled && isUpdateOnly && analysis.canMergeSafely) {
-			this.log.info(`Auto-merging additions into ${analysis.file.path}`);
-			throwIfAborted(opts?.signal);
-			const newBody = await bodyProvider();
-			const res = await this._performMerge(
-				analysis.file,
-				newBody,
-				analysis.luaMetadata,
-				"merge",
-			);
-			if (isErr(res)) {
-				return this._handleMergeFailure(res.error, "Auto-merge", 5000);
-			}
-			return { status: "automerged", file: res.value.file };
+		// Shell handles execution based on pure strategy
+		switch (strategy) {
+			case "auto-merge":
+				return this.executeAutoMerge(analysis, bodyProvider);
+			case "prompt-user":
+				return this.executeWithUserPrompt(
+					analysis,
+					bodyProvider,
+					session,
+					message,
+				);
+			// ... other cases for future extensibility
+			default:
+				return this.executeWithUserPrompt(
+					analysis,
+					bodyProvider,
+					session,
+					message,
+				);
 		}
+	}
 
-		let promptMessage = message ?? "Duplicate detected – choose an action";
-		try {
-			if (analysis.matchType === "exact") {
-				const highlightsFolder = this.plugin.settings.highlightsFolder || "";
-				const folderPrefix = highlightsFolder.endsWith("/")
-					? highlightsFolder
-					: highlightsFolder + "/";
-				const inHighlights = analysis.file.path.startsWith(folderPrefix);
-				if (!inHighlights && highlightsFolder) {
-					promptMessage =
-						`An existing note for this book already exists at "${analysis.file.path}", which is outside your current Highlights folder ("${highlightsFolder}").\n\n` +
-						"Choose how to proceed:\n" +
-						"• Keep Both: create a new note in your Highlights folder and keep the existing note where it is.\n" +
-						"• Replace: overwrite the existing note in its current location with newly imported content.\n" +
-						"• Skip: take no action for this book right now.";
-				}
-			}
-		} catch (e) {
-			this.log?.warn?.("Failed to build contextual duplicate message", e);
+	private async executeAutoMerge(
+		analysis: DuplicateMatch,
+		bodyProvider: () => Promise<string>,
+		opts?: { signal?: AbortSignal },
+	): Promise<Result<MergeActionResult, AppFailure>> {
+		this.log.info(`Auto-merging additions into ${analysis.file.path}`);
+		throwIfAborted(opts?.signal);
+		const newBody = await bodyProvider();
+		const res = await this._performMerge(
+			analysis.file,
+			newBody,
+			analysis.luaMetadata,
+			"merge",
+		);
+		if (isErr(res)) {
+			this.log.error(`Auto-merge failed for ${analysis.file.path}`, res.error);
+			return err(res.error);
 		}
+		return ok({ status: "automerged", file: res.value.file });
+	}
+
+	private async executeWithUserPrompt(
+		analysis: DuplicateMatch,
+		bodyProvider: () => Promise<string>,
+		session: DuplicateHandlingSession,
+		message?: string,
+		opts?: { signal?: AbortSignal },
+	): Promise<Result<MergeActionResult, AppFailure>> {
+		const promptResult = buildPromptMessage(
+			analysis,
+			this.plugin.settings.highlightsFolder,
+		);
+		const promptMessage = promptResult.ok
+			? promptResult.value
+			: message || "Duplicate detected – choose an action";
 
 		const choice = await this.promptUser(analysis, session, promptMessage);
 
@@ -131,9 +141,13 @@ export class MergeHandler {
 					"replace",
 				);
 				if (isErr(result)) {
-					return this._handleMergeFailure(result.error, "Replace", 7000);
+					this.log.error(
+						`Replace failed for ${analysis.file.path}`,
+						result.error,
+					);
+					return err(result.error);
 				}
-				return { status: "merged", file: result.value.file };
+				return ok({ status: "merged", file: result.value.file });
 			}
 			case "merge": {
 				throwIfAborted(opts?.signal);
@@ -145,14 +159,15 @@ export class MergeHandler {
 					"merge",
 				);
 				if (isErr(res)) {
-					return this._handleMergeFailure(res.error, "Merge", 7000);
+					this.log.error(`Merge failed for ${analysis.file.path}`, res.error);
+					return err(res.error);
 				}
-				return { status: "merged", file: res.value.file };
+				return ok({ status: "merged", file: res.value.file });
 			}
 			case "keep-both":
-				return { status: "keep-both", file: null };
+				return ok({ status: "keep-both", file: null });
 			default:
-				return { status: "skipped", file: null };
+				return ok({ status: "skipped", file: null });
 		}
 	}
 
@@ -177,111 +192,23 @@ export class MergeHandler {
 		});
 	}
 
-	private _handleMergeFailure(
-		error: AppFailure,
-		context: "Auto-merge" | "Merge" | "Replace",
-		durationMs: number,
-	): { status: "skipped"; file: null } {
-		const userMessage = `${context} failed: ${formatAppFailure(error)}`;
-		new Notice(userMessage, durationMs);
-		this.log.error(`${context} failed`, error);
-		return { status: "skipped", file: null };
-	}
-
 	// --- Inlined Merge Logic  ---
-
-	private async _buildUpdater(
-		incomingBody: string,
-		luaMetadata: LuaMetadata,
-		baseContent: string | null,
-		mode: MergeMode,
-	): Promise<Result<NoteUpdater, AppFailure>> {
-		if (mode === "replace") {
-			return ok((current) => ({
-				// Return Ok(updater)
-				frontmatter: FrontmatterService.mergeFrontmatterData(
-					(current.frontmatter ?? {}) as ParsedFrontmatter,
-					luaMetadata,
-					this.plugin.settings.frontmatter,
-				),
-				body: incomingBody,
-			}));
-		}
-
-		// 1. Call the new Result-based method
-		const compiledResult =
-			await this.templateManager.getCompiledTemplateResult();
-
-		// 2. Handle the error case. A merge cannot proceed without a valid template.
-		if (isErr(compiledResult)) {
-			this.log.error(
-				"Failed to get compiled template during merge operation",
-				compiledResult.error,
-			);
-			// Propagate the failure with a specific error type
-			return err({
-				kind: "TemplateParseError", // Or another appropriate AppFailure kind
-				message: `Merge failed: Could not load or compile the highlight template. Reason: ${compiledResult.error.kind}`,
-			});
-		}
-
-		// 3. Unwrap the successful result
-		const compiled = compiledResult.value;
-
-		if (!baseContent) {
-			return ok((current) => {
-				// Return Ok(updater)
-				const { annotations: existingAnnotations } = extractHighlightsWithStyle(
-					current.body,
-					this.plugin.settings.commentStyle,
-				);
-				const merged: Annotation[] = mergeAnnotations(
-					existingAnnotations,
-					luaMetadata.annotations,
-				);
-				const newBody = renderAnnotations(
-					merged,
-					compiled, // Use the unwrapped function
-					this.plugin.settings.commentStyle,
-					this.plugin.settings.maxHighlightGap,
-				);
-				const fm = FrontmatterService.mergeFrontmatterData(
-					(current.frontmatter ?? {}) as ParsedFrontmatter,
-					luaMetadata,
-					this.plugin.settings.frontmatter,
-				);
-				return { frontmatter: fm, body: newBody };
-			});
-		}
-
-		const base = this.fmService.parseContent(baseContent);
-		return ok((current) => {
-			// Return Ok(updater)
-			const regions = performDiff3(current.body, base.body, incomingBody);
-			const { mergedBody, hasConflict } = formatConflictRegions(regions);
-			const fm = FrontmatterService.mergeFrontmatterData(
-				(current.frontmatter ?? {}) as ParsedFrontmatter,
-				luaMetadata,
-				this.plugin.settings.frontmatter,
-			);
-			(fm as any)["last-merged"] = new Date().toISOString().slice(0, 10);
-			if (hasConflict) (fm as any).conflicts = "unresolved";
-			return { frontmatter: fm, body: mergedBody };
-		});
-	}
-
-	// The calling method _performMerge must also be updated to handle the Result from _buildUpdater
-
 	private async _performMerge(
 		file: TFile,
 		incomingBody: string,
 		luaMetadata: LuaMetadata,
 		mode: MergeMode,
+		opts?: { signal?: AbortSignal },
 	): Promise<Result<MergeSuccessResult, AppFailure>> {
 		return this.mergeQueue.run(`merge:${file.path}`, async () => {
+			// 1. [SHELL] Gather all necessary state from I/O
 			const idResult = await this.persistence.ensureId(file);
 			if (isErr(idResult)) {
-				return idResult;
+				return err({
+					kind: "WriteFailed",
+					path: file.path,
+					cause: idResult.error,
+				});
 			}
 			const uid = idResult.value;
 
@@ -290,53 +217,61 @@ export class MergeHandler {
 				? null
 				: baseContentResult.value;
 
-			await this.persistence.createBackup(file);
+			const compiledResult =
+				await this.templateManager.getCompiledTemplateResult();
+			if (isErr(compiledResult)) return err(compiledResult.error);
 
-			const updaterResult = await this._buildUpdater(
-				incomingBody,
-				luaMetadata,
-				baseContent,
-				mode,
-			);
-			if (isErr(updaterResult)) {
-				return err(updaterResult.error); // Propagate the template failure
-			}
-			const updater = updaterResult.value;
-
-			const res = await this.fmService.editFile(file, updater, {
-				detectConcurrentModification: true,
-				skipIfNoChange: true,
-				afterWrite: async (ctx) => {
-					const writeResult = await this.persistence.createSnapshotFromContent(
-						uid,
-						ctx.newContent,
-					);
-					if (isErr(writeResult)) {
-						this.log.warn(
-							"Failed to update snapshot after merge",
-							writeResult.error,
-						);
-					}
-				},
-			});
-
-			if (isErr(res)) {
-				const cause = (res.error as any)?.cause;
-				const isConcurrent =
-					cause === "ConcurrentModification" ||
-					(res.error as any)?.message?.includes?.("Concurrent modification");
-
-				if (isConcurrent) {
+			// 2. [CORE] Call the pure preparer function with all gathered state
+			let prepResult: noteCore.MergePreparation;
+			if (mode === "replace") {
+				prepResult = noteCore.prepareForReplace(
+					luaMetadata,
+					incomingBody,
+					this.plugin.settings.frontmatter,
+				);
+			} else {
+				const mergePrepResult = noteCore.prepareForMerge({
+					baseSnapshotBody: baseContent,
+					incomingBody,
+					lua: luaMetadata,
+					settings: this.plugin.settings,
+					compiledTemplate: compiledResult.value,
+				});
+				if (isErr(mergePrepResult)) {
 					return err({
-						kind: "WriteFailed",
+						kind: "ReadFailed",
 						path: file.path,
-						cause: "ConcurrentModification",
+						cause: mergePrepResult.error,
 					});
 				}
-				return res;
+				prepResult = mergePrepResult.value;
 			}
 
-			return ok({ file: res.value.file });
+			// Handle diagnostics if snapshot was missing
+			if (!prepResult.snapshotUsed && prepResult.kind === "conflicted") {
+				this.log.info(
+					`Merge for ${file.path} used fallback strategy: ${prepResult.diagnostics.reason}`,
+				);
+				// Show user notice if there's a user message
+				if (prepResult.diagnostics.userMessage) {
+					new Notice(prepResult.diagnostics.userMessage);
+				}
+			}
+
+			// 3. [SHELL] Commit the result using the atomic persistence service
+			const atomicRes = await this.persistence.updateNoteAtomically({
+				file,
+				updater: prepResult.updater,
+				uid,
+				signal: opts?.signal,
+			});
+
+			if (isErr(atomicRes)) return atomicRes;
+
+			// Determine if conflicts were present based on the preparation result
+			const conflictsExist = prepResult.kind === "conflicted";
+
+			return ok({ file: atomicRes.value.file, hasConflicts: conflictsExist });
 		});
 	}
 }

@@ -12,6 +12,7 @@ import { MigrationManager } from "./core/MigrationManager";
 import { PluginDataStore } from "./core/PluginDataStore";
 import { registerServices } from "./core/registerServices";
 import { SETTINGS_TOKEN } from "./core/tokens";
+import { type AppResult, formatError } from "./lib/errors/types";
 import { NotePersistenceService } from "./services/vault/NotePersistenceService";
 import type { KoreaderHighlightImporterSettings } from "./types";
 
@@ -26,6 +27,10 @@ export default class KoreaderImporterPlugin extends Plugin {
 	public templateManager!: TemplateManager;
 	public localIndexService!: IndexCoordinator;
 	private statusBarManager!: StatusBarManager;
+
+	get isServicesInitialized(): boolean {
+		return this.servicesInitialized;
+	}
 
 	async onload() {
 		console.log("KOReaderImporterPlugin: Loading...");
@@ -119,6 +124,7 @@ export default class KoreaderImporterPlugin extends Plugin {
 
 	private async initPersistenceAndMigrations(): Promise<void> {
 		const fs = this.diContainer.resolve<FileSystemService>(FileSystemService);
+		this.loggingService.setFileSystem(fs);
 		this.dataStore = new PluginDataStore(this, fs, this.loggingService);
 
 		this.migrationManager = new MigrationManager(
@@ -199,75 +205,57 @@ export default class KoreaderImporterPlugin extends Plugin {
 		}
 	}
 
+	// --- Private Helper Methods ---
+	private async runAndNotify<T>(
+		p: Promise<AppResult<T>>,
+		options?: {
+			onSuccess?: (v: T) => void;
+		},
+	) {
+		const res = await p;
+		if (isErr(res)) {
+			const message = formatError(res.error);
+			new Notice(message, 10000); // Show for 10 seconds to give user time to read.
+		} else if (options?.onSuccess) {
+			options.onSuccess(res.value);
+		}
+	}
+
 	// --- Public API used by Settings UI ---
 	public async triggerImport(): Promise<void> {
 		const commandManager =
 			this.diContainer.resolve<CommandManager>(CommandManager);
-		const res = await commandManager.executeImport();
-		if (isErr(res)) {
-			new Notice("Import failed. Check console for details.");
-		}
+		await this.runAndNotify(commandManager.executeImport());
 	}
 
 	public async triggerScan(): Promise<void> {
 		const commandManager =
 			this.diContainer.resolve<CommandManager>(CommandManager);
-		const res = await commandManager.executeScan();
-		if (isErr(res)) {
-			new Notice("Scan failed. Check console for details.");
-			return;
-		}
-		const count = res.value.fileCount ?? 0;
-		if (count === 0) {
-			new Notice("Scan complete: No KOReader highlight files found.");
-		} else {
-			new Notice(
-				`Scan complete: Report saved to "KOReader SDR Scan Report.md"`,
-			);
-		}
+		await this.runAndNotify(commandManager.executeScan());
 	}
 
 	public async triggerForceImport(): Promise<void> {
 		const commandManager =
 			this.diContainer.resolve<CommandManager>(CommandManager);
-		const res = await commandManager.executeForceImport();
-		if (isErr(res)) {
-			new Notice("Force import failed. Check console for details.");
-		}
+		await this.runAndNotify(commandManager.executeForceImport());
 	}
 
 	public async triggerClearCaches(): Promise<void> {
 		const commandManager =
 			this.diContainer.resolve<CommandManager>(CommandManager);
-		const res = await commandManager.executeClearCaches();
-		if (isErr(res)) {
-			new Notice("Failed to clear caches. Check console for details.");
-		} else {
-			new Notice("KOReader Importer caches cleared.");
-		}
+		await this.runAndNotify(commandManager.executeClearCaches());
 	}
 
 	public async triggerConvertCommentStyle(): Promise<void> {
 		const commandManager =
 			this.diContainer.resolve<CommandManager>(CommandManager);
-		const res = await commandManager.executeConvertCommentStyle();
-		if (isErr(res)) new Notice("Conversion failed. Check console for details.");
+		await this.runAndNotify(commandManager.executeConvertCommentStyle());
 	}
 
 	public async triggerRecheckCapabilities(): Promise<void> {
 		const commandManager =
 			this.diContainer.resolve<CommandManager>(CommandManager);
-		const res = await commandManager.executeRecheckCapabilities();
-		if (isErr(res)) {
-			new Notice(
-				"Failed to re-check capabilities. See console for details.",
-				7000,
-			);
-			return;
-		}
-		if (res.value?.message) {
-			new Notice(`KOReader Importer: ${res.value.message}`, 5000);
-		}
+		await this.runAndNotify(commandManager.executeRecheckCapabilities());
 	}
 
 	public async triggerFullReset(): Promise<void> {
@@ -290,10 +278,11 @@ export default class KoreaderImporterPlugin extends Plugin {
 
 	async saveSettings(forceUpdate: boolean = false): Promise<void> {
 		const oldSettings = { ...this.settings };
-		const updatedData = await this.dataStore.updateSettings(
-			() => this.settings,
-		);
-		this.settings = updatedData.settings;
+		// The `this.settings` object has already been mutated by the UI.
+		// We are now explicitly saving that state.
+		const updatedData = await this.dataStore.saveSettings(this.settings);
+
+		this.settings = updatedData.settings; // Re-assign the normalized settings
 		this.diContainer.notifySettingsChanged(this.settings, oldSettings);
 
 		if (forceUpdate && this.settingTab) {
@@ -306,23 +295,18 @@ export default class KoreaderImporterPlugin extends Plugin {
 		);
 	}
 
-	/**
-	 * Programmatically reloads the plugin to apply a full reset.
-	 */
 	public async reloadPlugin(): Promise<void> {
-		this.loggingService.info("KoreaderImporterPlugin", "Reloading plugin...");
 		const pluginId = this.manifest.id;
-		// 'plugins' exists at runtime; the App type doesn't declare it, so cast to any
-		const pluginsApi = (this.app as any).plugins;
+		const pluginsApi = (this.app as any).plugins as {
+			disablePlugin: (id: string) => Promise<void>;
+			enablePlugin: (id: string) => Promise<void>;
+		};
+
 		if (pluginsApi?.disablePlugin && pluginsApi?.enablePlugin) {
 			await pluginsApi.disablePlugin(pluginId);
 			await pluginsApi.enablePlugin(pluginId);
 		} else {
-			// Fallback: show notice if API unavailable
-			new Notice(
-				"Unable to reload plugin programmatically on this Obsidian version.",
-				5000,
-			);
+			new Notice("Unable to reload plugin programmatically.", 5000);
 		}
 	}
 }

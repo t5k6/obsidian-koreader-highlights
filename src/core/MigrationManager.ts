@@ -9,7 +9,21 @@ import { withProgress } from "src/ui/utils/progress";
 import type { PluginDataStore } from "./PluginDataStore";
 import { normalizeSettings } from "./settingsSchema";
 
+type TickFn = ((message?: string) => void) & {
+	setStatus: (message: string) => void;
+	setTotal: (n: number) => void;
+};
+
 // --- Migration Manager ---
+
+const runWithProgress = async (
+	ctx: MigrationContext,
+	files: TFile[],
+	action: (tick: TickFn, signal: AbortSignal) => Promise<void>,
+	title: string,
+) => {
+	await withProgress(ctx.app, files.length, action, { title });
+};
 
 type MigrationContext = {
 	app: App;
@@ -64,7 +78,6 @@ export class MigrationManager {
 		for (const [id, fn] of migrationsToRun) {
 			try {
 				this.log.info(`Running migration: ${id}`);
-				// eslint-disable-next-line no-await-in-loop
 				out = await fn({
 					app: this.app,
 					fs: this.fs,
@@ -97,9 +110,9 @@ export class MigrationManager {
 		const files = await this.getHighlightFiles(ctx.settings.highlightsFolder);
 		if (files.length === 0) return ctx.data;
 
-		await withProgress(
-			ctx.app,
-			files.length,
+		await runWithProgress(
+			ctx,
+			files,
 			async (tick, signal) => {
 				tick.setStatus("Upgrading notes with unique IDs...");
 				for (const file of files) {
@@ -114,7 +127,7 @@ export class MigrationManager {
 					tick();
 				}
 			},
-			{ title: "KOReader Importer Upgrade" },
+			"KOReader Importer Upgrade",
 		);
 
 		return ctx.data;
@@ -126,9 +139,9 @@ export class MigrationManager {
 		const files = await this.getHighlightFiles(ctx.settings.highlightsFolder);
 		if (files.length === 0) return ctx.data;
 
-		await withProgress(
-			ctx.app,
-			files.length,
+		await runWithProgress(
+			ctx,
+			files,
 			async (tick, signal) => {
 				tick.setStatus("Migrating highlight snapshots...");
 				for (const file of files) {
@@ -147,7 +160,7 @@ export class MigrationManager {
 					tick();
 				}
 			},
-			{ title: "KOReader Importer Upgrade" },
+			"KOReader Importer Upgrade",
 		);
 
 		return ctx.data;

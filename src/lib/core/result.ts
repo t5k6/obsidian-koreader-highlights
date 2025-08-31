@@ -11,3 +11,17 @@ export const isErr = <T, E>(r: Result<T, E>): r is Err<E> => !r.ok;
 export function assertNever(x: never): never {
 	throw new Error(`Unhandled variant: ${JSON.stringify(x)}`);
 }
+
+/**
+ * Wraps an async operation in a Result, using an error mapper on failure.
+ */
+export async function wrapResult<T, E>(
+	operation: () => Promise<T>,
+	errorMapper: (e: unknown) => E,
+): Promise<Result<T, E>> {
+	try {
+		return ok(await operation());
+	} catch (e) {
+		return err(errorMapper(e));
+	}
+}

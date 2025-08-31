@@ -1,21 +1,29 @@
-import { Notice, normalizePath, type Setting } from "obsidian";
+import { Notice, type Setting, type TFile } from "obsidian";
 import { DEFAULT_TEMPLATES_FOLDER } from "src/constants";
+import { isErr } from "src/lib/core/result";
+import { isTFile } from "src/lib/obsidian/typeguards";
+import { Pathing } from "src/lib/pathing";
 import type KoreaderImporterPlugin from "src/main";
 import type { TemplateManager } from "src/services/parsing/TemplateManager";
-import { notifyOnError } from "src/services/ShellUtils";
-import type { TemplateDefinition } from "src/types";
-import { PromptModal } from "src/ui/PromptModal";
+import type { DebouncedFn, TemplateDefinition } from "src/types";
+import { InteractionModal } from "src/ui/InteractionModal";
 import { TemplatePreviewModal } from "src/ui/TemplatePreviewModal";
 import { runAsyncAction } from "src/ui/utils/actionUtils";
 import { renderSettingsSection, type SettingSpec } from "../SettingsKit";
 import { SettingsSection } from "../SettingsSection";
 
+// Helper type guard for the error object
+function errorHasPath(err: unknown): err is { path: string } {
+	return typeof err === "object" && err !== null && "path" in err;
+}
+
 export class TemplateSettingsSection extends SettingsSection {
 	private readonly templateManager: TemplateManager;
+	private templateFilesCache: { path: string; name: string }[] | null = null;
 
 	constructor(
 		plugin: KoreaderImporterPlugin,
-		debouncedSave: (() => void) & { cancel: () => void },
+		debouncedSave: DebouncedFn,
 		title: string,
 		templateManager: TemplateManager,
 		startOpen = false,
@@ -25,6 +33,21 @@ export class TemplateSettingsSection extends SettingsSection {
 	}
 
 	protected renderContent(containerEl: HTMLElement): void {
+		// Invalidate cache on each render to ensure it's fresh.
+		this.templateFilesCache = null;
+
+		const events = [
+			this.app.vault.on("create", (file) => this.invalidateOnMatch(file.path)),
+			this.app.vault.on("delete", (file) => this.invalidateOnMatch(file.path)),
+			this.app.vault.on("rename", (_, oldPath) =>
+				this.invalidateOnMatch(oldPath),
+			),
+		];
+
+		for (const ref of events) {
+			this.plugin.registerEvent(ref);
+		}
+
 		const { template } = this.plugin.settings;
 
 		const specs: SettingSpec[] = [
@@ -37,17 +60,14 @@ export class TemplateSettingsSection extends SettingsSection {
 				set: async (value: boolean) => {
 					template.useCustomTemplate = value;
 					if (value) {
-						const folder = normalizePath(template.templateDir);
-						const customs = this.app.vault
-							.getFiles()
-							.filter((f) => f.path.startsWith(`${folder}/`));
-						template.selectedTemplate = customs[0]?.path ?? "";
+						this.ensureTemplateCache(); // Populate cache to find first template
+						template.selectedTemplate =
+							this.templateFilesCache?.[0]?.path ?? "";
 					} else {
 						template.selectedTemplate = "default";
 					}
 				},
 			},
-			// Custom path + dropdown when custom is enabled
 			{
 				key: "templateDir",
 				type: "folder",
@@ -64,36 +84,22 @@ export class TemplateSettingsSection extends SettingsSection {
 				key: "selectCustomTemplate",
 				type: "dropdown",
 				name: "Select custom template",
-				desc: (() => {
-					const folder = normalizePath(template.templateDir);
-					const any = this.app.vault
-						.getFiles()
-						.some((f) => f.path.startsWith(`${folder}/`));
-					return any
+				desc: () => {
+					this.ensureTemplateCache();
+					const folder = Pathing.toVaultPath(template.templateDir);
+					return this.templateFilesCache && this.templateFilesCache.length > 0
 						? `Choose a template file from "${folder}".`
 						: `No custom templates found in "${folder}".`;
-				})(),
+				},
 				options: () => {
-					const folder = normalizePath(template.templateDir);
-					const lower = folder.toLowerCase();
-					const files = this.app.vault
-						.getFiles()
-						.filter(
-							(f) =>
-								f.path.toLowerCase().startsWith(`${lower}/`) &&
-								["md", "txt"].includes(f.extension),
-						);
-					const map: Record<string, string> = {};
-					for (const f of files) {
-						const name = f.path.slice(folder.length + 1).replace(/\.md$/, "");
-						map[f.path] = name;
-					}
-					return map;
+					this.ensureTemplateCache();
+					return Object.fromEntries(
+						(this.templateFilesCache ?? []).map((f) => [f.path, f.name]),
+					);
 				},
 				get: () => template.selectedTemplate,
 				set: async (val: string) => {
 					template.selectedTemplate = val;
-					await this.plugin.saveSettings();
 				},
 				if: () => template.useCustomTemplate,
 				afterRender: (s: Setting) => {
@@ -112,7 +118,6 @@ export class TemplateSettingsSection extends SettingsSection {
 					);
 				},
 			},
-			// Built-in dropdown and actions when custom is disabled
 			{
 				key: "selectBuiltInTemplate",
 				type: "dropdown",
@@ -128,7 +133,6 @@ export class TemplateSettingsSection extends SettingsSection {
 				get: () => template.selectedTemplate,
 				set: async (val: string) => {
 					template.selectedTemplate = val;
-					await this.plugin.saveSettings();
 				},
 				if: () => !template.useCustomTemplate,
 				afterRender: (s: Setting) => {
@@ -158,31 +162,63 @@ export class TemplateSettingsSection extends SettingsSection {
 		renderSettingsSection(containerEl, specs, {
 			app: this.app,
 			parent: this,
-			onSave: async () => this.plugin.saveSettings(true), // re-render on folder change/toggle
+			onSave: async () => this.plugin.saveSettings(true),
 		});
+	}
+
+	private invalidateOnMatch(changedPath: string): void {
+		const folder = Pathing.toVaultPath(
+			this.plugin.settings.template.templateDir,
+		);
+		if (changedPath.startsWith(folder)) {
+			this.templateFilesCache = null;
+			// A re-render is needed to update the dropdown
+			this.plugin.settingTab.display();
+		}
+	}
+
+	private ensureTemplateCache(): void {
+		if (this.templateFilesCache !== null) return;
+
+		const folder = Pathing.toVaultPath(
+			this.plugin.settings.template.templateDir,
+		);
+		const lowerFolder = folder.toLowerCase();
+
+		this.templateFilesCache = this.app.vault
+			.getFiles()
+			.filter(
+				(f): f is TFile =>
+					isTFile(f) &&
+					f.path.toLowerCase().startsWith(`${lowerFolder}/`) &&
+					["md", "txt"].includes(f.extension),
+			)
+			.map((f) => ({
+				path: f.path,
+				name: f.path.slice(folder.length + 1).replace(/\.md$/, ""),
+			}));
 	}
 
 	private async showPreviewModal(templateId: string, isCustom: boolean) {
 		const templateManager = this.templateManager;
-
-		let definition: Omit<TemplateDefinition, "id">;
+		// The type signature for definition already allows for the optional path property.
+		let definition: Omit<TemplateDefinition, "id"> & { path?: string };
 
 		if (isCustom) {
-			const res = await notifyOnError(templateManager.loadTemplateResult(), {
-				message: (e) => {
-					const anyErr = e as any;
-					const path =
-						anyErr && typeof anyErr === "object" && "path" in anyErr
-							? String(anyErr.path)
-							: templateId;
-					return `Could not load custom template: ${path}`;
-				},
-			});
-			if (res.ok === false) return;
+			const res = await templateManager.loadTemplateResult();
+			if (isErr(res)) {
+				const path = errorHasPath(res.error)
+					? String(res.error.path)
+					: templateId;
+				new Notice(`Could not load custom template: ${path}`);
+				return;
+			}
+
 			definition = {
 				name: templateId.split("/").pop()?.replace(/\.md$/, "") || templateId,
 				description: "A custom template from your vault.",
 				content: res.value,
+				path: templateId,
 			};
 		} else {
 			const builtIn = templateManager.builtInTemplates.get(templateId);
@@ -190,9 +226,10 @@ export class TemplateSettingsSection extends SettingsSection {
 				new Notice(`Could not find built-in template: ${templateId}`);
 				return;
 			}
-			definition = builtIn;
+			definition = builtIn; // Built-in templates correctly have no path.
 		}
 
+		// This call is now correct because `definition` contains the path.
 		new TemplatePreviewModal(this.app, templateManager, definition).open();
 	}
 
@@ -209,13 +246,16 @@ export class TemplateSettingsSection extends SettingsSection {
 			return;
 		}
 
-		const modal = new PromptModal(
-			this.app,
-			"Create New Template",
-			"Enter a name for the new template file...",
-			`${builtInTemplate.name} Custom`,
-		);
-		const newTemplateName = await modal.openAndGetValue();
+		let newTemplateName: string | null;
+		try {
+			newTemplateName = await InteractionModal.prompt(this.app, {
+				title: "Create New Template",
+				placeholder: "Enter a name for the new template file...",
+				defaultValue: `${builtInTemplate.name} Custom`,
+			});
+		} catch (e) {
+			newTemplateName = null;
+		}
 
 		if (!newTemplateName || !newTemplateName.trim()) {
 			new Notice("Template creation cancelled.");
@@ -227,12 +267,21 @@ export class TemplateSettingsSection extends SettingsSection {
 			? sanitizedName
 			: `${sanitizedName}.md`;
 
-		const templateDir = normalizePath(
+		const templateDir = Pathing.toVaultPath(
 			this.plugin.settings.template.templateDir,
 		);
-		const newTemplatePath = normalizePath(`${templateDir}/${finalFileName}`);
+		const newTemplatePath = Pathing.joinVaultPath(templateDir, finalFileName);
 
-		if (await this.app.vault.adapter.exists(newTemplatePath)) {
+		const existsResult =
+			await this.templateManager.fs.vaultExists(newTemplatePath);
+
+		if (isErr(existsResult)) {
+			new Notice("Error checking if template exists. See console for details.");
+			console.error("Failed to check template existence:", existsResult.error);
+			return;
+		}
+
+		if (existsResult.value) {
 			new Notice(
 				`Error: A template named "${finalFileName}" already exists in ${templateDir}.`,
 			);

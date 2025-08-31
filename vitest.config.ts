@@ -1,35 +1,29 @@
 import path from "node:path";
 import tsconfigPaths from "vite-tsconfig-paths";
-import { defineConfig } from "vitest/config";
+import { defineConfig, mergeConfig } from "vitest/config";
 
-export default defineConfig({
+// A shared configuration object to be applied to all projects.
+const shared = {
 	plugins: [tsconfigPaths()],
-	test: {
-		globals: true,
-		setupFiles: ["./tests/setup/vitest.setup.ts"],
-		environment: "node",
-		environmentMatchGlobs: [
-			["**/ui/**/*.test.ts", "jsdom"],
-			["tests/utils/**/*.test.ts", "jsdom"],
-			["tests/services/parsing/**/*.test.ts", "jsdom"],
-			["**/services/**/*.test.ts", "node"],
-		],
-		exclude: [
-			// Never run tests from dependencies
-			"node_modules/**",
-			// Project-specific dead/placeholder suites
-			"tests/**/SnapshotMigrationService.test.ts",
-			"tests/**/parallelIndexProcessor.test.ts",
-			// Common output folders
-			"dist/**",
-			"build/**",
-			"coverage/**",
-		],
+	resolve: {
 		alias: {
+			src: path.resolve(__dirname, "./src"),
 			obsidian: path.resolve(__dirname, "./tests/setup/obsidian.mock.ts"),
 		},
+	},
+	test: {
+		globals: true,
+	},
+};
+
+export default defineConfig({
+	test: {
+		// These settings are global for all projects.
+		globals: true,
+		setupFiles: ["./tests/setup/vitest.setup.ts"],
 		coverage: {
 			provider: "v8",
+			reporter: ["text", "json", "html"],
 			reportsDirectory: "./coverage",
 			thresholds: { lines: 85, functions: 85, branches: 80, statements: 85 },
 			exclude: [
@@ -45,5 +39,33 @@ export default defineConfig({
 				singleThread: true,
 			},
 		},
+
+		// Define explicit projects for different test environments.
+		// A test file will be run by the FIRST project that includes it.
+		projects: [
+			// Project 1: For all tests that require a DOM environment.
+			mergeConfig(shared, {
+				test: {
+					name: "dom",
+					environment: "jsdom",
+					include: [
+						"**/ui/**/*.test.ts",
+					],
+				},
+			}),
+
+			// Project 2: For all other tests, running in a standard Node.js environment.
+			mergeConfig(shared, {
+				test: {
+					name: "node",
+					environment: "node",
+					// Include all test files...
+					include: ["tests/**/*.test.ts"],
+					exclude: [
+						"**/ui/**/*.test.ts",
+					],
+				},
+			}),
+		],
 	},
 });

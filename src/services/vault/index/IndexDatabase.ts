@@ -1,10 +1,12 @@
-import { type App, TFolder } from "obsidian";
+import type { App } from "obsidian";
 import type { Database } from "sql.js";
+import { isAbortError } from "src/lib/concurrency";
 import { ConcurrentDatabase } from "src/lib/concurrency/ConcurrentDatabase";
 import { isErr } from "src/lib/core/result";
+import { isTFolder } from "src/lib/obsidian/typeguards";
 import type { FileSystemService } from "src/services/FileSystemService";
 import type { LoggingService } from "src/services/LoggingService";
-import type { FrontmatterService } from "src/services/parsing/FrontmatterService";
+import type { NoteEditorService } from "src/services/parsing/NoteEditorService";
 import type { SqlJsManager } from "src/services/SqlJsManager";
 import { ParallelIndexProcessor } from "../ParallelIndexProcessor";
 import { CURRENT_DB_VERSION, DDL, migrateDb } from "./schema";
@@ -23,10 +25,9 @@ export type RebuildStatus = {
 	error?: unknown;
 };
 
-// RebuildOptions now requires a writer, decoupling IndexDatabase from schema specifics.
 type RebuildOptions = {
 	app: App;
-	fm: FrontmatterService;
+	noteEditorService: NoteEditorService;
 	highlightsFolder: string;
 	writer: (batch: import("src/types").BookMetadata[]) => Promise<void>;
 	workers?: number;
@@ -99,10 +100,13 @@ export class IndexDatabase {
 	}
 
 	public async startBackgroundRebuild(opts: RebuildOptions): Promise<void> {
-		if (this.state !== "in_memory") return;
-		if (this.isRebuilding()) return;
+		if (this.state !== "in_memory" || this.isRebuilding()) {
+			return;
+		}
 
 		this.rebuildAbortController = new AbortController();
+		const signal = this.rebuildAbortController.signal;
+
 		this.setRebuildStatus({
 			phase: "rebuilding",
 			progress: { current: 0, total: 0 },
@@ -110,57 +114,48 @@ export class IndexDatabase {
 
 		this.rebuildP = (async () => {
 			try {
+				await new Promise((resolve) => setTimeout(resolve, 0));
+
 				const root = opts.app.vault.getAbstractFileByPath(
 					opts.highlightsFolder ?? "",
 				);
-				if (!(root instanceof TFolder)) {
-					throw new Error(`Missing folder: ${opts.highlightsFolder}`);
+				if (!isTFolder(root)) {
+					const error = new Error(`Missing folder: ${opts.highlightsFolder}`);
+					this.setRebuildStatus({ phase: "failed", error });
+					this.log.error("Index rebuild failed", error);
+					return; // Exit gracefully
 				}
 
-				const workers = Math.min(
-					6,
-					Math.max(
-						2,
-						typeof navigator !== "undefined" &&
-							(navigator as any).hardwareConcurrency
-							? (navigator as any).hardwareConcurrency
-							: 4,
-					),
-				);
+				const { getOptimalConcurrency } = await import("src/lib/concurrency");
+				const workers = opts.workers ?? getOptimalConcurrency();
 				const batchSize = opts.batchSize ?? 64;
 
-				const { files } = await this.fs.getFilesInFolder(root, {
-					extensions: ["md"],
+				const filesStream = this.fs.iterateMarkdownFiles(root, {
 					recursive: true,
+					signal,
 				});
 
-				this.setRebuildStatus({
-					phase: "rebuilding",
-					progress: { current: 0, total: files.length },
-				});
-
-				// The key change: The writer is now passed in, not hardcoded.
 				const processor = new ParallelIndexProcessor(
-					opts.fm,
-					opts.writer, // Use the provided writer function
+					opts.noteEditorService,
+					opts.writer,
 					this.log,
 					{ workers, batchSize },
 				);
 
-				const onProgress = (current: number, total: number) => {
+				const onProgress = (current: number) => {
 					this.setRebuildStatus({
 						phase: "rebuilding",
-						progress: { current, total },
+						progress: { current, total: 0 },
 					});
 				};
 
 				const result = await processor.processFiles(
-					files,
+					filesStream,
 					onProgress,
-					this.rebuildAbortController!.signal,
+					signal,
 				);
 
-				if (this.rebuildAbortController!.signal.aborted) {
+				if (signal.aborted) {
 					this.setRebuildStatus({ phase: "cancelled" });
 					return;
 				}
@@ -180,7 +175,7 @@ export class IndexDatabase {
 				this.setRebuildStatus({ phase: "complete" });
 				this.log.info("In-memory index rebuild completed.");
 			} catch (e) {
-				if ((e as any)?.name === "AbortError") {
+				if (isAbortError(e)) {
 					this.setRebuildStatus({ phase: "cancelled" });
 					this.log.warn("Index rebuild cancelled.");
 				} else {

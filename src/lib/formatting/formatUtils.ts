@@ -1,11 +1,9 @@
 import { sha1Hex } from "src/lib/core/crypto";
 import { err, ok, type Result } from "src/lib/core/result";
-import type { CfiParseError } from "src/lib/errors";
+import type { CfiParseError } from "src/lib/errors/types";
 import { toMatchKey } from "src/lib/pathing";
 import { normalizeWhitespace } from "src/lib/strings/stringUtils";
 import type { Annotation, DocProps, PositionObject } from "src/types";
-
-// PositionObject is imported from src/types to avoid duplicate structural types
 
 /**
  * Generates a deterministic key from document properties.
@@ -254,8 +252,8 @@ export function isWithinGap(
 export function computeAnnotationId(annotation: Annotation): string {
 	const { pageno, pos0, pos1, text, note } = annotation;
 	// Use the canonical normalizeWhitespace function for text and note normalization
-	const normalizedText = normalizeWhitespace(text || "");
-	const normalizedNote = normalizeWhitespace(note || "");
+	const normalizedText = normalizeWhitespace(text || "").toLowerCase();
+	const normalizedNote = normalizeWhitespace(note || "").toLowerCase();
 	const input = `${pageno}|${pos0}|${pos1}|${normalizedText}|${normalizedNote}`;
 	return sha1Hex(input, { normalizeEol: true }).slice(0, 16);
 }

@@ -2,19 +2,18 @@ import { type App, type Command, Notice, type TFile } from "obsidian";
 import type { CacheManager } from "src/lib/cache/CacheManager";
 import { isAbortError, runPool } from "src/lib/concurrency";
 import { err, isErr, ok } from "src/lib/core/result";
-import { safeParse } from "src/lib/core/validationUtils";
-import type { AppFailure, AppResult } from "src/lib/errors";
-import { normalizeSystemPath } from "src/lib/pathing";
+import type { AppFailure, AppResult } from "src/lib/errors/types";
+import { convertKohlMarkers } from "src/lib/parsing/highlightExtractor";
+import { normalizeSystemPath, Pathing } from "src/lib/pathing";
 import type KoreaderImporterPlugin from "src/main";
-import type { CapabilityManager } from "src/services/CapabilityManager";
 import type { ImportService } from "src/services/import/ImportService";
-import { notifyOnError } from "src/services/ShellUtils";
-import { ConfirmModal } from "src/ui/ConfirmModal";
+import { notifyOnError } from "src/services/ui/notificationUtils";
+import { InteractionModal } from "src/ui/InteractionModal";
 import { withProgress } from "src/ui/utils/progress";
 import type { DeviceService } from "../device/DeviceService";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
-import type { FrontmatterService } from "../parsing/FrontmatterService";
+import type { NoteEditorService } from "../parsing/NoteEditorService";
 import type { IndexCoordinator } from "../vault/index/IndexCoordinator";
 
 // Unified command result types
@@ -25,20 +24,6 @@ type ConversionSummary = {
 	scanned: number;
 	changed: number;
 };
-
-// A single, efficient regex to find any KOHL marker (HTML or Markdown style)
-// and capture its JSON payload. This is more robust than chaining two separate regexes.
-const ANY_KOHL_MARKER_REGEX = new RegExp(
-	// Non-capturing group for the opening delimiter
-	/(?:<!--|%%)/.source +
-		// Whitespace and the KOHL keyword
-		/\s*KOHL\s*/.source +
-		// Capturing group 1: The JSON payload itself. [\s\S]*? is a non-greedy match for any character including newlines.
-		/({[\s\S]*?})/.source +
-		// Whitespace and the closing delimiter
-		/\s*(?:-->|%%)/.source,
-	"g", // Global flag to find all occurrences
-);
 
 export class CommandManager {
 	private readonly log;
@@ -53,8 +38,7 @@ export class CommandManager {
 		private readonly loggingService: LoggingService,
 		private readonly localIndexService: IndexCoordinator,
 		private readonly fs: FileSystemService,
-		private readonly capabilityManager: CapabilityManager,
-		private readonly fmService: FrontmatterService,
+		private readonly noteEditorService: NoteEditorService,
 	) {
 		this.log = this.loggingService.scoped("CommandManager");
 	}
@@ -105,13 +89,10 @@ export class CommandManager {
 				name: "Import KOReader Highlights",
 				callback: () => {
 					void (async () => {
-						const res = await this.notifyCmd(this.executeImport(), {
-							message: () => "Import failed. Check console for details.",
-						});
+						const res = await this.notifyCmd(this.executeImport());
 						if (res.status === "cancelled") {
 							new Notice("Import cancelled.");
 						}
-						// success: ImportService shows its own summary
 					})();
 				},
 			},
@@ -177,13 +158,10 @@ export class CommandManager {
 				name: "Force Re-scan and Import KOReader Highlights",
 				callback: () => {
 					void (async () => {
-						const res = await this.notifyCmd(this.executeForceImport(), {
-							message: () => "Force import failed. Check console for details.",
-						});
+						const res = await this.notifyCmd(this.executeForceImport());
 						if (res.status === "cancelled") {
 							new Notice("Force import cancelled.");
 						}
-						// success: ImportService will show summary
 					})();
 				},
 			},
@@ -192,13 +170,13 @@ export class CommandManager {
 				name: "Troubleshoot: Full Reset and Reload Plugin",
 				callback: () => {
 					void (async () => {
-						const confirmed =
-							(await new ConfirmModal(
-								this.app,
-								"Reset KOReader Importer?",
+						const confirmed = await InteractionModal.confirm(this.app, {
+							title: "Reset KOReader Importer?",
+							message:
 								"This will delete the plugin's index files and caches. Your actual highlight notes in the vault are not affected. This action will also reload the plugin to ensure a completely clean state. Continue?",
-							).openAndAwaitResult()) ?? false;
-						if (!confirmed) return;
+							ctaText: "Proceed",
+						});
+						if (!confirmed) return { status: "cancelled" as const };
 						const res = await this.notifyCmd(this.executeFullReset(), {
 							message: () =>
 								"Error during reset. Check the developer console for details.",
@@ -271,21 +249,22 @@ export class CommandManager {
 	 * Force re-scan and import (clear caches then immediately import).
 	 */
 	async executeForceImport(): Promise<AppResult<void>> {
-		const cleared = await this.executeClearCaches();
-		if (isErr(cleared)) return cleared;
-		return this.executeImport();
+		this.device.clearCache();
+		this.localIndexService.invalidateIndexCaches();
+		await this.localIndexService.clearImportSource();
+		return this.executeImport({ forceReimportAll: true });
 	}
 
 	/**
 	 * Trigger full reset with confirmation.
 	 */
 	async executeFullResetWithConfirm(): Promise<CmdResult> {
-		const confirmed =
-			(await new ConfirmModal(
-				this.app,
-				"Reset KOReader Importer?",
+		const confirmed = await InteractionModal.confirm(this.app, {
+			title: "Reset KOReader Importer?",
+			message:
 				"This will delete the plugin's index files and caches. Your actual highlight notes in the vault are not affected. This action will also reload the plugin to ensure a completely clean state. Continue?",
-			).openAndAwaitResult()) ?? false;
+			ctaText: "Proceed",
+		});
 		if (!confirmed) return { status: "cancelled" as const };
 		return this.notifyCmd(this.executeFullReset());
 	}
@@ -298,11 +277,12 @@ export class CommandManager {
 		const rawMountPoint = await this.device.getActiveScanPath();
 		if (!rawMountPoint) {
 			this.log.warn("Scan path not available. Aborting command execution.");
+			const configuredPath = this.plugin.settings.koreaderScanPath;
 			return err({
-				kind: "CAPABILITY_DENIED",
-				capability: "koreader_scan_path",
-				message: "Scan path not available",
-			} satisfies AppFailure);
+				kind: "ConfigInvalid",
+				field: "KOReader Scan Path",
+				reason: `The configured path "${configuredPath}" could not be found or is not a directory. Please check the path in the plugin settings and ensure your device is connected.`,
+			});
 		}
 
 		const mountPoint = normalizeSystemPath(rawMountPoint);
@@ -321,14 +301,16 @@ export class CommandManager {
 	 * Validates scan path availability before starting import.
 	 * Handles cancellation and error reporting.
 	 */
-	async executeImport(): Promise<AppResult<void>> {
+	async executeImport(options?: {
+		forceReimportAll?: boolean;
+		signal?: AbortSignal;
+	}): Promise<AppResult<void>> {
 		this.log.info("Import triggered.");
 
 		const mount = await this.prepareExecution();
 		if (isErr(mount)) return mount;
 
-		this.device.clearCache();
-		await this.ImportService.importHighlights();
+		await this.ImportService.importHighlights(options);
 		return ok(void 0);
 	}
 
@@ -349,28 +331,29 @@ export class CommandManager {
 	 * Executes a scan for available highlights without importing.
 	 * Shows what files would be processed in an import.
 	 */
-	async executeScan(): Promise<
-		AppResult<{ fileCount: number; reportPath: string | null }>
-	> {
+	async executeScan(options?: {
+		signal?: AbortSignal;
+	}): Promise<AppResult<{ fileCount: number; reportPath: string | null }>> {
 		this.log.info("Scan triggered.");
 
 		const mount = await this.prepareExecution();
 		if (isErr(mount)) return mount;
 
 		let count = 0;
-		await withProgress(
+		const scanResult = await withProgress(
 			this.app,
 			0,
 			async (tick, signal) => {
 				tick.setStatus("Scanning for KOReader highlight files...");
-				const sdrFilePaths =
-					await this.device.findSdrDirectoriesWithMetadata(/* signal */);
+				const sdrFilePaths = await this.device.findSdrDirectoriesWithMetadata({
+					signal,
+				});
 				count = sdrFilePaths?.length ?? 0;
 				if (!sdrFilePaths || sdrFilePaths.length === 0) {
 					this.log.info("Scan complete. No SDR files found.");
 					const r = await this.createOrUpdateScanNote([]);
-					if (isErr(r)) throw r.error; // surface predictable failure to wrapper
-					return;
+					if (isErr(r)) return r; // Return the error Result
+					return ok(undefined);
 				}
 
 				this.log.info(`Scan found ${sdrFilePaths.length} metadata files.`);
@@ -378,14 +361,21 @@ export class CommandManager {
 					`Found ${sdrFilePaths.length} files. Generating report...`,
 				);
 				const r = await this.createOrUpdateScanNote(sdrFilePaths);
-				if (isErr(r)) throw r.error;
+				if (isErr(r)) return r; // Return the error Result
+				return ok(undefined);
 			},
 			{
 				title: "Scanning KOReader Highlights",
 				showWhenTotalIsZero: true,
 				autoMessage: false,
+				signal: options?.signal,
 			},
 		);
+
+		if (isErr(scanResult)) {
+			return scanResult; // Propagate the error
+		}
+
 		return ok({
 			fileCount: count,
 			reportPath: CommandManager.SCAN_REPORT_FILENAME,
@@ -440,9 +430,10 @@ export class CommandManager {
 		content += sdrFilePaths
 			.map((metadataFilePath) => {
 				const relativePath = usedMount
-					? this.fs
-							.systemRelative(usedMount, metadataFilePath)
-							.replace(/\\/g, "/")
+					? Pathing.systemRelative(usedMount, metadataFilePath).replace(
+							/\\/g,
+							"/",
+						)
 					: metadataFilePath;
 				return `- \`${relativePath}\``;
 			})
@@ -454,10 +445,12 @@ export class CommandManager {
 	/**
 	 * Converts the comment style of the given note.
 	 */
-	async executeConvertCommentStyle(): Promise<AppResult<void>> {
+	async executeConvertCommentStyle(options?: {
+		signal?: AbortSignal;
+	}): Promise<AppResult<void>> {
 		this.log.info("Converting all highlight notes to current comment style...");
 		// The core logic is now a private method of this class.
-		const summary = await this._convertAllToCurrentStyle();
+		const summary = await this._convertAllToCurrentStyle(options?.signal);
 		this.log.info(
 			`Conversion complete. Scanned: ${summary.scanned}, Changed: ${summary.changed}`,
 		);
@@ -467,10 +460,15 @@ export class CommandManager {
 	/**
 	 * Re-checks the capabilities of the device.
 	 */
-	async executeRecheckCapabilities(): Promise<AppResult<{ message?: string }>> {
-		await this.capabilityManager.refreshAll(true);
-		const message = "Capability check triggered.";
-		this.log.info(message);
+	public async executeRecheckCapabilities(): Promise<
+		AppResult<{ message?: string }>
+	> {
+		this.log.info("Performing reactive capability check...");
+		const pluginDirWritable = await this.fs.isPluginDirWritable();
+		const message = pluginDirWritable
+			? "Plugin data folder is writable. Snapshots and index should be available."
+			: "Plugin data folder is NOT writable. Snapshots and persistent index will be disabled.";
+		this.log.info(`Capability check result: ${message}`);
 		return ok({ message });
 	}
 
@@ -550,7 +548,9 @@ export class CommandManager {
 	 * current comment style defined in settings.commentStyle.
 	 * Uses progress UI, supports cancellation, and runs with bounded concurrency.
 	 */
-	private async _convertAllToCurrentStyle(): Promise<ConversionSummary> {
+	private async _convertAllToCurrentStyle(
+		signal?: AbortSignal,
+	): Promise<ConversionSummary> {
 		const folder = this.plugin.settings.highlightsFolder;
 		const summary: ConversionSummary = { scanned: 0, changed: 0 };
 
@@ -572,20 +572,25 @@ export class CommandManager {
 
 				await runPool(
 					files,
-					4,
-					async (file) => {
+					// Provide explicit type for the worker parameter
+					async (file: TFile) => {
 						tick.setStatus(`Converting: ${file.name}`);
-						const changed = await this._convertSingleFile(file, targetStyle);
-						if (changed) summary.changed++;
+						const result = await this._convertSingleFile(file, targetStyle);
+						if (isErr(result)) {
+							this.log.warn(`Failed to convert ${file.path}`, result.error);
+						} else if (result.value) {
+							summary.changed++;
+						}
 						tick();
 					},
-					signal,
+					{ concurrency: 4, signal },
 				);
 			},
 			{
 				title: "Converting comment style",
 				showWhenTotalIsZero: true,
 				autoMessage: false,
+				signal,
 			},
 		);
 
@@ -595,61 +600,40 @@ export class CommandManager {
 	private async _convertSingleFile(
 		file: TFile,
 		target: "html" | "md" | "none",
-	): Promise<boolean> {
+	): Promise<AppResult<boolean>> {
 		try {
-			// We need FrontmatterService here. We'll add it to the constructor.
-			const parsed = await this.fmService.parseFile(file);
-			const currentBody = parsed.body ?? "";
-			const nextBody = this._convertBody(currentBody, target);
-			if (nextBody === currentBody) return false;
+			const parsed = await this.noteEditorService.parseFile(file);
 
-			const res = await this.fmService.editFile(
+			if (isErr(parsed)) {
+				this.log.warn(
+					`Skipping conversion for ${file.path} due to parsing error.`,
+					parsed.error,
+				);
+				return err({
+					kind: "YamlParseError",
+					message: `Failed to parse frontmatter in ${file.path}`,
+				});
+			}
+
+			const currentBody = parsed.value.body ?? "";
+			const nextBody = convertKohlMarkers(currentBody, target);
+			if (nextBody === currentBody) return ok(false);
+
+			const editResult = await this.noteEditorService.editFile(
 				file,
 				(doc) => ({ frontmatter: doc.frontmatter, body: nextBody }),
 				{ skipIfNoChange: true, detectConcurrentModification: true },
 			);
-			return res.ok && res.value.changed;
-		} catch (e) {
-			this.log.warn(`Failed to convert ${file.path}`, e);
-			return false;
-		}
-	}
 
-	/**
-	 * Converts all KOHL metadata comments within a note's body to the target style.
-	 * This function is pure, idempotent, and safe against malformed data.
-	 *
-	 * @param body The raw string body of the note.
-	 * @param target The desired comment style: 'html', 'md', or 'none'.
-	 * @returns The transformed body content.
-	 */
-	private _convertBody(body: string, target: "html" | "md" | "none"): string {
-		if (target === "none") {
-			// If the goal is to remove comments, we can do a simple replacement
-			// and then clean up any excessive newlines left behind.
-			const cleaned = body.replace(ANY_KOHL_MARKER_REGEX, "");
-			// Collapse 3+ newlines into a standard double newline to maintain formatting.
-			return cleaned.replace(/\n\s*\n(\s*\n)+/g, "\n\n").trim();
-		}
-
-		// For 'html' or 'md' targets, we use a replacer function to process each match.
-		return body.replace(ANY_KOHL_MARKER_REGEX, (match, jsonPayload: string) => {
-			// Safely parse the captured JSON payload.
-			const meta = safeParse<Record<string, unknown>>(jsonPayload);
-
-			// If the JSON is malformed, return the original comment block verbatim.
-			// This is a critical data-preservation step.
-			if (!meta) {
-				return match;
+			if (isErr(editResult)) {
+				this.log.warn(`Failed to edit ${file.path}`, editResult.error);
+				return err(editResult.error);
 			}
 
-			// Re-stringify the parsed metadata to ensure it's clean.
-			const newJson = JSON.stringify(meta);
-
-			// Generate the new marker in the target style.
-			return target === "html"
-				? `<!-- KOHL ${newJson} -->`
-				: `%% KOHL ${newJson} %%`;
-		});
+			return ok(editResult.value.changed);
+		} catch (e) {
+			this.log.warn(`Unexpected error during conversion of ${file.path}`, e);
+			return err({ kind: "WriteFailed", path: file.path, cause: e });
+		}
 	}
 }

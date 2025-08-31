@@ -1,5 +1,5 @@
 import type { Annotation } from "src/types";
-import { distanceBetweenHighlights, isWithinGap } from "./formatUtils";
+import { isWithinGap } from "./formatUtils";
 
 export interface SuccessiveGroup {
 	annotations: Annotation[];

@@ -24,7 +24,8 @@
 	--khl-red: var(--khl-red-raw);
 	--khl-orange: var(--khl-orange-raw);
 	--khl-yellow: var(--khl-yellow-raw);
-	--khl-green: #28c828; /* softened green for light mode */
+	--khl-green: #28c828;
+	/* softened green for light mode */
 	--khl-olive: var(--khl-olive-raw);
 	--khl-cyan: var(--khl-cyan-raw);
 	--khl-blue: var(--khl-blue-raw);
@@ -35,7 +36,8 @@
 	--on-khl-red: #ffffff;
 	--on-khl-orange: #000000;
 	--on-khl-yellow: #000000;
-	--on-khl-green: #ffffff; /* light & dark share the same by default */
+	--on-khl-green: #ffffff;
+	/* light & dark share the same by default */
 	--on-khl-olive: #000000;
 	--on-khl-cyan: #000000;
 	--on-khl-blue: #ffffff;
@@ -90,14 +92,17 @@ mark[style*="#00ff00"] {
 	border-radius: var(--radius-sm);
 	display: inline-block;
 }
+
 .badge[data-type="exact"] {
 	background: var(--khl-green);
 	color: var(--on-khl-green);
 }
+
 .badge[data-type="updated"] {
 	background: var(--khl-yellow);
 	color: var(--on-khl-yellow);
 }
+
 .badge[data-type="divergent"] {
 	background: var(--khl-orange);
 	color: var(--on-khl-orange);
@@ -117,18 +122,22 @@ mark[style*="#00ff00"] {
 		filter var(--transition);
 	box-sizing: border-box;
 }
+
 .btn:hover:not(.disabled) {
 	transform: translateY(-1px);
 	filter: brightness(1.1);
 }
+
 .btn.cta {
 	background: var(--color-accent);
 	color: var(--color-base-100);
 }
+
 .btn.warn {
 	background: var(--khl-red);
 	color: var(--on-khl-red);
 }
+
 .btn.disabled {
 	opacity: 0.5;
 	cursor: not-allowed;
@@ -153,14 +162,20 @@ mark[style*="#00ff00"] {
 /*  Duplicate-Finder modal                                             */
 /* ─────────────────────────────────────────────────────────────────── */
 .duplicate-modal-container {
-	width: 100%; /* occupy available space from modal-content */
-	max-width: 100%; /* do not exceed modal-content */
+	width: 100%;
+	/* occupy available space from modal-content */
+	max-width: 100%;
+	/* do not exceed modal-content */
 	max-height: var(--max-modal-h);
-	margin: 0; /* avoid extra horizontal margins */
+	margin: 0;
+	/* avoid extra horizontal margins */
 	padding: var(--spacing-lg);
-	position: relative; /* allows sidebar positioning */
-	overflow: hidden; /* prevent any scrollbars in container; inner panes can scroll */
-	box-sizing: border-box; /* include padding in width */
+	position: relative;
+	/* allows sidebar positioning */
+	overflow: hidden;
+	/* prevent any scrollbars in container; inner panes can scroll */
+	box-sizing: border-box;
+	/* include padding in width */
 }
 
 /* Ensure children don't exceed container width */
@@ -190,9 +205,12 @@ mark[style*="#00ff00"] {
 
 /*  buttons */
 .duplicate-modal .duplicate-buttons {
-	display: grid; /* Use CSS Grid for robust columns */
-	grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); /* Allow shrink to container width */
-	gap: var(--spacing-md); /* Consistent spacing between all buttons */
+	display: grid;
+	/* Use CSS Grid for robust columns */
+	grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+	/* Allow shrink to container width */
+	gap: var(--spacing-md);
+	/* Consistent spacing between all buttons */
 	margin-top: var(--spacing-lg);
 	width: 100%;
 	box-sizing: border-box;
@@ -202,25 +220,48 @@ mark[style*="#00ff00"] {
 
 .duplicate-modal .duplicate-buttons .btn {
 	/* Ensure buttons fill their grid cell and lay out content horizontally */
-	flex-direction: row !important; /* beat generic .btn rules */
+	flex-direction: row !important;
+	/* beat generic .btn rules */
 	justify-content: center;
 	align-items: center;
 	gap: var(--spacing-sm);
 	width: 100%;
 	padding: var(--spacing-sm) var(--spacing-md);
-	min-width: 0; /* allow content to shrink to avoid overflow */
+	min-width: 0;
+	/* allow content to shrink to avoid overflow */
 	max-width: 100%;
 }
 
+/*
+ * Override Obsidian's "icon-only" button style.
+ * When a button has our custom `.mod-both` class, we ensure
+ * the text is visible and properly aligned with the icon.
+*/
+.duplicate-modal .modal-button-container .button.mod-both {
+	/* Restore the font-size that Obsidian's icon-only style removes. */
+	font-size: var(--font-ui-medium);
+}
+
+/*
+ * Force the text part of the button (which is in a span) to be visible.
+ * This is a defense against themes that might use `display: none` on it.
+*/
+.duplicate-modal .modal-button-container .button.mod-both > span {
+	display: inline !important;
+}
+
 .duplicate-modal .koreader-modal-action-button {
-	display: flex; /* make sure it's flex even if theme overrides .btn */
-	flex-direction: row !important; /* ensure text appears next to icon */
+	display: flex;
+	/* make sure it's flex even if theme overrides .btn */
+	flex-direction: row !important;
+	/* ensure text appears next to icon */
 	justify-content: center;
 	align-items: center;
 	gap: var(--spacing-sm);
 	width: 100%;
 	padding: var(--spacing-sm) var(--spacing-md);
-	min-width: 0; /* allow content to shrink to avoid overflow */
+	min-width: 0;
+	/* allow content to shrink to avoid overflow */
 }
 
 /* Ensure icon/text layout inside the button is stable */
@@ -228,10 +269,13 @@ mark[style*="#00ff00"] {
 .duplicate-modal .koreader-modal-action-button .button-icon {
 	flex: 0 0 auto;
 }
+
 .duplicate-modal .koreader-modal-action-button .button-text {
 	display: inline-block !important;
-	white-space: normal; /* allow wrapping to avoid overflow */
-	color: inherit; /* inherit color so warn/cta are readable */
+	white-space: normal;
+	/* allow wrapping to avoid overflow */
+	color: inherit;
+	/* inherit color so warn/cta are readable */
 	flex: 1 1 auto;
 	min-width: 0;
 	text-align: center;
@@ -264,8 +308,10 @@ mark[style*="#00ff00"] {
 }
 
 .duplicate-buttons .btn.warn {
-	background: var(--khl-red); /* strong, consistent red */
-	color: var(--on-khl-red); /* readable on red */
+	background: var(--khl-red);
+	/* strong, consistent red */
+	color: var(--on-khl-red);
+	/* readable on red */
 	border: 1px solid var(--khl-red);
 }
 
@@ -289,8 +335,10 @@ mark[style*="#00ff00"] {
 	border-radius: var(--radius-sm);
 	font-family: var(--font-monospace);
 	font-size: 0.9em;
-	overflow-wrap: break-word; /* Wrap long paths */
-	word-break: break-all; /* Aggressive breaking if needed */
+	overflow-wrap: break-word;
+	/* Wrap long paths */
+	word-break: break-all;
+	/* Aggressive breaking if needed */
 }
 
 /* Ensure the path text span can shrink and wrap within the container */
@@ -300,6 +348,7 @@ mark[style*="#00ff00"] {
 	word-break: break-all;
 	overflow-wrap: anywhere;
 }
+
 /* Keep the leading icon from shrinking/growing */
 .duplicate-file-path span:first-child {
 	flex: 0 0 auto;
@@ -307,7 +356,8 @@ mark[style*="#00ff00"] {
 
 /* Statistics Section */
 .duplicate-stats {
-	display: block; /* simple flow for consistent alignment */
+	display: block;
+	/* simple flow for consistent alignment */
 	background: var(--color-base-20);
 	padding: var(--spacing-md);
 	border-radius: var(--radius-md);
@@ -397,12 +447,15 @@ mark[style*="#00ff00"] {
 	border-top-left-radius: var(--radius-lg);
 	border-bottom-left-radius: var(--radius-lg);
 }
+
 .duplicate-modal-sidebar[data-type="exact"] {
 	background: var(--khl-green);
 }
+
 .duplicate-modal-sidebar[data-type="updated"] {
 	background: var(--khl-yellow);
 }
+
 .duplicate-modal-sidebar[data-type="divergent"] {
 	background: var(--khl-orange);
 }
@@ -462,10 +515,12 @@ mark[style*="#00ff00"] {
 .koreader-setting-validation {
 	margin-top: var(--spacing-xs);
 }
+
 .koreader-setting-validation ul {
 	margin: var(--spacing-xs) 0 0;
 	padding-left: 1.2em;
 }
+
 .koreader-setting-validation li {
 	margin-bottom: 2px;
 }
@@ -612,4 +667,109 @@ mark[style*="#00ff00"] {
 .callout[data-callout="highlight"] .callout-title {
 	background-color: var(--khl-gray);
 	color: var(--on-khl-gray);
+}
+
+/* Spinner for indeterminate progress modal */
+.koreader-spinner {
+	width: 40px;
+	height: 40px;
+	border: 4px solid var(--background-modifier-border);
+	border-top-color: var(--interactive-accent);
+	border-radius: 50%;
+	animation: spin 1s linear infinite;
+	margin: 1em auto;
+}
+
+@keyframes spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+/* ─────────────────────────────────────────────────────────────────── */
+/*  WYSIWYG Template Editor Modal (Single-Column Layout)               */
+/* ─────────────────────────────────────────────────────────────────── */
+
+/* Adjust modal width for a vertical layout. */
+.koreader-template-editor-modal .modal-content {
+	width: 80vw;
+	max-width: 800px;
+}
+
+/* Main container: stack panes vertically */
+.koreader-editor-container {
+	display: flex;
+	flex-direction: column;
+	gap: var(--spacing-lg);
+	height: 70vh;
+	margin-bottom: var(--spacing-lg);
+}
+
+/* Individual panes */
+.koreader-editor-pane,
+.koreader-preview-pane {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+	min-height: 0;
+}
+
+.koreader-editor-pane {
+	flex-basis: 40%;
+}
+
+.koreader-preview-pane {
+	flex-basis: 60%;
+}
+
+/* Remove default styling from the Setting component wrapper */
+.koreader-template-editor-setting {
+	padding: 0;
+	border: none;
+	flex-grow: 1;
+	display: flex;
+}
+
+/* Hide the empty info block that creates the left margin */
+.koreader-template-editor-setting .setting-item-info {
+	display: none;
+}
+
+/*
+ * Make the control block a column-oriented flex container.
+ * This is necessary for its child (the textarea) to grow vertically.
+*/
+.koreader-template-editor-setting .setting-item-control {
+	min-height: 0; /* important in flex layouts */
+}
+
+/*
+ * Style the textarea to grow and fill the available vertical space.
+*/
+.koreader-template-editor-textarea {
+	flex: 1 1 auto;
+	height: 100%; /* fill the pane height */
+	min-height: 18rem; /* or 300px; pick what you like */
+	box-sizing: border-box;
+	resize: vertical; /* vertical only is usually nicer */
+}
+
+/* Style for the rendered preview area */
+.koreader-template-editor-modal .template-preview-rendered {
+	flex-grow: 1;
+	max-height: none;
+	overflow-y: auto;
+	border: 1px solid var(--background-modifier-border);
+	padding: var(--spacing-md);
+	border-radius: var(--radius-md);
+	background-color: var(--background-secondary);
+}
+
+/* Style for displaying template compilation errors */
+.koreader-template-editor-modal .template-preview-rendered.template-error {
+	color: var(--text-error);
+	white-space: pre-wrap;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
 }

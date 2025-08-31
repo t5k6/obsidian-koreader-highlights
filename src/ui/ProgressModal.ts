@@ -5,6 +5,7 @@ import { BaseModal } from "./BaseModal";
 export class ProgressModal extends BaseModal<void> {
 	public statusEl!: HTMLElement;
 	private progressEl: HTMLProgressElement | null = null;
+	private spinnerEl: HTMLElement | null = null;
 	private total: number | null = null;
 	private controller: AbortController;
 	private baseTitle: string;
@@ -71,32 +72,65 @@ export class ProgressModal extends BaseModal<void> {
 		this.cancel();
 	}
 
-	setTotal(total: number) {
-		this.total = total;
-		this.setStatus("Processing files...");
-		// Create progress element using Obsidian helper if present; fallback to DOM API
-		const ce: any = (this as any).contentEl;
-		if (ce && typeof ce.createEl === "function") {
-			this.progressEl = ce.createEl("progress", {
-				attr: { max: total, value: 0 },
-			});
+	/**
+	 * Toggles the indeterminate (spinner) state.
+	 * In this state, the progress bar is hidden, and an animated spinner is shown.
+	 */
+	public setIndeterminate(on: boolean): void {
+		if (on) {
+			// If the spinner doesn't exist, create it.
+			if (!this.spinnerEl) {
+				this.spinnerEl = this.contentEl.createDiv({ cls: "koreader-spinner" });
+			}
+			this.spinnerEl.style.display = "";
+
+			// Hide the progress bar if it exists.
+			if (this.progressEl) {
+				this.progressEl.style.display = "none";
+			}
+
+			// Reset title to base, as percentage is meaningless here.
+			if (this.titleEl && (this.titleEl as any).setText) {
+				(this.titleEl as any).setText(this.baseTitle);
+			}
 		} else {
-			const prog = document?.createElement?.("progress") as
-				| HTMLProgressElement
-				| undefined;
-			if (prog) {
-				prog.max = total;
-				prog.value = 0;
-				this.progressEl = prog;
-				// Try to append somewhere reasonable in tests
-				const parent: any = ce ?? document?.body;
-				if (parent && parent.appendChild && prog) parent.appendChild(prog);
+			// Hide the spinner if it exists.
+			if (this.spinnerEl) {
+				this.spinnerEl.style.display = "none";
+			}
+			// Show the progress bar if it exists.
+			if (this.progressEl) {
+				this.progressEl.style.display = "";
 			}
 		}
 	}
 
+	public setTotal(total: number) {
+		// Setting a total always implies the state is now determinate.
+		this.setIndeterminate(false);
+
+		this.total = total;
+		this.setStatus("Processing files...");
+
+		// Create progress element if it doesn't exist yet.
+		if (!this.progressEl) {
+			const el = document.createElement("progress");
+			this.progressEl = el;
+			const buttonContainer = this.contentEl.querySelector(
+				".modal-button-container",
+			);
+			if (buttonContainer && buttonContainer.parentElement) {
+				buttonContainer.parentElement.insertBefore(el, buttonContainer);
+			} else {
+				this.contentEl.appendChild(el);
+			}
+		}
+		this.progressEl.max = total;
+		this.progressEl.value = 0;
+	}
+
 	updateProgress(completed: number, currentFileOrMessage?: string) {
-		if (this.progressEl && this.total) {
+		if (this.progressEl && this.total !== null) {
 			this.progressEl.value = completed;
 			const percentage = Math.round((completed / this.total) * 100);
 			if (this.titleEl && (this.titleEl as any).setText) {

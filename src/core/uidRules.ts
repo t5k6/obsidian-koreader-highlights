@@ -11,25 +11,21 @@ export function validateUid(s: unknown): s is string {
 }
 
 /**
- * Generate a UUID v4. Uses crypto.getRandomValues when available; falls back to Math.random.
+ * Get random bytes using crypto.getRandomValues.
+ * @param len Number of bytes to generate
+ * @returns Uint8Array of random bytes
+ */
+function getRandomBytes(len: number): Uint8Array {
+	const a = new Uint8Array(len);
+	crypto.getRandomValues(a);
+	return a;
+}
+
+/**
+ * Generate a UUID v4 using cryptographic randomness.
  */
 export function generateUid(): string {
-	const rnd = (len: number): Uint8Array => {
-		if (
-			typeof crypto !== "undefined" &&
-			typeof (crypto as any).getRandomValues === "function"
-		) {
-			const a = new Uint8Array(len);
-			(crypto as any).getRandomValues(a);
-			return a;
-		}
-		// Fallback: not cryptographically strong, but acceptable in constrained envs (tests).
-		const a = new Uint8Array(len);
-		for (let i = 0; i < len; i++) a[i] = Math.floor(Math.random() * 256);
-		return a;
-	};
-
-	const bytes = rnd(16);
+	const bytes = getRandomBytes(16);
 	// Per RFC 4122 §4.4
 	bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
 	bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10
@@ -62,7 +58,6 @@ export function extractUidFromFrontmatter(
 export function updateUidFrontmatter<T extends Record<string, unknown>>(
 	fm: T,
 	newUid: string,
-	_oldUid?: string,
 ): T {
 	const out = { ...(fm as Record<string, unknown>) };
 	(out as any)[KOHL_UID_KEY] = newUid;

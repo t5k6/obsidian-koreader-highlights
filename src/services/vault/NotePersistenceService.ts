@@ -5,33 +5,37 @@ import {
 	updateUidFrontmatter,
 	validateUid,
 } from "src/core/uidRules";
-import { KeyedQueue, runPool } from "src/lib/concurrency";
+import {
+	getOptimalConcurrency,
+	KeyedQueue,
+	runPool,
+} from "src/lib/concurrency";
 import { err, isErr, ok, type Result } from "src/lib/core/result";
-import type {
-	AppFailure,
-	CapabilityFailure,
-	FileSystemFailure,
-} from "src/lib/errors";
+import { toFailure } from "src/lib/errors/mapper";
+import {
+	type AppFailure,
+	type AppResult,
+	isAppFailure,
+} from "src/lib/errors/types";
+import { Pathing } from "src/lib/pathing";
 import {
 	composeSnapshotContent,
 	computeSnapshotHash,
 	generateBackupFileName,
 	legacySnapshotPathFor,
-	type SnapshotError,
 	snapshotErrors,
 	snapshotPathForUid,
 	verifySnapshotIntegrity,
 } from "src/lib/snapshotCore";
-import type { CapabilityManager } from "../CapabilityManager";
-import type { FileSystemService } from "../FileSystemService";
+import type { NoteUpdater } from "src/types";
+import type { FileSystemService, FolderScanResult } from "../FileSystemService";
+import type { ImportWarning } from "../import/types";
 import type { LoggingService } from "../LoggingService";
-import type { FrontmatterService } from "../parsing/FrontmatterService";
+import type { NoteEditorService } from "../parsing/NoteEditorService";
+import { notifyOnFsError } from "../ui/notificationUtils";
 
-// NEW: A consolidated error type for all persistence operations.
-type NotePersistenceFailure =
-	| SnapshotError
-	| CapabilityFailure
-	| FileSystemFailure;
+// consolidated error type for all persistence operations.
+type NotePersistenceFailure = AppFailure;
 
 /**
  * A cohesive service responsible for a note's persistent state, including its
@@ -43,25 +47,17 @@ export class NotePersistenceService {
 	private readonly backupDir: string;
 	private readonly queue = new KeyedQueue();
 
-	/**
-	 * Concurrency model:
-	 * - A per-file-path lock (`withFileLock`) serializes high-level mutations on a note.
-	 * - Per-UID snapshot locks (`withSnapshotLock`/`withTwoSnapshotLocks`) serialize I/O on snapshot files.
-	 *   Dual UID locks are acquired in a stable, sorted order to avoid deadlocks.
-	 */
 	constructor(
 		private readonly app: App,
-		private readonly fmService: FrontmatterService,
+		private readonly noteEditorService: NoteEditorService,
 		private readonly fs: FileSystemService,
 		private readonly loggingService: LoggingService,
-		private readonly capabilities: CapabilityManager,
 	) {
 		this.log = this.loggingService.scoped("NotePersistenceService");
 		this.snapshotDir = this.fs.joinPluginDataPath("snapshots");
 		this.backupDir = this.fs.joinPluginDataPath("backups");
 	}
 
-	// NEW: per-file lock to serialize operations on a single note.
 	private withFileLock<T>(
 		fileOrPath: TFile | string,
 		task: () => Promise<T>,
@@ -69,8 +65,6 @@ export class NotePersistenceService {
 		const path = typeof fileOrPath === "string" ? fileOrPath : fileOrPath.path;
 		return this.queue.run(`file:${path}`, task);
 	}
-
-	// --- Identity Management ---
 
 	public generateUid(): string {
 		return genUid();
@@ -89,14 +83,6 @@ export class NotePersistenceService {
 		return this.assignNewId(file, existingUid);
 	}
 
-	/**
-	 * Atomically assigns a new UID to a file and migrates its snapshot baseline
-	 * using a copy-first prepare–commit–rollback pattern.
-	 *
-	 * @param file The file to re-assign.
-	 * @param oldUid The previous UID, if known.
-	 * @param opts.targetUid Optional stable UID for idempotent retries across crashes.
-	 */
 	public async assignNewId(
 		file: TFile,
 		oldUid?: string,
@@ -106,6 +92,7 @@ export class NotePersistenceService {
 			const newUid = opts?.targetUid ?? this.generateUid();
 
 			if (!oldUid || oldUid === newUid) {
+				// Pass through targetUid for idempotency
 				return this.updateFrontmatterUid(file, newUid, oldUid);
 			}
 
@@ -154,24 +141,6 @@ export class NotePersistenceService {
 		});
 	}
 
-	// --- Snapshot & Backup Management ---
-
-	public async createSnapshot(
-		targetFile: TFile,
-		uid: string,
-	): Promise<Result<void, NotePersistenceFailure>> {
-		const contentResult = await this.fs.readVaultTextWithRetry(targetFile);
-		if (isErr(contentResult)) {
-			return err(
-				snapshotErrors.readFailed(
-					`Failed to read for snapshot: ${targetFile.path}`,
-					contentResult.error,
-				),
-			);
-		}
-		return this.createSnapshotFromContent(uid, contentResult.value);
-	}
-
 	public async createSnapshotFromContent(
 		uid: string,
 		content: string,
@@ -181,85 +150,119 @@ export class NotePersistenceService {
 
 	public async readSnapshotById(
 		uid: string,
-	): Promise<Result<string, SnapshotError | FileSystemFailure>> {
+	): Promise<Result<string, AppFailure>> {
 		return this.readSnapshot(uid);
 	}
 
 	public async createBackup(
 		targetFile: TFile,
 	): Promise<Result<void, NotePersistenceFailure>> {
-		const writable = await this.capabilities.ensure("snapshotsWritable", {
-			notifyOnce: true,
-		});
-		if (!writable) {
-			return err({
-				kind: "CAPABILITY_DENIED",
-				capability: "snapshotsWritable",
-				message: "snapshotsWritable capability is unavailable.",
-			});
-		}
-
 		const backupFileName = generateBackupFileName(
 			targetFile.basename,
 			targetFile.path,
 		);
-		const backupPath = this.fs.joinVaultPath(this.backupDir, backupFileName);
+		const backupPath = Pathing.joinVaultPath(this.backupDir, backupFileName);
 
-		try {
-			const r = await this.fs.readVaultTextWithRetry(targetFile);
-			if (isErr(r)) {
-				return err(
-					snapshotErrors.readFailed(`Failed to read for backup`, r.error),
-				);
-			}
-
-			const w = await this.fs.writeVaultTextAtomic(backupPath, r.value);
-			if (isErr(w)) {
-				return err(
-					snapshotErrors.writeFailed(`Failed to create backup`, w.error),
-				);
-			}
-
-			this.log.info(`Created backup for ${targetFile.path} at ${backupPath}`);
-			return ok(undefined);
-		} catch (error) {
-			this.log.error(`Unexpected error creating backup`, error);
-			return err(snapshotErrors.writeFailed(`Failed to create backup`, error));
+		const readResult = await this.fs.readVaultTextWithRetry(targetFile);
+		if (isErr(readResult)) {
+			return err(
+				snapshotErrors.readFailed(
+					`Failed to read for backup`,
+					readResult.error,
+				),
+			);
 		}
+
+		const writeResult = await notifyOnFsError(
+			this.fs.writeVaultTextAtomic(backupPath, readResult.value),
+			{
+				message:
+					"KOReader Importer: Failed to create backup. Check folder permissions.",
+				onceKey: "snapshotsWritable",
+			},
+		);
+
+		if (isErr(writeResult)) {
+			return err(
+				snapshotErrors.writeFailed(
+					`Failed to create backup`,
+					writeResult.error,
+				),
+			);
+		}
+
+		this.log.info(`Created backup for ${targetFile.path} at ${backupPath}`);
+		return ok(undefined);
 	}
 
-	public async cleanupOldBackups(retentionDays: number): Promise<void> {
-		const ok = await this.capabilities.ensure("snapshotsWritable");
-		if (!ok || retentionDays <= 0) {
-			return;
+	public async cleanupOldBackups(
+		retentionDays: number,
+	): Promise<Result<void, AppFailure>> {
+		if (retentionDays <= 0) {
+			return ok(undefined);
 		}
 
 		this.log.info(`Cleaning backups older than ${retentionDays} days...`);
-		const cutoffTime = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
 
-		try {
-			const { files: filesToDelete } = await this.fs.getFilesInFolder(
-				this.backupDir,
-				{ extensions: ["md"], recursive: true },
-			);
+		const getFilesPromise: Promise<AppResult<FolderScanResult>> = (async () => {
+			try {
+				const result = await this.fs.getFilesInFolder(this.backupDir, {
+					extensions: ["md"],
+					recursive: true,
+				});
+				return ok(result);
+			} catch (e) {
+				return err(toFailure(e, this.backupDir, "ReadFailed"));
+			}
+		})();
 
-			const oldFiles = filesToDelete.filter(
-				(file) => file.stat.mtime < cutoffTime,
-			);
-			if (oldFiles.length === 0) return;
+		const scanResult = await notifyOnFsError(getFilesPromise, {
+			message: "KOReader Importer: Could not clean up old backups.",
+			onceKey: "snapshotsWritable",
+		});
 
-			const concurrency =
-				typeof navigator !== "undefined" ? navigator.hardwareConcurrency : 4;
-			const results = await runPool(
-				oldFiles,
-				concurrency,
-				async (file: TFile) => !isErr(await this.fs.removeVaultPath(file.path)),
-			);
-			const deletedCount = results.filter(Boolean).length;
-			this.log.info(`Cleanup complete. Deleted ${deletedCount} old backup(s).`);
-		} catch (e) {
-			this.log.error(`Failed to clean up old backups`, e);
+		if (isErr(scanResult)) {
+			if (scanResult.error.kind === "NotFound") {
+				return ok(undefined);
+			}
+			return err(scanResult.error as AppFailure);
 		}
+
+		const cutoffTime = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+		const oldFiles = scanResult.value.files.filter((file: TFile) => {
+			return file.stat.mtime < cutoffTime;
+		});
+
+		if (oldFiles.length === 0) {
+			return ok(undefined);
+		}
+
+		let deletedCount = 0;
+		const concurrency = getOptimalConcurrency({ min: 1 });
+
+		const resultsStream = runPool(
+			oldFiles,
+			async (file: TFile) => {
+				const removeResult = await this.fs.removeVaultPath(file.path);
+				if (isErr(removeResult)) {
+					this.log.warn(
+						`Failed to delete old backup: ${file.path}`,
+						removeResult.error,
+					);
+				}
+				return !isErr(removeResult);
+			},
+			{ concurrency },
+		);
+
+		for await (const result of resultsStream) {
+			if (result.ok && result.value === true) {
+				deletedCount++;
+			}
+		}
+
+		this.log.info(`Cleanup complete. Deleted ${deletedCount} old backup(s).`);
+		return ok(undefined);
 	}
 
 	public async migrateSingleLegacySnapshot(
@@ -269,50 +272,48 @@ export class NotePersistenceService {
 		const legacyPath = legacySnapshotPathFor(this.snapshotDir, file.path);
 
 		return this.withSnapshotLock(uid, async () => {
-			try {
-				const legacyExistsRes = await this.fs.vaultExists(legacyPath);
-				if (isErr(legacyExistsRes) || !legacyExistsRes.value) {
-					return ok(undefined);
-				}
+			const legacyExistsRes = await this.fs.vaultExists(legacyPath);
+			if (isErr(legacyExistsRes) || !legacyExistsRes.value) {
+				return ok(undefined);
+			}
 
-				if (await this.snapshotExists(uid)) {
-					void (await this.fs.removeVaultPath(legacyPath));
-					return ok(undefined);
-				}
-
-				const readRes = await this.fs.readVaultText(legacyPath);
-				if (isErr(readRes)) {
-					return err(
-						snapshotErrors.readFailed(
-							`Failed to read legacy snapshot`,
-							readRes.error,
-						),
+			if (await this.snapshotExists(uid)) {
+				const removeResult = await this.fs.removeVaultPath(legacyPath);
+				if (isErr(removeResult)) {
+					this.log.warn(
+						`Failed to remove legacy snapshot at ${legacyPath}`,
+						removeResult.error,
 					);
 				}
-
-				const writeRes = await this.writeSnapshot(uid, readRes.value);
-				if (isErr(writeRes)) {
-					return writeRes;
-				}
-
-				void (await this.fs.removeVaultPath(legacyPath));
 				return ok(undefined);
-			} catch (e) {
-				this.log.warn("migrateSingleLegacySnapshot failed", {
-					file: file.path,
-					e,
-				});
+			}
+
+			const readRes = await this.fs.readVaultText(legacyPath);
+			if (isErr(readRes)) {
 				return err(
-					snapshotErrors.migrationFailed(
-						"migrateSingleLegacySnapshot failed",
-						e,
+					snapshotErrors.readFailed(
+						`Failed to read legacy snapshot`,
+						readRes.error,
 					),
 				);
 			}
+
+			const writeRes = await this.writeSnapshot(uid, readRes.value);
+			if (isErr(writeRes)) {
+				return writeRes;
+			}
+
+			const removeResult = await this.fs.removeVaultPath(legacyPath);
+			if (isErr(removeResult)) {
+				this.log.warn(
+					`Failed to remove legacy snapshot at ${legacyPath}`,
+					removeResult.error,
+				);
+			}
+
+			return ok(undefined);
 		});
 	}
-
-	// --- Private Implementation ---
 
 	private async createSnapshotCore(
 		targetFile: TFile | null,
@@ -359,21 +360,25 @@ export class NotePersistenceService {
 		oldUid?: string,
 	): Promise<Result<string, AppFailure>> {
 		try {
-			await this.fmService.editFrontmatter(file, (fm) => {
+			await this.noteEditorService.editFrontmatter(file, (fm) => {
 				const updated = updateUidFrontmatter(
 					(fm as Record<string, unknown>) ?? {},
 					newUid,
-					oldUid,
 				);
 				Object.assign(fm, updated);
 			});
 			return ok(newUid);
 		} catch (e) {
-			this.log.error("updateFrontmatterUid failed", {
+			// Type guard for AppFailure
+			if (isAppFailure(e)) {
+				return err(e);
+			}
+			// Fallback: wrap unknown error
+			return err({
+				kind: "WriteFailed",
 				path: file.path,
-				error: e,
-			});
-			return err(e as AppFailure);
+				cause: e,
+			} as AppFailure);
 		}
 	}
 
@@ -381,70 +386,49 @@ export class NotePersistenceService {
 		uid: string,
 		body: string,
 	): Promise<Result<void, NotePersistenceFailure>> {
-		const allowed = await this.capabilities.ensure("snapshotsWritable", {
-			notifyOnce: true,
-		});
-		if (!allowed) {
-			return err({
-				kind: "CAPABILITY_DENIED",
-				capability: "snapshotsWritable",
-				message: "Snapshots are disabled or the data folder is not writable.",
-			});
-		}
 		const path = snapshotPathForUid(this.snapshotDir, uid).fullPath;
 		const hash = computeSnapshotHash(body);
 		const content = composeSnapshotContent(hash, body);
-		const w = await this.fs.writeVaultTextAtomic(path, content);
-		return isErr(w)
+		const writeResult = await notifyOnFsError(
+			this.fs.writeVaultTextAtomic(path, content),
+			{ onceKey: "snapshotsWritable" },
+		);
+		return isErr(writeResult)
 			? err(
 					snapshotErrors.writeFailed(
 						`Failed to write snapshot for UID ${uid}`,
-						w.error,
+						writeResult.error,
 					),
 				)
 			: ok(undefined);
 	}
 
-	private async readSnapshot(
-		uid: string,
-	): Promise<Result<string, SnapshotError | FileSystemFailure>> {
+	private async readSnapshot(uid: string): Promise<Result<string, AppFailure>> {
 		const path = snapshotPathForUid(this.snapshotDir, uid).fullPath;
 		const r = await this.fs.readVaultText(path);
 		if (isErr(r)) {
-			const e = r.error as any;
+			const e = r.error;
 			return e?.kind === "NotFound"
 				? err(snapshotErrors.snapshotMissing(`No snapshot at ${path}`))
 				: err(snapshotErrors.readFailed(`Failed to read ${path}`, r.error));
 		}
-		return verifySnapshotIntegrity(r.value);
+		const verifyResult = verifySnapshotIntegrity(r.value, { path });
+		if (isErr(verifyResult)) {
+			const error = verifyResult.error;
+			this.log.warn(
+				`Snapshot integrity check failed for ${path}: ${error.kind}`,
+				error,
+			);
+		}
+		return verifyResult;
 	}
 
-	private async removeSnapshot(
-		uid: string,
-	): Promise<Result<void, SnapshotError | FileSystemFailure>> {
+	private async removeSnapshot(uid: string): Promise<Result<void, AppFailure>> {
 		const path = snapshotPathForUid(this.snapshotDir, uid).fullPath;
 		const res = await this.fs.removeVaultPath(path);
 		return isErr(res)
 			? err(snapshotErrors.writeFailed(`Failed to remove ${path}`, res.error))
 			: ok(undefined);
-	}
-
-	private async renameSnapshotFile(
-		oldUid: string,
-		newUid: string,
-	): Promise<Result<void, SnapshotError | FileSystemFailure>> {
-		const from = snapshotPathForUid(this.snapshotDir, oldUid).fullPath;
-		const to = snapshotPathForUid(this.snapshotDir, newUid).fullPath;
-		const mv = await this.fs.renameVaultPathAtomic(from, to);
-		if (isErr(mv)) {
-			return err(
-				snapshotErrors.writeFailed(
-					`Failed to rename snapshot ${from} -> ${to}`,
-					mv.error,
-				),
-			);
-		}
-		return ok(undefined);
 	}
 
 	private async snapshotExists(uid: string): Promise<boolean> {
@@ -467,5 +451,137 @@ export class NotePersistenceService {
 		return this.withSnapshotLock(first, () =>
 			this.withSnapshotLock(second, task),
 		);
+	}
+
+	public async createNoteAtomically(params: {
+		folderPath: string;
+		baseStem: string;
+		content: string;
+		signal?: AbortSignal;
+	}): Promise<
+		AppResult<{
+			file: TFile;
+			uid: string;
+			snapshotCreated: boolean;
+			warnings?: ImportWarning[];
+		}>
+	> {
+		const { folderPath, baseStem, content, signal } = params;
+		signal?.throwIfAborted();
+
+		const createRes = await this.fs.createVaultFileUnique(
+			folderPath,
+			baseStem,
+			content,
+		);
+		if (isErr(createRes)) return err(createRes.error);
+		const { file: targetFile, warnings: initialWarnings } = createRes.value;
+
+		// Lock the newly created file to perform UID, backup, and snapshot operations atomically.
+		return this.withFileLock(targetFile, async () => {
+			signal?.throwIfAborted();
+
+			const uidResult = await this.ensureId(targetFile);
+			if (isErr(uidResult)) return err(uidResult.error);
+			const uid = uidResult.value;
+
+			const warnings: ImportWarning[] = [...initialWarnings];
+			const backupRes = await this.createBackup(targetFile);
+			if (isErr(backupRes)) {
+				warnings.push({
+					code: "BACKUP_FAILED",
+					message: "Backup creation failed for new note.",
+				});
+			}
+
+			const snapRes = await this.createSnapshotFromContent(uid, content);
+			if (isErr(snapRes)) {
+				warnings.push({
+					code: "SNAPSHOT_FAILED",
+					message: "Snapshot creation failed for new note.",
+				});
+			}
+
+			const snapshotCreated = !isErr(snapRes);
+
+			return ok({
+				file: targetFile,
+				uid,
+				snapshotCreated,
+				warnings: warnings.length > 0 ? warnings : undefined,
+			});
+		});
+	}
+
+	public async updateNoteAtomically(params: {
+		file: TFile;
+		updater: NoteUpdater;
+		uid?: string;
+		signal?: AbortSignal;
+	}): Promise<
+		AppResult<{
+			file: TFile;
+			uid: string;
+			snapshotCreated: boolean;
+			warnings?: ImportWarning[];
+		}>
+	> {
+		const { file: targetFile, updater, signal } = params;
+		signal?.throwIfAborted();
+
+		const uidResult = params.uid
+			? ok(params.uid)
+			: await this.ensureId(targetFile);
+		if (isErr(uidResult)) return err(uidResult.error);
+		const uid = uidResult.value;
+
+		return this.withFileLock(targetFile, async () => {
+			signal?.throwIfAborted();
+
+			const warnings: ImportWarning[] = [];
+			const backupRes = await this.createBackup(targetFile);
+			if (isErr(backupRes)) {
+				warnings.push({
+					code: "BACKUP_FAILED",
+					message: "Backup creation failed prior to write.",
+				});
+			}
+
+			const editRes = await this.noteEditorService.editFile(
+				targetFile,
+				updater,
+				{
+					detectConcurrentModification: true,
+					skipIfNoChange: true,
+					signal,
+					afterWrite: async (ctx) => {
+						signal?.throwIfAborted();
+						const snapRes = await this.createSnapshotFromContent(
+							uid,
+							ctx.newContent,
+						);
+						if (isErr(snapRes)) {
+							warnings.push({
+								code: "SNAPSHOT_FAILED",
+								message: "Snapshot creation failed after note update.",
+							});
+						}
+					},
+				},
+			);
+
+			if (isErr(editRes)) return err(editRes.error);
+
+			const snapshotCreated = !warnings.some(
+				(w) => w.code === "SNAPSHOT_FAILED",
+			);
+
+			return ok({
+				file: targetFile,
+				uid,
+				snapshotCreated,
+				warnings: warnings.length > 0 ? warnings : undefined,
+			});
+		});
 	}
 }

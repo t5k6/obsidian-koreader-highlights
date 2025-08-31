@@ -4,8 +4,10 @@ import {
 	DEFAULT_TEMPLATES_FOLDER,
 } from "src/constants";
 import { normalizeSystemPath, toVaultPath } from "src/lib/pathing";
-import type { KoreaderHighlightImporterSettings } from "src/types";
+import type { KoreaderHighlightImporterSettings, PluginData } from "src/types";
+import { CURRENT_SCHEMA_VERSION } from "src/types";
 import { z } from "zod";
+import { deepMerge } from "./deepMerge";
 
 function coerceBoolLoose(v: unknown): boolean {
 	if (typeof v === "boolean") return v;
@@ -111,24 +113,6 @@ export const RawSettingsSchema = z
 	})
 	.passthrough();
 
-// --- Deep merge utility (arrays replaced) ---
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-	return !!v && typeof v === "object" && !Array.isArray(v);
-}
-
-function deepMerge<T>(base: T, next: Partial<T>): T {
-	const out: any = Array.isArray(base)
-		? [...(base as any)]
-		: { ...(base as any) };
-	for (const [k, v] of Object.entries(next ?? {})) {
-		if (v === undefined) continue;
-		if (isPlainObject(v) && isPlainObject(out[k]))
-			out[k] = deepMerge(out[k], v as any);
-		else out[k] = v as any;
-	}
-	return out as T;
-}
-
 // --- Base defaults (no circular refs) ---
 export const BASE_DEFAULTS: KoreaderHighlightImporterSettings = {
 	koreaderScanPath: "",
@@ -174,29 +158,33 @@ export const BASE_DEFAULTS: KoreaderHighlightImporterSettings = {
 export function normalizeSettings(
 	raw: unknown,
 ): KoreaderHighlightImporterSettings {
-	const parsed = RawSettingsSchema.safeParse(raw ?? {});
-	const partialRaw = (parsed.success ? parsed.data : {}) as any;
+	// 1. Parse raw data using Zod schema. Fallback to an empty object on failure.
+	const parsedRes = RawSettingsSchema.safeParse(raw ?? {});
+	const parsedData = parsedRes.success ? parsedRes.data : {};
 
-	// Migrate legacy key to new canonical key in-memory before deep merge
-	const partial: Partial<KoreaderHighlightImporterSettings> = {
-		...(partialRaw as any),
-	} as any;
+	// 2. Create a mutable copy and handle legacy key migration.
+	// We use a type assertion here because Zod's inferred type from a partial & optional schema
+	// is more complex than our target Partial type.
+	const migratedData = {
+		...parsedData,
+	} as Partial<KoreaderHighlightImporterSettings> & {
+		koreaderMountPoint?: string;
+	};
+
 	if (
-		(partial as any).koreaderScanPath == null &&
-		typeof partialRaw.koreaderMountPoint === "string"
+		migratedData.koreaderScanPath == null &&
+		typeof migratedData.koreaderMountPoint === "string"
 	) {
-		(partial as any).koreaderScanPath = partialRaw.koreaderMountPoint;
-		delete (partial as any).koreaderMountPoint;
+		migratedData.koreaderScanPath = migratedData.koreaderMountPoint;
 	}
+	// Always remove the legacy key to prevent it from being saved.
+	delete migratedData.koreaderMountPoint;
 
-	const merged = deepMerge(
-		BASE_DEFAULTS,
-		partial as Partial<KoreaderHighlightImporterSettings>,
-	) as KoreaderHighlightImporterSettings;
+	// 3. Deep-merge the validated & migrated data onto the base defaults.
+	const merged = deepMerge(BASE_DEFAULTS, migratedData);
 
-	// Post-parse normalizations
+	// 4. Perform all post-merge normalizations (path handling, boolean coercion, array cleanup).
 	merged.koreaderScanPath = normalizeSystemPath(merged.koreaderScanPath);
-	// Normalize override as well (leave empty string as-is for disabled override)
 	merged.statsDbPathOverride = merged.statsDbPathOverride
 		? normalizeSystemPath(merged.statsDbPathOverride)
 		: "";
@@ -204,40 +192,31 @@ export function normalizeSettings(
 	merged.logsFolder = toVaultPath(merged.logsFolder);
 	merged.template.templateDir = toVaultPath(merged.template.templateDir);
 
-	// Override booleans with strict coercion from raw input when provided
-	const rawObj = (raw ?? {}) as any;
-	if ("logToFile" in (rawObj || {})) {
+	const rawObj = (raw ?? {}) as Record<string, unknown>;
+	if ("logToFile" in rawObj) {
 		merged.logToFile = coerceBoolLoose(rawObj.logToFile);
 	}
-	if (rawObj?.frontmatter && "useUnknownAuthor" in rawObj.frontmatter) {
-		merged.frontmatter.useUnknownAuthor = coerceBoolLoose(
-			rawObj.frontmatter.useUnknownAuthor,
-		);
-	}
-
-	// Clean arrays: trim and drop empties
-	if (Array.isArray(merged.excludedFolders)) {
-		merged.excludedFolders = merged.excludedFolders
-			.map((s) => (typeof s === "string" ? s.trim() : ""))
-			.filter((s) => s.length > 0);
-	}
-	if (Array.isArray(merged.frontmatter?.disabledFields)) {
-		merged.frontmatter.disabledFields = merged.frontmatter.disabledFields
-			.map((s) => (typeof s === "string" ? s.trim() : ""))
-			.filter((s) => s.length > 0);
-	}
-
-	// Guard allowedFileTypes; default if any non-string present
 	if (
-		!Array.isArray(merged.allowedFileTypes) ||
-		merged.allowedFileTypes.some((v) => typeof v !== "string")
+		rawObj.frontmatter &&
+		typeof rawObj.frontmatter === "object" &&
+		rawObj.frontmatter !== null &&
+		"useUnknownAuthor" in rawObj.frontmatter
 	) {
-		merged.allowedFileTypes = [...BASE_DEFAULTS.allowedFileTypes];
-	} else {
-		merged.allowedFileTypes = merged.allowedFileTypes.map((s) =>
-			(typeof s === "string" ? s : "").toLowerCase(),
+		merged.frontmatter.useUnknownAuthor = coerceBoolLoose(
+			(rawObj.frontmatter as any).useUnknownAuthor,
 		);
 	}
+
+	merged.excludedFolders = merged.excludedFolders
+		.map((f) => String(f).trim())
+		.filter(Boolean);
+	merged.frontmatter.disabledFields = merged.frontmatter.disabledFields
+		.map((f) => String(f).trim())
+		.filter(Boolean);
+
+	merged.allowedFileTypes = Array.isArray(merged.allowedFileTypes)
+		? merged.allowedFileTypes.map((s) => String(s).toLowerCase())
+		: [...BASE_DEFAULTS.allowedFileTypes];
 
 	return merged;
 }
@@ -245,3 +224,28 @@ export function normalizeSettings(
 // Canonical default settings value used by tests and callers that need a baseline
 export const DEFAULT_SETTINGS: KoreaderHighlightImporterSettings =
 	normalizeSettings({});
+
+// Type-safe data normalization function
+export function normalizePluginData(raw: unknown): PluginData {
+	// Type-safe property access
+	const rawObj =
+		raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+
+	return {
+		schemaVersion:
+			typeof rawObj.schemaVersion === "number" &&
+			Number.isInteger(rawObj.schemaVersion)
+				? rawObj.schemaVersion
+				: CURRENT_SCHEMA_VERSION,
+		settings: normalizeSettings(rawObj.settings),
+		appliedMigrations: Array.isArray(rawObj.appliedMigrations)
+			? rawObj.appliedMigrations.filter(
+					(x): x is string => typeof x === "string",
+				)
+			: [],
+		lastPluginMigratedTo:
+			typeof rawObj.lastPluginMigratedTo === "string"
+				? rawObj.lastPluginMigratedTo
+				: undefined,
+	};
+}

@@ -3,16 +3,13 @@ import { DEFAULT_TEMPLATES_FOLDER } from "src/constants";
 import type { IterableCache } from "src/lib/cache";
 import type { CacheManager } from "src/lib/cache/CacheManager";
 import { err, isErr, ok, type Result } from "src/lib/core/result";
-import type { TemplateFailure } from "src/lib/errors";
-import {
-	extractFrontmatter,
-	stripFrontmatter,
-} from "src/lib/frontmatter/frontmatterUtils";
+import type { AppFailure, TemplateFailure } from "src/lib/errors/types";
+import { extractFrontmatter, stripFrontmatter } from "src/lib/noteCore";
 import { isTFile } from "src/lib/obsidian/typeguards";
 import {
 	compile as compileTemplate,
 	validateTemplate as engineValidate,
-} from "src/lib/template/templateCore";
+} from "src/lib/templateCore";
 import type KoreaderImporterPlugin from "src/main";
 import type {
 	KoreaderHighlightImporterSettings,
@@ -38,6 +35,7 @@ export class TemplateManager implements SettingsObserver {
 	private isDarkTheme: boolean = true;
 	private rawTemplateCache: IterableCache<string, string>;
 	private compiledTemplateCache: IterableCache<string, CompiledTemplate>;
+	private filterPipelineCache: IterableCache<string, (s: string) => string>;
 	private readonly updateThemeDebounced: (() => void) & { cancel: () => void };
 	public builtInTemplates: Map<string, TemplateDefinition> = new Map();
 
@@ -45,13 +43,17 @@ export class TemplateManager implements SettingsObserver {
 		public plugin: KoreaderImporterPlugin,
 		private vault: Vault,
 		private cacheManager: CacheManager,
-		private fs: FileSystemService,
+		public fs: FileSystemService,
 		private loggingService: LoggingService,
 	) {
 		this.rawTemplateCache = cacheManager.createLru("template.raw", 10);
 		this.compiledTemplateCache = cacheManager.createLru(
 			"template.compiled",
 			10,
+		);
+		this.filterPipelineCache = cacheManager.createLru(
+			"template.filterPipelines",
+			200,
 		);
 
 		this.log = this.loggingService.scoped("TemplateManager");
@@ -238,7 +240,9 @@ export class TemplateManager implements SettingsObserver {
 		const rawResult = await this.loadTemplateResult();
 		if (isErr(rawResult)) return rawResult;
 
-		const compiledFn = compileTemplate(rawResult.value);
+		const compiledFn = compileTemplate(rawResult.value, {
+			cache: this.filterPipelineCache,
+		});
 		this.compiledTemplateCache.set(cacheKey, compiledFn);
 		return ok(compiledFn);
 	}
@@ -248,50 +252,38 @@ export class TemplateManager implements SettingsObserver {
 	 * Creates the directory and template files if they don't exist.
 	 * @returns Promise that resolves when all templates are in place
 	 */
-	async ensureTemplates(): Promise<void> {
+	async ensureTemplates(): Promise<Result<void, AppFailure>> {
 		const templateDir = normalizePath(
 			this.plugin.settings.template.templateDir || DEFAULT_TEMPLATES_FOLDER,
 		);
 
-		// Ensure the directory exists using Result-based API.
 		const ensured = await this.fs.ensureVaultFolder(templateDir);
 		if (isErr(ensured)) {
-			this.log.error(
-				`Failed to create template directory at ${templateDir}`,
-				(ensured as any).error ?? ensured,
-			);
-			return;
+			return err(ensured.error);
 		}
 
-		// Load built-in templates if they haven't been already.
 		if (this.builtInTemplates.size === 0) {
 			await this.loadBuiltInTemplates();
 		}
 
-		// Now that we are sure the directory exists, we can safely write the files.
 		const writePromises = Array.from(this.builtInTemplates.values()).map(
 			async (template) => {
 				const filePath = normalizePath(`${templateDir}/${template.id}.md`);
-
-				// Check if the file already exists to avoid unnecessary writes.
 				const existsRes = await this.fs.vaultExists(filePath);
-				if (isErr(existsRes) || !existsRes.value) {
-					this.log.info(`Creating built-in template file: ${filePath}`);
-					const fileContent = `---\ndescription: ${template.description}\n---\n\n${template.content}`;
+				if (isErr(existsRes)) return err(existsRes.error);
 
+				if (!existsRes.value) {
+					const fileContent = `---\ndescription: ${template.description}\n---\n\n${template.content}`;
 					const res = await this.fs.writeVaultTextAtomic(filePath, fileContent);
-					if (isErr(res)) {
-						this.log.error(
-							`Failed to write template file ${filePath}`,
-							(res as any).error ?? res,
-						);
-					}
+					if (isErr(res)) return err(res.error);
 				}
+				return ok(undefined);
 			},
 		);
 
-		// Wait for all file writes to complete.
-		await Promise.all(writePromises);
+		const results = await Promise.all(writePromises);
+		const firstError = results.find(isErr);
+		return firstError ? firstError : ok(undefined);
 	}
 
 	/** [private] Purely retrieves built-in template content. */
@@ -314,7 +306,13 @@ export class TemplateManager implements SettingsObserver {
 		if (!isTFile(file)) {
 			return err({ kind: "TemplateNotFound", path: vaultPath });
 		}
-		const content = await this.vault.read(file);
-		return ok(content);
+		const contentRes = await this.fs.readVaultText(file.path);
+		if (isErr(contentRes)) {
+			return err({
+				kind: "TemplateNotFound",
+				path: vaultPath,
+			});
+		}
+		return ok(contentRes.value);
 	}
 }

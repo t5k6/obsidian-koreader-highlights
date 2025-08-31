@@ -105,6 +105,14 @@ export class SuggestionList<T> extends Component {
 		// Scope cleanup happens automatically via Component lifecycle
 	}
 
+	public showEmpty(message: string): void {
+		this.clear();
+		const itemEl = this.config.containerEl.createDiv({
+			cls: "suggestion-item is-disabled",
+		});
+		itemEl.setText(message);
+	}
+
 	private setupEventHandlers(): void {
 		// Keyboard navigation
 		this.scope.register([], "ArrowUp", () => {
@@ -184,8 +192,8 @@ export class SuggestionList<T> extends Component {
 		if (this.config.maxVisibleItems) {
 			const firstItem = this.itemEls[0];
 			if (firstItem) {
-				const itemHeight = firstItem.offsetHeight;
-				const maxHeight = itemHeight * this.config.maxVisibleItems;
+				const h = firstItem.offsetHeight || 24; // fallback line-height
+				const maxHeight = h * this.config.maxVisibleItems;
 				this.config.containerEl.style.maxHeight = `${maxHeight}px`;
 				this.config.containerEl.style.overflowY = "auto";
 			}

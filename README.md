@@ -72,17 +72,8 @@ Customize your notes by creating your own templates in the folder specified in t
 - **Variables**: Use the following variables in your templates.
 
 
-| Variable | Description |
-|:--- |:--- |
-| `{{highlight}}` | The highlighted text, with styling (`<mark>`, `<u>`, etc.) applied. |
-| `{{note}}` | The text of the note associated with the highlight. |
-| `{{notes}}` | An array of all notes in a merged highlight group. |
-| `{{pageno}}` | The page number where the highlight appears. |
-| `{{chapter}}` | The name of the chapter containing the highlight. |
-| `{{date}}` | The date the highlight was made, in a stable `en-US` format (e.g., `Jan 1, 2024`). |
-| `{{localeDate}}` | The date formatted according to your computer's local settings (e.g., `1. Jan. 2024` or `1/1/2024`). |
-| `{{dailyNoteLink}}`| An Obsidian wikilink to the daily note for that date (e.g., `[[2024-01-01]]`). |
-| `{{isFirstInChapter}}`| A boolean (`true`/`false`) you can use for conditional logic, such as printing a chapter heading only once. |
+✍️ Wiki has a comprehensive guide on the templating engine, including all available variables, conditional blocks, and filters.
+[[Learn all about Customizing with Templates|https://github.com/t5k6/obsidian-koreader-highlights/wiki/Customizing-with-Templates]]
 
 
 **Troubleshooting**

@@ -1,4 +1,4 @@
-### **Architecture Document (v1.3.0)**
+### **Architecture Document (v1.4.0)**
 
 ### **1. Mission & Guiding Principles**
 
@@ -21,7 +21,7 @@ To achieve our principles, the plugin is architected around the **"Stateful Shel
     *   **Examples:** `ImportService`, `CommandManager`, `FileSystemService`, `MergeHandler`, `NotePersistenceService`.
 
 *   **The Functional Core:** This is the inner layer, composed of pure, testable functions and data structures. These components take data in and return data out, with no side effects.
-    *   **Responsibilities:** Parsing Lua data (`lib/parsing/luaParser.ts`), transforming annotations into Markdown (`lib/template/templateCore.ts`), generating and merging frontmatter data structures (`lib/content/contentLogic.ts`), validating data, and performing diffs (`lib/merge/mergeCore.ts`).
+    *   **Responsibilities:** Parsing Lua data (`lib/parsing/luaParser.ts`), transforming annotations into Markdown (`lib/template/templateCore.ts`), generating and merging frontmatter data structures (`lib/frontmatter/frontmatterCore.ts`), validating data, and performing diffs (`lib/merge/mergeCore.ts`).
     *   **Example:** A function in the core might take raw annotation data and return a rendered Markdown string, but it will *never* write that string to a file or show a `Notice` itself. That is the Shell's job.
 
 This separation is critical for testability, predictability, and long-term maintainability.
@@ -37,8 +37,8 @@ The `src` directory is organized to reflect the architectural paradigm and separ
     *   `services/import/`: Home of the primary `ImportService` facade, which orchestrates the end-to-end import process.
     *   `services/device/`: A single, unified service for validating and interacting with the user-configured KOReader device filesystem and statistics database.
     *   `services/parsing/`: **Hybrid Services.** These services orchestrate pure logic from `lib/` with stateful operations like file reads. For example, `TemplateManager` uses `FileSystemService` to load templates from the vault but relies on `lib/template/templateCore.ts` for the pure compilation logic.
-*   `lib/`: **The Functional Core's Toolbox.** Contains framework-agnostic, pure utilities. Code in `lib` **must not** depend on any `services`, `ui`, or Obsidian-specific modules.
-    *   `lib/content/`: Pure logic for generating and merging frontmatter.
+*   `lib/`: **The Functional Core's Toolbox.** Contains framework-agnostic, pure utilities. Code in `lib` **must not** depend on any module from `services/`, `ui/`, or the `obsidian` package itself. This is a strict architectural boundary.
+    *   `lib/frontmatter/`: Pure logic for generating, merging, and parsing frontmatter.
     *   `lib/merge/`: Pure 3-way merge and conflict formatting logic.
     *   `lib/pathing.ts`: A canonical module for path normalization, filesystem-safe slug generation, and filename templating.
     *   `lib/strings/`: Pure, general-purpose string manipulation utilities.
@@ -63,6 +63,16 @@ To handle predictable failures robustly, we use a `Result` type across the entir
 
 This approach eliminates `try/catch` blocks for business logic, makes the code self-documenting about its failure modes, and ensures that all user-facing errors are handled consistently and reactively.
 
+### **4.5. Concurrency Strategy: Predictable & Scalable Execution**
+
+The plugin's performance and data safety rely on a streamlined concurrency strategy applied consistently across the codebase.
+
+*   **Serialization for Safety (`KeyedQueue`)**: Operations that mutate a single resource (like a note file or a snapshot) must be serialized to prevent race conditions. We use a `KeyedQueue` to ensure that all asynchronous tasks related to a specific key (e.g., a file path) execute strictly one after another. This is the cornerstone of atomicity in `NotePersistenceService` and `MergeHandler`.
+
+*   **Parallelism for Performance (`runPool`)**: I/O-bound tasks that can run independently (like scanning files for metadata during an index rebuild or analyzing duplicate candidates) are executed in parallel up to an optimal concurrency limit. We use a single, unified, streaming-capable concurrency pool (`runPool`). It processes an iterable of tasks with a fixed concurrency limit and yields `Result` objects as they complete. This is highly efficient, memory-safe, and simplifies the codebase by consolidating multiple concurrency patterns into one robust primitive.
+
+*   **Key Files:** `src/lib/concurrency/` contains all these core, reusable primitives.
+
 ### **5. The "Chain of Trust": A Walkthrough of the Core Data Flow**
 
 The plugin’s data integrity rests on the "Chain of Trust"—a durable, unbreakable link between a KOReader book and its note in Obsidian. The following diagram and user journeys illustrate how the core components interact to maintain this chain.
@@ -82,7 +92,7 @@ sequenceDiagram
     participant Vault
 
     User->>IS: Triggers "Import Highlights"
-    
+
     note over IS: Internally calls pure planImport()
     IS->>IDX: findExistingBookFiles(bookKey)
     IDX-->>IS: Returns Result<path[]>
@@ -93,26 +103,26 @@ sequenceDiagram
     DUP->>NPS: readSnapshotById(uid)
     NPS-->>DUP: Returns Result<'Base' content>
     DUP-->>IS: Returns analysis (matchType='divergent')
-    
+
     note over IS: planImport() returns Plan: { kind: 'MERGE' }
     note over IS: Internally calls pure executeImportPlan()
     IS->>MH: handleDuplicate(match)
-    
+
     note over MH, NPS: MergeHandler performs pre-flight checks
     MH->>NPS: ensureId(file)
     NPS-->>MH: Returns Result<uid>
     MH->>NPS: createBackup(file)
     NPS-->>MH: Returns Result<void>
-    
+
     note over MH, Vault: MergeHandler performs 3-way diff and constructs new content
     MH->>Vault: modify(file, newContent) via FileSystemService
-    
+
     note over MH, NPS: After successful write, the new state becomes the snapshot
     MH->>NPS: createSnapshotFromContent(uid, newContent)
     NPS-->>MH: Returns Result<void>
-    
+
     MH-->>IS: Returns Result<{ status: 'merged' }>
-    
+
     IS->>IDX: recordImportSuccess()
     IS-->>User: Shows Summary Notice
 ```
@@ -126,23 +136,25 @@ sequenceDiagram
     1.  **Identity (`kohl-uid`):** A permanent Unique Identifier is embedded in each note's frontmatter. This ID is the ground truth for a note's identity, decoupling it from its filename or path.
     2.  **History (Snapshots):** After every successful merge/import, a complete copy of the note's content is stored, named after the note's `kohl-uid`. This establishes the "Base" version for the next 3-way merge.
     3.  **Atomicity:** This service ensures that identity and history are linked. Operations like assigning a new UID during collision resolution are performed atomically, first moving the snapshot to its new name before updating the note's frontmatter, guaranteeing the Chain of Trust is never broken.
-*   **Key Files:** `src/services/vault/NotePersistenceService.ts`, `src/services/vault/snapshotCore.ts`, `src/core/uidRules.ts`.
+*   **Key Files:** `src/services/vault/NotePersistenceService.ts`, `src/lib/snapshotCore.ts`, `src/core/uidRules.ts`.
 
 #### **`IndexCoordinator` & The Resilient Index**
 
-*   **Problem:** Scanning the vault for duplicates is prohibitively slow for large vaults. The plugin also needs a way to quickly determine if a source file has changed since the last import.
-*   **Solution:** A persistent SQLite database (`index.db`) that serves as a high-performance index. Critically, if the SQLite file cannot be written, the service **gracefully falls back to a temporary in-memory database** and starts a background task to populate it for the current session.
+*   **Problem:** Scanning the entire vault for duplicates is prohibitively slow for large vaults. The plugin also needs a way to quickly determine if a source file has changed since the last import to avoid redundant work.
+*   **Solution:** A persistent SQLite database (`index.db`) serves as a high-performance index. The architecture for this is split into two primary components for clarity:
+    1.  **`IndexDatabase` (The State Machine):** This class manages the *physical state* of the database. It handles loading the persistent file, and critically, **gracefully falls back to a temporary in-memory database** if the file is corrupt or unwritable. It also orchestrates the non-blocking background rebuild of the in-memory index using the `ParallelIndexProcessor`.
+    2.  **`IndexCoordinator` (The Orchestrator):** This service acts as the public API for the index. It listens to vault events (renames, deletes) to keep the index synchronized, provides query methods (e.g., `findExistingBookFiles`), and exposes the overall state (`isReady`, `isRebuilding`). It uses `IndexDatabase` to perform the actual database operations.
+*   This separation ensures that the complex logic of state management and background processing is encapsulated, while the `IndexCoordinator` provides a clean, stable interface for the rest of the application.
 *   **Key Files:** `src/services/vault/index/IndexCoordinator.ts`, `src/services/vault/index/IndexDatabase.ts`, `src/services/vault/ParallelIndexProcessor.ts`, `src/services/SqlJsManager.ts`.
 
 #### **`ImportService`: The Import Facade**
 
 *   **Problem:** The import logic is complex, involving I/O, parsing, duplicate checking, and user interaction. Mixing these concerns into one monolithic function would be unmaintainable.
 *   **Solution:** A single service facade that strictly separates decision-making from action, following the Shell/Core paradigm.
-    *   **Planning (Functional Core Logic):** The `planImport` function (`src/services/import/logic.ts`) receives a source file path, performs all checks, and outputs a simple, declarative `ImportPlan` (e.g., `CREATE`, `MERGE`). **It never modifies the vault.**
-    *   **Execution (Functional Core Logic):** The `executeImportPlan` function receives the `ImportPlan` and a set of I/O dependencies, and orchestrates the required side effects by delegating to other "Shell" services (`MergeHandler`, `FileSystemService`).
+    *   **Planning & Execution (Functional Core Logic):** The pure `planImport` and `executeImportPlan` functions (located in `src/services/import/importPlanner.ts`) receive all necessary context and dependencies, and output either a declarative `ImportPlan` or the result of an execution. **They never modify the vault directly.**
     *   **Orchestration (Stateful Shell):** The `ImportService` acts as the single entry point. It constructs the necessary dependencies, invokes the pure `planImport` and `executeImportPlan` functions, manages parallel execution for batch imports, and handles all progress UI and user interaction.
 *   **Key Files:**
-    *   `src/services/import/logic.ts`: The pure planning and execution logic (Functional Core).
+    *   `src/services/import/importPlanner.ts`: The pure planning and execution logic (Functional Core).
     *   `src/services/import/ImportService.ts`: The stateful facade that orchestrates the entire process (Stateful Shell).
 
 ### **7. Cache Subsystem**

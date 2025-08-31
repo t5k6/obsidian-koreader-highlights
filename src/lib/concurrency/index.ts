@@ -1,10 +1,9 @@
 export { ConcurrentDatabase } from "./ConcurrentDatabase";
 export * from "./cancellation";
 export * from "./concurrency";
-export * from "./pool";
+export { getOptimalConcurrency } from "./concurrency";
 export {
 	FS_RETRY_DEFAULTS,
-	getFsCode,
 	isTransientFsError,
 	type RetryOptions,
 	readWithRetry,
@@ -14,4 +13,5 @@ export {
 	withFsRetry,
 	writeBinaryWithRetry,
 } from "./retry";
+export { runPool } from "./runPool";
 export * from "./withTimeout";

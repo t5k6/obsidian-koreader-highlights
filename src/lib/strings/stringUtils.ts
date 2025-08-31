@@ -37,19 +37,22 @@ export function escapeHtml(s: string): string {
  * @returns The string with HTML tags removed
  */
 export function stripHtml(s: string): string {
-	const decoded = s.replace(
-		/&(?:amp|lt|gt|quot|#39);/g,
-		(m) =>
-			(
-				({
-					"&amp;": "&",
-					"&lt;": "<",
-					"&gt;": ">",
-					"&quot;": '"',
-					"&#39;": "'",
-				}) as const
-			)[m]!,
-	);
+	const decoded = s.replace(/&(?:amp|lt|gt|quot|#39);/g, (match) => {
+		switch (match) {
+			case "&amp;":
+				return "&";
+			case "&lt;":
+				return "<";
+			case "&gt;":
+				return ">";
+			case "&quot;":
+				return '"';
+			case "&#39;":
+				return "'";
+			default:
+				return match;
+		}
+	});
 	return decoded.replace(/<[^>]*>/g, "");
 }
 
@@ -88,4 +91,38 @@ export function splitAndTrim(s: string, separator: string | RegExp): string[] {
 		.split(separator)
 		.map((x) => x.trim())
 		.filter(Boolean);
+}
+
+/**
+ * A robust replacement for JSON.stringify that handles circular references,
+ * BigInts, and other edge cases without throwing.
+ * @param obj The object to stringify.
+ * @param space Indentation for pretty-printing.
+ * @returns A JSON string representation of the object.
+ */
+export function safeStringify(
+	obj: unknown,
+	space: number | string = 2,
+): string {
+	const seen = new WeakSet();
+	const replacer = (key: string, value: unknown) => {
+		if (typeof value === "object" && value !== null) {
+			if (seen.has(value)) {
+				return "[Circular Reference]";
+			}
+			seen.add(value);
+		}
+
+		if (typeof value === "bigint") {
+			return `${value.toString()}n`;
+		}
+
+		return value;
+	};
+
+	try {
+		return JSON.stringify(obj, replacer, space);
+	} catch (e) {
+		return `[Unserializable Object: ${e instanceof Error ? e.message : String(e)}]`;
+	}
 }

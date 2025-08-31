@@ -4,7 +4,7 @@ import { SQLITE_WASM } from "src/binaries/sql-wasm-base64";
 import { INDEX_DB_VERSION } from "src/constants";
 import { asyncLazy } from "src/lib/concurrency";
 import { err, isErr, ok, type Result } from "src/lib/core/result";
-import type { AppFailure } from "src/lib/errors";
+import type { AppFailure } from "src/lib/errors/types";
 import type { Disposable } from "src/types";
 import type { FileSystemService } from "./FileSystemService";
 import type { LoggingService } from "./LoggingService";
@@ -36,11 +36,7 @@ export class SqlJsManager implements Disposable {
 
 	private createSqlJsInstance = async (): Promise<SqlJsStatic> => {
 		this.log.info("Initializing sql.js WASM...");
-		const nodeBuffer = Buffer.from(SQLITE_WASM, "base64");
-		const wasmBinary = nodeBuffer.buffer.slice(
-			nodeBuffer.byteOffset,
-			nodeBuffer.byteOffset + nodeBuffer.byteLength,
-		);
+		const wasmBinary = Buffer.from(SQLITE_WASM, "base64").buffer;
 		const sql = await initSqlJs({ wasmBinary });
 		this.log.info("sql.js WASM initialized.");
 		return sql;
@@ -130,7 +126,7 @@ export class SqlJsManager implements Disposable {
 				}
 			}
 
-			if (options.validate && bytes) {
+			if (options.validate) {
 				try {
 					const res = db.exec("PRAGMA quick_check;");
 					const ok = res?.[0]?.values?.[0]?.[0];

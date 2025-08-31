@@ -1,11 +1,16 @@
 import type { Expression } from "luaparse";
 import type { TFile } from "obsidian";
+import type { ExecResult } from "src/services/import/types";
+import type { AppResult } from "./lib/errors/types";
 
 // --- Lua Parser Related ---
-export type LuaValue = Extract<
-	Expression,
-	string | number | boolean | Record<string, unknown> | null | undefined
->;
+export type LuaValue =
+	| string
+	| number
+	| boolean
+	| Record<string, any>
+	| null
+	| undefined;
 
 // --- Core Data Structures ---
 
@@ -77,6 +82,12 @@ export interface PageStatData {
 	start_time: number;
 	duration: number;
 	total_pages: number;
+}
+
+export interface BookStatisticsBundle {
+	book: BookStatistics;
+	readingSessions: PageStatData[];
+	derived: ReadingProgress;
 }
 
 // --- Combined Metadata Structure (Input for processing) ---
@@ -214,7 +225,7 @@ export interface DuplicateHandlingSession {
 	choice: DuplicateChoice | null;
 }
 
-export type StaleLocationChoice = "merge-stale" | "skip-stale";
+export type StaleLocationChoice = "merge-stale" | "create-new" | "skip-stale";
 
 export interface StaleLocationSession {
 	applyToAll: boolean;
@@ -281,21 +292,26 @@ export interface Summary {
 	errors: number;
 }
 
-export const blankSummary = (): Summary => ({
-	created: 0,
-	merged: 0,
-	automerged: 0,
-	skipped: 0,
-	errors: 0,
-});
-
-export const addSummary = (a: Summary, b: Summary): Summary => ({
-	created: a.created + b.created,
-	merged: a.merged + b.merged,
-	automerged: a.automerged + b.automerged,
-	skipped: a.skipped + b.skipped,
-	errors: a.errors + b.errors,
-});
+export const Summary = {
+	empty: (): Summary => ({
+		created: 0,
+		merged: 0,
+		automerged: 0,
+		skipped: 0,
+		errors: 0,
+	}),
+	add: (a: Summary, b: Partial<Summary>): Summary => ({
+		created: a.created + (b.created ?? 0),
+		merged: a.merged + (b.merged ?? 0),
+		automerged: a.automerged + (b.automerged ?? 0),
+		skipped: a.skipped + (b.skipped ?? 0),
+		errors: a.errors + (b.errors ?? 0),
+	}),
+	addResult: (acc: Summary, res: ExecResult): Summary =>
+		Summary.add(acc, { [res.status]: 1 }),
+	summarize: (results: ExecResult[]): Summary =>
+		results.reduce(Summary.addResult, Summary.empty()),
+};
 
 /**
  * A generic interface for a key-value cache.
@@ -312,7 +328,7 @@ export interface Cache<K, V> {
 /**
  * A function signature for an asynchronous data loader, used with memoization.
  */
-export type AsyncLoader<K, V> = (key: K) => Promise<V>;
+export type AsyncLoader<K, V> = (key: K) => Promise<AppResult<V>>;
 
 export interface Disposable {
 	dispose(): void | Promise<void>;
@@ -367,3 +383,32 @@ export interface PluginData {
 }
 
 export const CURRENT_SCHEMA_VERSION = 1;
+
+export type NoteDoc = {
+	frontmatter: Record<string, unknown>;
+	body: string;
+};
+
+export type NoteUpdater = (
+	doc: NoteDoc,
+) => NoteDoc | null | undefined | Promise<NoteDoc | null | undefined>;
+
+export type EditContext = {
+	file: TFile;
+	newContent: string;
+	currentDoc: NoteDoc;
+	nextDoc: NoteDoc;
+};
+
+export type EditFileResult = {
+	changed: boolean;
+	file: TFile;
+};
+
+export type EditFileOptions = {
+	skipIfNoChange?: boolean;
+	detectConcurrentModification?: boolean;
+	beforeWrite?: (ctx: EditContext) => Promise<AppResult<void>>;
+	afterWrite?: (ctx: EditContext) => Promise<void>;
+	signal?: AbortSignal;
+};

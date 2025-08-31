@@ -1,4 +1,5 @@
 import type { Vault } from "obsidian";
+import { getFsCode } from "src/lib/errors/mapper";
 import { abortError, sleep } from "./cancellation";
 
 export type Jitter = "none" | "full";
@@ -29,22 +30,6 @@ export interface RetryOptions {
 // Filesystem-focused retry helpers (consolidated from fsRetry.ts)
 // ------------------------------------------------------------------------------------
 
-// Try to extract a recognizable error code from FileSystemError,
-// NodeJS.ErrnoException, or message fallbacks.
-export function getFsCode(e: unknown): string | undefined {
-	const maybe: any = e;
-	if (typeof maybe?.code === "string") return maybe.code;
-
-	const msg: string | undefined =
-		typeof maybe?.message === "string" ? maybe.message : undefined;
-	if (msg) {
-		// Pull out E* codes seen in Node/electron adapters if present.
-		const m = msg.match(/\b(E[A-Z0-9]{2,})\b/);
-		if (m) return m[1];
-	}
-	return undefined;
-}
-
 /**
  * Broadly classify transient FS errors for retry.
  * - EPERM/EACCES are often transient on Windows when files are locked by AV/editors.
@@ -70,7 +55,7 @@ const TRANSIENT = new Set([
 
 export function isTransientFsError(e: unknown): boolean {
 	const code = getFsCode(e);
-	if (!code) return true; // Unknown error shape: prefer retry conservatively
+	if (!code) return true;
 	return TRANSIENT.has(code);
 }
 
@@ -185,7 +170,6 @@ export async function retry<T>(
 	if (factor < 1) throw new Error("factor must be >= 1");
 
 	let attempt = 0;
-	// eslint-disable-next-line no-constant-condition
 	while (true) {
 		if (signal?.aborted) throw signal.reason ?? abortError();
 		try {

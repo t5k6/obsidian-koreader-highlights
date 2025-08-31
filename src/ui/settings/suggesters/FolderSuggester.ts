@@ -1,5 +1,4 @@
 import { prepareFuzzySearch, type TFolder } from "obsidian";
-import { isTFolder } from "src/lib/obsidian/typeguards";
 import { TextInputSuggest } from "./suggest";
 
 interface ScoredFolder {
@@ -11,16 +10,12 @@ interface ScoredFolder {
 export class FolderSuggest extends TextInputSuggest<ScoredFolder> {
 	getSuggestions(inputStr: string): ScoredFolder[] {
 		const query = (inputStr ?? "").trim();
-
-		// Single pass: collect folders once
-		const folders: TFolder[] = [];
-		for (const f of this.app.vault.getAllLoadedFiles()) {
-			if (isTFolder(f)) folders.push(f);
-		}
+		const folders: TFolder[] = this.app.vault.getAllFolders();
 
 		if (query.length === 0) {
+			// Suggest top-level folders for an empty query.
 			return folders
-				.filter((f) => !f.path.includes("/"))
+				.filter((f) => f.parent?.isRoot()) // Correctly identify root folders
 				.slice(0, 10)
 				.map((folder) => ({ folder, score: 0 }));
 		}
@@ -38,7 +33,6 @@ export class FolderSuggest extends TextInputSuggest<ScoredFolder> {
 			}
 		}
 
-		// Prefer higher score, then shorter path
 		results.sort((a, b) =>
 			b.score !== a.score
 				? b.score - a.score

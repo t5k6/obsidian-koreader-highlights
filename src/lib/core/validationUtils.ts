@@ -1,7 +1,3 @@
-export function ensureString(value: unknown, defaultValue: string): string {
-	return typeof value === "string" ? value : defaultValue;
-}
-
 export function ensureBoolean(value: unknown, defaultValue: boolean): boolean {
 	return typeof value === "boolean" ? value : defaultValue;
 }
@@ -19,19 +15,6 @@ export function ensureNumberInRange(
 ): number {
 	const num = ensureNumber(value, defaultValue);
 	return range.includes(num) ? num : defaultValue;
-}
-
-export function ensureStringArray(
-	value: unknown,
-	defaultValue: readonly string[],
-): string[] {
-	if (
-		Array.isArray(value) &&
-		value.every((item): item is string => typeof item === "string")
-	) {
-		return value.map((s) => s.trim()).filter((s) => s.length > 0);
-	}
-	return [...defaultValue];
 }
 
 /**
@@ -70,4 +53,39 @@ export function isHms(s: unknown): boolean {
  */
 export function isPercent(s: unknown): boolean {
 	return typeof s === "string" && /^\s*\d+(\.\d+)?%\s*$/.test(s);
+}
+
+export const Validators = {
+	isString: (v: unknown): v is string => typeof v === "string",
+	isNumber: (v: unknown): v is number =>
+		typeof v === "number" && !Number.isNaN(v),
+	isBoolean: (v: unknown): v is boolean => typeof v === "boolean",
+	isArray: <T>(
+		v: unknown,
+		itemValidator?: (item: unknown) => item is T,
+	): v is T[] => Array.isArray(v) && (!itemValidator || v.every(itemValidator)),
+	isRecord: (v: unknown): v is Record<string, unknown> =>
+		!!v && typeof v === "object" && !Array.isArray(v),
+	isNonEmptyString: (v: unknown): v is string =>
+		typeof v === "string" && v.trim().length > 0,
+	isPositiveNumber: (v: unknown): v is number =>
+		typeof v === "number" && !Number.isNaN(v) && v > 0,
+	isNonEmptyArray: <T>(
+		v: unknown,
+		itemValidator?: (item: unknown) => item is T,
+	): v is T[] =>
+		Array.isArray(v) &&
+		v.length > 0 &&
+		(!itemValidator || v.every(itemValidator)),
+} as const;
+
+export function validateAndExtract<T>(
+	obj: unknown,
+	key: string,
+	validator: (v: unknown) => v is T,
+	fallback: T,
+): T {
+	if (!Validators.isRecord(obj)) return fallback;
+	const value = obj[key];
+	return validator(value) ? value : fallback;
 }

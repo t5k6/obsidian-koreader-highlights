@@ -21,7 +21,12 @@ export abstract class TextInputSuggest<T> extends Component {
 	private suggestionList: SuggestionList<T>;
 	private isScopeActive = false;
 
-	constructor(app: App, inputEl: HTMLInputElement | HTMLTextAreaElement) {
+	constructor(
+		app: App,
+		inputEl: HTMLInputElement | HTMLTextAreaElement,
+		// Step 2.1: Accept an options object for configuration
+		opts?: { maxVisibleItems?: number },
+	) {
 		super();
 		this.app = app;
 		this.inputEl = inputEl;
@@ -37,15 +42,13 @@ export abstract class TextInputSuggest<T> extends Component {
 				this.selectSuggestion(item);
 				this.close();
 			},
-			maxVisibleItems: 10,
+			// Pass the configured value, with a sensible default
+			maxVisibleItems: opts?.maxVisibleItems ?? 10,
 		});
 
-		// Ensure child lifecycle cleanup
 		this.addChild(this.suggestionList);
-
 		this.scope.register([], "Escape", this.close.bind(this));
 
-		// Automatic event registration
 		this.registerDomEvent(
 			this.inputEl,
 			"input",
@@ -58,7 +61,6 @@ export abstract class TextInputSuggest<T> extends Component {
 		);
 		this.registerDomEvent(this.inputEl, "blur", this.close.bind(this));
 		this.registerDomEvent(this.suggestEl, "mousedown", (event: MouseEvent) => {
-			// Prevent input blur when clicking suggestions
 			event.preventDefault();
 		});
 	}
@@ -70,14 +72,24 @@ export abstract class TextInputSuggest<T> extends Component {
 	private onInputChanged(): void {
 		const inputStr = this.inputEl.value ?? "";
 		const suggestions = this.getSuggestions(inputStr);
+
+		// Step 2.2: Handle empty results gracefully
 		if (!suggestions || suggestions.length === 0) {
-			this.close();
+			// If the input is not empty, show "No matches". If empty, just close.
+			if (inputStr) {
+				this.open(this.app.workspace.containerEl, this.inputEl);
+				this.suggestionList.showEmpty("No matches found");
+			} else {
+				this.close();
+			}
 			return;
 		}
+
 		this.suggestionList.setItems(suggestions);
 		this.open(this.app.workspace.containerEl, this.inputEl);
 	}
 
+	// open() and close() methods remain unchanged
 	private open(container: HTMLElement, inputEl: HTMLElement): void {
 		if (!this.isScopeActive) {
 			this.app.keymap.pushScope(this.scope);
@@ -86,19 +98,12 @@ export abstract class TextInputSuggest<T> extends Component {
 
 		container.appendChild(this.suggestEl);
 
-		// Position the suggestion dropdown using floating-ui
 		const placement: Placement = "bottom-start";
 		const middleware: Middleware[] = [
 			flip(),
 			shift({ padding: 4 }),
 			size({
-				apply({
-					rects,
-					elements,
-				}: {
-					rects: { reference: { width: number } };
-					elements: { floating: HTMLElement };
-				}) {
+				apply({ rects, elements }) {
 					elements.floating.style.width = `${rects.reference.width}px`;
 				},
 			}),
@@ -141,7 +146,6 @@ export abstract class TextInputSuggest<T> extends Component {
 		this.suggestEl.detach();
 	}
 
-	// Abstract API for consumers
 	protected abstract getSuggestions(inputStr: string): T[];
 	protected abstract renderItem(item: T, el: HTMLElement): void;
 	protected abstract selectSuggestion(item: T): void;

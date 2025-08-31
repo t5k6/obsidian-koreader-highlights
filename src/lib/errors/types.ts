@@ -1,5 +1,38 @@
 import type { Result } from "src/lib/core/result";
 
+export enum FileSystemErrorCode {
+	NotFound = "ENOENT",
+	AccessDenied = "EACCES",
+	Permission = "EPERM",
+	IsDirectory = "EISDIR",
+	NotDirectory = "ENOTDIR",
+	AlreadyExists = "EEXIST",
+	Unknown = "UNKNOWN",
+}
+
+export class FileSystemError extends Error {
+	constructor(
+		public readonly operation: string,
+		public readonly path: string,
+		public readonly code: FileSystemErrorCode,
+		message?: string,
+	) {
+		super(message || `${operation} failed on ${path}: ${code}`);
+		this.name = "FileSystemError";
+		Object.setPrototypeOf(this, new.target.prototype);
+	}
+
+	get isNotFound(): boolean {
+		return this.code === FileSystemErrorCode.NotFound;
+	}
+	get isPermissionDenied(): boolean {
+		return (
+			this.code === FileSystemErrorCode.AccessDenied ||
+			this.code === FileSystemErrorCode.Permission
+		);
+	}
+}
+
 // Structured error objects for expected failures handled via Result<T, E>
 
 export type FileSystemFailure =
@@ -7,6 +40,8 @@ export type FileSystemFailure =
 	| { kind: "PermissionDenied"; path: string }
 	| { kind: "NotADirectory"; path: string }
 	| { kind: "IsADirectory"; path: string }
+	| { kind: "AlreadyExists"; path: string }
+	| { kind: "NameTooLong"; path: string }
 	| { kind: "WriteFailed"; path: string; cause: unknown }
 	| { kind: "ReadFailed"; path: string; cause: unknown };
 
@@ -29,7 +64,8 @@ export type MergeFailure =
 export type DatabaseFailure =
 	| { kind: "DbOpenFailed"; path: string; cause: unknown }
 	| { kind: "DbValidateFailed"; path: string; cause: unknown }
-	| { kind: "DbPersistFailed"; path: string; cause: unknown };
+	| { kind: "DbPersistFailed"; path: string; cause: unknown }
+	| { kind: "DbOperationFailed"; operation: string; cause: unknown };
 
 export type CapabilityFailure = {
 	kind: "CAPABILITY_DENIED";
@@ -47,13 +83,15 @@ export type ConfigFailure =
 
 // Snapshot errors now live at lib level to avoid domain coupling
 export type SnapshotError =
+	| { kind: "NOT_FOUND"; message: string }
+	| { kind: "READ_FAILED"; message: string; cause?: unknown }
+	| { kind: "WRITE_FAILED"; message: string; cause?: unknown }
+	| { kind: "INTEGRITY_FAILED"; message: string; cause?: unknown }
 	| { kind: "CAPABILITY_UNAVAILABLE"; message: string }
 	| { kind: "TARGET_FILE_MISSING"; message: string }
 	| { kind: "SNAPSHOT_MISSING"; message: string }
 	| { kind: "WRITE_FORBIDDEN"; message: string; cause?: unknown }
 	| { kind: "READ_FORBIDDEN"; message: string; cause?: unknown }
-	| { kind: "WRITE_FAILED"; message: string; cause?: unknown }
-	| { kind: "READ_FAILED"; message: string; cause?: unknown }
 	| { kind: "UID_MISSING"; message: string }
 	| { kind: "UID_MISMATCH"; message: string }
 	| { kind: "MIGRATION_FAILED"; message: string; cause?: unknown };
@@ -122,6 +160,10 @@ export function formatAppFailure(err: AppFailure): string {
 			return `Not a directory: ${err.path}`;
 		case "IsADirectory":
 			return `Expected a file but found a directory: ${err.path}`;
+		case "AlreadyExists":
+			return `File already exists: ${err.path}`;
+		case "NameTooLong":
+			return `Filename too long: ${err.path}`;
 		case "WriteFailed":
 			return `Write failed at ${err.path}`;
 		case "ReadFailed":
@@ -150,6 +192,8 @@ export function formatAppFailure(err: AppFailure): string {
 			return `Failed to validate database at ${err.path}`;
 		case "DbPersistFailed":
 			return `Failed to persist database at ${err.path}`;
+		case "DbOperationFailed":
+			return `Database operation '${err.operation}' failed`;
 		case "CAPABILITY_DENIED":
 			return err.message ?? `Capability denied: ${err.capability}`;
 		case "MetadataContentMissing":
@@ -157,14 +201,17 @@ export function formatAppFailure(err: AppFailure): string {
 		case "ConfigMissing":
 			return `Missing required setting: ${err.field}`;
 		case "ConfigInvalid":
-			return `Invalid setting ${err.field}${err.reason ? `: ${err.reason}` : ""}`;
+			return err.reason ?? `Invalid setting: ${err.field}`;
+		case "NOT_FOUND":
+		case "READ_FAILED":
+		case "WRITE_FAILED":
+		case "INTEGRITY_FAILED":
+			return "Operation failed";
 		case "CAPABILITY_UNAVAILABLE":
 		case "TARGET_FILE_MISSING":
 		case "SNAPSHOT_MISSING":
 		case "WRITE_FORBIDDEN":
 		case "READ_FORBIDDEN":
-		case "WRITE_FAILED":
-		case "READ_FAILED":
 		case "UID_MISSING":
 		case "UID_MISMATCH":
 		case "MIGRATION_FAILED":
@@ -176,7 +223,6 @@ export function formatAppFailure(err: AppFailure): string {
 			return `Template "${err.id}" is invalid: ${errorDetails}`;
 		}
 		default: {
-			const _exhaustive: never = err;
 			return "Operation failed";
 		}
 	}
@@ -192,6 +238,9 @@ export function formatError(error: unknown): string {
 	}
 	if (typeof error === "string") {
 		return error;
+	}
+	if (error === undefined) {
+		return "An unexpected and un-serializable error occurred.";
 	}
 	try {
 		return `An unexpected error occurred: ${JSON.stringify(error)}`;

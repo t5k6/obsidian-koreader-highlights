@@ -22,10 +22,11 @@ export interface BaseModalConfig {
 	enableEnter?: boolean; // Default: false (modal-specific)
 	focusOnOpen?: boolean; // Default: true
 	preventMultipleResolve?: boolean; // Default: true
+	render?: (contentEl: HTMLElement) => void; // Optional renderer function
 }
 
 /**
- * Abstract base class for all promise-based modals.
+ * Base class for all promise-based modals.
  * Provides:
  * - Promise-based open pattern
  * - ARIA attributes
@@ -34,7 +35,7 @@ export interface BaseModalConfig {
  * - Focus management
  * - Cleanup handling
  */
-export abstract class BaseModal<T = void> extends Modal {
+export class BaseModal<T = void> extends Modal {
 	protected config: Required<BaseModalConfig>;
 	protected result: ModalResult<T> = null;
 
@@ -47,10 +48,12 @@ export abstract class BaseModal<T = void> extends Modal {
 	// in real Obsidian.
 	private _isOpen = false;
 
+	private focusTrapHandler: (event: KeyboardEvent) => void;
+
 	constructor(app: App, config: Partial<BaseModalConfig> = {}) {
 		super(app);
 
-		// Merge with defaults
+		// Merge with defaults, preserving optional render function
 		this.config = {
 			title: "",
 			className: "",
@@ -60,7 +63,8 @@ export abstract class BaseModal<T = void> extends Modal {
 			focusOnOpen: true,
 			preventMultipleResolve: true,
 			...config,
-		};
+		} as Required<BaseModalConfig>;
+		this.focusTrapHandler = this.handleFocusTrap.bind(this);
 	}
 
 	/**
@@ -86,8 +90,8 @@ export abstract class BaseModal<T = void> extends Modal {
 			this._isOpen = true;
 			try {
 				this.onOpen();
-			} catch {
-				// defensive: avoid breaking tests/environments lacking full DOM
+			} catch (error) {
+				console.error("Error during modal onOpen:", error);
 			}
 		}
 	}
@@ -113,8 +117,14 @@ export abstract class BaseModal<T = void> extends Modal {
 			titleEl.setText(this.config.title);
 		}
 
-		// Render the actual content (implemented by subclasses)
-		this.renderContent(contentEl);
+		this.containerEl.addEventListener("keydown", this.focusTrapHandler);
+
+		// Render the actual content
+		if (this.config.render) {
+			this.config.render(contentEl);
+		} else {
+			this.renderContent(contentEl);
+		}
 
 		// Register shortcuts after content is rendered
 		this.registerShortcuts();
@@ -148,6 +158,8 @@ export abstract class BaseModal<T = void> extends Modal {
 		// Ensure promise resolves (with current result or null)
 		this.resolveIfNeeded(this.result);
 
+		this.containerEl.removeEventListener("keydown", this.focusTrapHandler);
+
 		// Allow subclasses to do additional cleanup
 		this.onCleanup();
 	}
@@ -160,17 +172,21 @@ export abstract class BaseModal<T = void> extends Modal {
 			this._isOpen = false;
 			try {
 				this.onClose();
-			} catch {
-				// defensive in tests
+			} catch (error) {
+				console.error("Error during modal onClose:", error);
 			}
 		}
 		super.close();
 	}
 
 	/**
-	 * Abstract method that subclasses must implement to render their content.
+	 * Default render method that subclasses can override to render their content.
+	 * When using the render config option, this method is not called.
 	 */
-	protected abstract renderContent(contentEl: HTMLElement): void;
+	protected renderContent(contentEl: HTMLElement): void {
+		// Default implementation does nothing
+		// Subclasses should override this method or use the render config option
+	}
 
 	/**
 	 * Optional cleanup hook for subclasses.
@@ -183,7 +199,7 @@ export abstract class BaseModal<T = void> extends Modal {
 	 * Resolves the modal with a result and closes it.
 	 * This is the primary way modals should complete.
 	 */
-	protected resolveAndClose(result: T): void {
+	public resolveAndClose(result: T): void {
 		this.result = result;
 		this.close();
 	}
@@ -191,7 +207,7 @@ export abstract class BaseModal<T = void> extends Modal {
 	/**
 	 * Cancels the modal (resolves with null) and closes it.
 	 */
-	protected cancel(): void {
+	public cancel(): void {
 		this.result = null;
 		this.close();
 	}
@@ -243,10 +259,17 @@ export abstract class BaseModal<T = void> extends Modal {
 	 * Default Enter handler. Subclasses should override if enableEnter is true.
 	 */
 	protected handleEnter(): void {
-		// Override in subclasses
+		// Auto-fire the primary call-to-action if one exists.
+		const primaryButton = this.contentEl.querySelector<HTMLButtonElement>(
+			".cta:not([disabled])",
+		);
+		if (primaryButton) {
+			primaryButton.click();
+			return;
+		}
+		// Fallback to cancel if no CTA is found, maintaining safe default behavior.
 		this.cancel();
 	}
-
 	/**
 	 * Unregister all shortcuts (called automatically on close).
 	 */
@@ -327,11 +350,12 @@ export abstract class BaseModal<T = void> extends Modal {
 	 * Create a standardized button row inside a modal.
 	 * Callers supply pure button specs; this method handles DOM and styling.
 	 */
-	protected createButtonRow(
+	public createButtonRow(
 		parentEl: HTMLElement,
 		buttons: Array<{
 			text: string;
 			onClick: () => void;
+			icon?: string;
 			cta?: boolean;
 			warning?: boolean;
 			disabled?: boolean;
@@ -343,10 +367,59 @@ export abstract class BaseModal<T = void> extends Modal {
 			const btn = new ButtonComponent(container)
 				.setButtonText(spec.text)
 				.onClick(spec.onClick);
+
+			if (spec.icon) {
+				btn.setIcon(spec.icon);
+				btn.buttonEl.addClass("mod-both");
+			}
 			if (spec.cta) btn.setCta();
 			if (spec.warning) btn.setWarning();
 			if (spec.disabled) btn.setDisabled(true);
 			if (spec.tooltip) btn.setTooltip(spec.tooltip);
 		});
+	}
+
+	/**
+	 * Finds all focusable elements within the modal's content.
+	 */
+	private getFocusableElements(): HTMLElement[] {
+		return Array.from(
+			this.contentEl.querySelectorAll<HTMLElement>(
+				'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="0"])',
+			),
+		);
+	}
+
+	/**
+	 * Handles keyboard events to trap focus within the modal.
+	 */
+	private handleFocusTrap(event: KeyboardEvent): void {
+		if (event.key !== "Tab") return;
+
+		const focusableElements = this.getFocusableElements();
+		if (focusableElements.length === 0) {
+			event.preventDefault();
+			return;
+		}
+
+		const firstElement = focusableElements[0];
+		const lastElement = focusableElements[focusableElements.length - 1];
+		const activeElement =
+			this.app.workspace.activeLeaf?.view.containerEl.doc.activeElement ??
+			document.activeElement;
+
+		if (event.shiftKey) {
+			// Tabbing backwards
+			if (activeElement === firstElement) {
+				lastElement.focus();
+				event.preventDefault();
+			}
+		} else {
+			// Tabbing forwards
+			if (activeElement === lastElement) {
+				firstElement.focus();
+				event.preventDefault();
+			}
+		}
 	}
 }

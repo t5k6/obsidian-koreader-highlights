@@ -1,6 +1,7 @@
-import { debounce, normalizePath } from "obsidian";
+import { debounce } from "obsidian";
 import { isErr } from "src/lib/core/result";
 import { formatDateForDailyNote } from "src/lib/formatting/dateUtils";
+import { Pathing } from "src/lib/pathing";
 import type { FileSystemService } from "./FileSystemService";
 
 const datestamp = () => formatDateForDailyNote();
@@ -80,7 +81,7 @@ export class AsyncFileSink {
 		if (this.curDate === today && this.curFilePath) return;
 
 		this.curDate = today;
-		this.curFilePath = normalizePath(`${this.dir}/log_${today}.md`);
+		this.curFilePath = Pathing.toVaultPath(`${this.dir}/log_${today}.md`);
 
 		// Idempotent file ensure with a simple header (if creating)
 		const existsRes = await this.fs.vaultExists(this.curFilePath);
@@ -104,7 +105,9 @@ export class AsyncFileSink {
 
 		// Only keep markdown files matching our naming pattern; sort by filename (YYYY-MM-DD)
 		const files = listed.value.files
-			.filter((p) => /\/log_\d{4}-\d{2}-\d{2}\.md$/.test(normalizePath(p)))
+			.filter((p) =>
+				/\/log_\d{4}-\d{2}-\d{2}\.md$/.test(Pathing.toVaultPath(p)),
+			)
 			.sort((a, b) => a.localeCompare(b));
 
 		while (files.length > this.retentionFiles) {

@@ -1,4 +1,5 @@
 import { DEFAULT_HIGHLIGHTS_FOLDER } from "src/constants";
+import { DeviceService } from "src/services/device/DeviceService";
 import { renderSettingsSection } from "../SettingsKit";
 import { SettingsSection } from "../SettingsSection";
 
@@ -16,6 +17,51 @@ export class CoreSettingsSection extends SettingsSection {
 					get: () => this.plugin.settings.koreaderScanPath,
 					set: (v) => {
 						this.plugin.settings.koreaderScanPath = v;
+					},
+					// Add live validation feedback
+					afterRender: (setting) => {
+						const feedbackEl = setting.descEl.createDiv({
+							cls: "koreader-setting-validation",
+						});
+						const inputEl = setting.controlEl.querySelector("input");
+
+						const validate = async (path: string) => {
+							if (!path) {
+								feedbackEl.setText("");
+								return;
+							}
+
+							feedbackEl.setText("Checking path…");
+							// Access DeviceService through the plugin's DI container
+							const deviceService = (this.plugin as any).diContainer?.resolve(
+								DeviceService,
+							);
+							if (!deviceService) {
+								feedbackEl.setText("❌ Unable to validate path.");
+								feedbackEl.style.color = "var(--text-error)";
+								return;
+							}
+							const result = await deviceService.validateScanPath(path);
+
+							if (result.valid) {
+								const statsMsg = result.statsDbPath ? "Stats DB found. " : "";
+								const sdrMsg = result.hasSdrFolders
+									? ".sdr folders found."
+									: "";
+								feedbackEl.setText(`✅ Valid: ${statsMsg}${sdrMsg}`);
+								feedbackEl.style.color = "var(--text-success)";
+							} else {
+								feedbackEl.setText(
+									"❌ Path not found or does not contain KOReader data.",
+								);
+								feedbackEl.style.color = "var(--text-error)";
+							}
+						};
+
+						inputEl?.addEventListener("change", (e) =>
+							validate((e.target as HTMLInputElement).value),
+						);
+						validate(this.plugin.settings.koreaderScanPath); // Initial validation
 					},
 				},
 				{

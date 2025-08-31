@@ -1,9 +1,10 @@
-import { SimpleCache } from "src/lib/cache";
 import { groupSuccessiveHighlights } from "src/lib/formatting/annotationGrouper";
 import { formatDate } from "src/lib/formatting/dateUtils";
-import { compareAnnotations } from "src/lib/formatting/formatUtils";
+import {
+	compareAnnotations,
+	computeAnnotationId,
+} from "src/lib/formatting/formatUtils";
 import { styleHighlight } from "src/lib/formatting/highlightStyle";
-import { createKohlMarkers } from "src/lib/parsing/highlightExtractor";
 import { escapeHtml, stripHtml } from "src/lib/strings/stringUtils";
 import type {
 	Annotation,
@@ -11,6 +12,7 @@ import type {
 	RenderContext,
 	TemplateData,
 } from "src/types";
+import type { IterableCache } from "./cache";
 
 export type TemplateToken =
 	| { type: "text"; value: string }
@@ -62,9 +64,6 @@ export const TEMPLATE_FILTERS = {
 
 export type FilterName = keyof typeof TEMPLATE_FILTERS;
 
-// Filter pipeline cache for performance
-const FILTER_PIPELINES = new SimpleCache<string, (s: string) => string>(200);
-
 function compileFilterPipeline(filters: string[]): (s: string) => string {
 	const fns = filters.map((spec) => {
 		const idx = spec.indexOf(":");
@@ -107,11 +106,19 @@ export function validateTemplate(template: string): TemplateValidationResult {
 	const usedFilters = extractFilters(tokens);
 	const knownFilters = new Set(Object.keys(TEMPLATE_FILTERS));
 	for (const f of usedFilters) {
-		if (!knownFilters.has(f))
-			warnings.push(`Unknown filter '${f}' will be ignored`);
+		if (!knownFilters.has(f)) {
+			errors.push(`Unknown filter '{{ ${f} }}'`);
+			// still surface as warning for less technical users
+			warnings.push(`The filter '${f}' is not recognised and will be ignored.`);
+		}
 	}
 
-	return { isValid: errors.length === 0, errors, warnings, suggestions };
+	return {
+		isValid: errors.length === 0,
+		errors,
+		warnings,
+		suggestions,
+	};
 }
 
 function normalizeKohlColor(raw?: string): string | undefined {
@@ -359,15 +366,23 @@ export function tokenize(
 	return root;
 }
 
-export function applyFilters(value: unknown, filters?: string[]): string {
+export function applyFilters(
+	value: unknown,
+	filters?: string[],
+	options?: { cache?: IterableCache<string, (s: string) => string> },
+): string {
 	const s = value == null ? "" : String(value);
 	if (!filters || filters.length === 0) return s;
 
 	const key = filters.join("|");
-	let pipeline = FILTER_PIPELINES.get(key);
+	const cache = options?.cache;
+	let pipeline = cache?.get(key);
+
 	if (!pipeline) {
 		pipeline = compileFilterPipeline(filters);
-		FILTER_PIPELINES.set(key, pipeline);
+		if (cache) {
+			cache.set(key, pipeline);
+		}
 	}
 	return pipeline(s);
 }
@@ -395,9 +410,11 @@ export function renderNote(
 
 export function compile(
 	templateString: string,
+	options?: { cache?: IterableCache<string, (s: string) => string> },
 ): (data: TemplateData) => string {
 	const tokens = tokenize(templateString);
 	const quotingStyle = detectNoteQuotingStyle(templateString);
+	const cache = options?.cache;
 
 	const renderTokens = (ts: TemplateToken[], data: TemplateData): string => {
 		let out = "";
@@ -409,7 +426,7 @@ export function compile(
 					t.key === "note"
 						? renderNote((data as any).note, quotingStyle)
 						: (data as any)[t.key];
-				out += applyFilters(raw, t.filters);
+				out += applyFilters(raw, t.filters, { cache });
 			} else if (t.type === "cond") {
 				if ((data as any)[t.key]) out += renderTokens(t.body, data);
 			}
@@ -462,11 +479,57 @@ export function joinBlocks(
 	let out = blocks[0];
 	for (let i = 1; i < blocks.length; i++) {
 		const sep = separators[i - 1];
-		if (sep === " ") out += " " + blocks[i];
+		if (sep === " ") out += ` ${blocks[i]}`;
 		else {
 			if (!out.endsWith("<br><br>")) out += "<br><br>";
 			out += `[...]<br><br>${blocks[i]}`;
 		}
 	}
 	return out;
+}
+
+/**
+ * Creates KOHL markers for multiple annotations.
+ * @param annotations - Array of annotations
+ * @param style - Comment style (html or md)
+ * @returns Joined KOHL comment strings
+ */
+export function createKohlMarkers(
+	annotations: Annotation[],
+	style: CommentStyle,
+): string {
+	return annotations.map((ann) => createKohlMarker(ann, style)).join("\n");
+}
+
+/**
+ * Creates a KOHL comment marker for an annotation.
+ * @param annotation - The annotation to create a marker for
+ * @param style - Comment style (html or md)
+ * @returns KOHL comment string
+ */
+export function createKohlMarker(
+	annotation: Annotation,
+	style: CommentStyle,
+): string {
+	const meta = {
+		// No longer KohlMetadata, but a dynamic object
+		v: 1,
+		id: annotation.id ?? computeAnnotationId(annotation),
+		p: annotation.pageno,
+		pos0: annotation.pos0,
+		pos1: annotation.pos1,
+		t: annotation.datetime,
+		c: annotation.color,
+		d: annotation.drawer,
+	};
+
+	// Filter out undefined keys to keep comments clean
+	const cleanMeta = Object.fromEntries(
+		Object.entries(meta).filter(([, v]) => v !== undefined),
+	);
+
+	const jsonMeta = JSON.stringify(cleanMeta);
+	return style === "html"
+		? `<!-- KOHL ${jsonMeta} -->`
+		: `%% KOHL ${jsonMeta} %%`;
 }

@@ -1,16 +1,31 @@
-import { SimpleCache } from "src/lib/cache";
+import type { SimpleCache } from "src/lib/cache";
 import { sha1Hex } from "src/lib/core/crypto";
 import { safeParse } from "src/lib/core/validationUtils";
-import { computeAnnotationId } from "src/lib/formatting/formatUtils";
 import type { Annotation, CommentStyle, PositionObject } from "src/types";
 
-// Pattern sources (no flags). Use [\s\S]*? to safely match multi-line JSON without dotAll.
-const HTML_KOHL_PATTERN_SRC = "<!--\\s*KOHL\\s*({[\\s\\S]*?})\\s*-->";
-const MD_KOHL_PATTERN_SRC = "%%\\s*KOHL\\s*({[\\s\\S]*?})\\s*%%";
+// Canonical KOHL marker pattern: matches HTML or MD markers and captures the JSON payload.
+// Use [\s\S]*? to match multiline JSON in a non-greedy way.
+export const ANY_KOHL_MARKER_PATTERN_SRC =
+	"(?:<!--|%%)\\s*KOHL\\s*({[\\s\\S]*?})\\s*(?:-->|%%)";
 
-// Non-global testers for safe one-off .test() calls (no shared state)
-const HTML_KOHL_TEST = new RegExp(HTML_KOHL_PATTERN_SRC);
-const MD_KOHL_TEST = new RegExp(MD_KOHL_PATTERN_SRC);
+// Global version for replace/find-all. Beware: global regexes are stateful.
+export const ANY_KOHL_MARKER_REGEX = new RegExp(
+	ANY_KOHL_MARKER_PATTERN_SRC,
+	"g",
+);
+
+// Non-global tester for safe presence checks when needed.
+export const ANY_KOHL_MARKER_TEST = new RegExp(ANY_KOHL_MARKER_PATTERN_SRC);
+
+// Utility for callers who want a fresh instance (avoids shared lastIndex).
+export const makeAnyKohlRegex = (flags = "g") =>
+	new RegExp(ANY_KOHL_MARKER_PATTERN_SRC, flags);
+
+// Infer style from a matched marker block.
+function inferStyleFromBlock(block: string): "html" | "md" {
+	// Fast and robust: the block starts with either "<!--" or "%%"
+	return block.startsWith("<!--") ? "html" : "md";
+}
 
 interface KohlMetadata {
 	v: number; // Version number
@@ -54,11 +69,13 @@ function splitTextAndNote(block: string): { text: string; note?: string } {
  * First tries the preferred style, then falls back to the other if no results.
  * @param content - Content containing highlights
  * @param preferredStyle - Comment style to try first
+ * @param options - Optional configuration including cache
  * @returns Array of parsed annotation objects and the style that worked
  */
 export function extractHighlightsWithStyle(
 	content: string,
 	preferredStyle: CommentStyle,
+	options?: { cache?: SimpleCache<string, ScanResult> },
 ): {
 	annotations: Annotation[];
 	usedStyle: CommentStyle | null;
@@ -74,7 +91,7 @@ export function extractHighlightsWithStyle(
 		};
 	}
 
-	const { markers: allMarkers, styles } = scanAllCached(content);
+	const { markers: allMarkers, styles } = scanAllCached(content, options);
 	if (allMarkers.length === 0) {
 		return {
 			annotations: [],
@@ -100,11 +117,9 @@ export function extractHighlightsWithStyle(
 	for (let i = 0; i < allMarkers.length; i++) {
 		const m = allMarkers[i];
 
-		// This is the key: we use the full, sorted list of markers for slicing,
-		// but only process the ones that match our chosen style.
 		if (m.style !== usedStyle) continue;
 
-		const meta = safeParse<KohlMetadata & Record<string, any>>(m.json) as any; // Cast to any to access new props
+		const meta = safeParse<KohlMetadata & Record<string, any>>(m.json) as any;
 		if (!meta || !meta.id) {
 			skippedCount++;
 			continue;
@@ -134,49 +149,25 @@ export function extractHighlightsWithStyle(
 }
 
 /**
- * Creates KOHL markers for multiple annotations.
- * @param annotations - Array of annotations
- * @param style - Comment style (html or md)
- * @returns Joined KOHL comment strings
+ * Extracts highlights by auto-detecting the comment style from the content.
+ * @param content - The note body to parse.
+ * @param options - Optional configuration including cache.
+ * @returns The result of the extraction, including the detected style.
  */
-export function createKohlMarkers(
-	annotations: Annotation[],
-	style: CommentStyle,
-): string {
-	return annotations.map((ann) => createKohlMarker(ann, style)).join("\n");
-}
-
-/**
- * Creates a KOHL comment marker for an annotation.
- * @param annotation - The annotation to create a marker for
- * @param style - Comment style (html or md)
- * @returns KOHL comment string
- */
-export function createKohlMarker(
-	annotation: Annotation,
-	style: CommentStyle,
-): string {
-	const meta = {
-		// No longer KohlMetadata, but a dynamic object
-		v: 1,
-		id: annotation.id ?? computeAnnotationId(annotation),
-		p: annotation.pageno,
-		pos0: annotation.pos0,
-		pos1: annotation.pos1,
-		t: annotation.datetime,
-		c: annotation.color,
-		d: annotation.drawer,
-	};
-
-	// Filter out undefined keys to keep comments clean
-	const cleanMeta = Object.fromEntries(
-		Object.entries(meta).filter(([, v]) => v !== undefined),
-	);
-
-	const jsonMeta = JSON.stringify(cleanMeta);
-	return style === "html"
-		? `<!-- KOHL ${jsonMeta} -->`
-		: `%% KOHL ${jsonMeta} %%`;
+export function extractHighlightsAuto(
+	content: string,
+	options?: { cache?: SimpleCache<string, ScanResult> },
+): {
+	annotations: Annotation[];
+	usedStyle: CommentStyle | null;
+	hasMixedStyles: boolean;
+	skippedCount: number;
+} {
+	const detectedStyle = detectCommentStyle(content);
+	// Fallback to 'html' is safe; extractHighlightsWithStyle will then
+	// correctly handle finding 'md' markers if no 'html' markers are present.
+	const parseStyle = detectedStyle ?? "html";
+	return extractHighlightsWithStyle(content, parseStyle, options);
 }
 
 /**
@@ -185,9 +176,17 @@ export function createKohlMarker(
  * @returns Detected comment style or null if none found
  */
 export function detectCommentStyle(content: string): CommentStyle | null {
-	// Stateless tests using non-global patterns
-	const hasHtml = HTML_KOHL_TEST.test(content);
-	const hasMd = MD_KOHL_TEST.test(content);
+	const re = makeAnyKohlRegex("g");
+	let hasHtml = false;
+	let hasMd = false;
+
+	for (const m of content.matchAll(re)) {
+		const block = m[0] as string;
+		const style = inferStyleFromBlock(block);
+		if (style === "html") hasHtml = true;
+		else hasMd = true;
+		if (hasHtml && hasMd) break;
+	}
 
 	if (hasHtml && !hasMd) return "html";
 	if (hasMd && !hasHtml) return "md";
@@ -201,101 +200,91 @@ export function detectCommentStyle(content: string): CommentStyle | null {
  * @returns Content with all KOHL markers removed
  */
 export function removeKohlComments(content: string): string {
-	const combinedRemove = new RegExp(
-		`${HTML_KOHL_PATTERN_SRC}|${MD_KOHL_PATTERN_SRC}`,
-		"g",
-	);
-	let cleaned = content.replace(combinedRemove, "");
-	// Collapse 3+ blank lines down to 2
-	cleaned = cleaned.replace(/\n\s*\n(\s*\n)+/g, "\n\n");
-	return cleaned;
+	const cleaned = content.replace(ANY_KOHL_MARKER_REGEX, "");
+	return cleaned.replace(/\n\s*\n(\s*\n)+/g, "\n\n");
 }
 
 /**
- * Converts content from one comment style to another.
- * @param content - Content to convert
- * @param fromStyle - Current comment style
- * @param toStyle - Target comment style
- * @returns Converted content
+ * Converts all KOHL metadata comments within a note's body to the target style.
+ * This function is pure, idempotent, and safe against malformed data.
+ * It is the single source of truth for comment style conversion.
+ *
+ * @param content The raw string content of the note body.
+ * @param targetStyle The desired comment style: 'html', 'md', or 'none'.
+ * @returns The transformed body content.
  */
-export function convertCommentStyle(
+export function convertKohlMarkers(
 	content: string,
-	fromStyle: CommentStyle,
-	toStyle: CommentStyle,
+	targetStyle: CommentStyle,
 ): string {
-	if (fromStyle === toStyle) return content;
-
-	if (toStyle === "none") {
+	if (targetStyle === "none") {
+		// Delegate to the dedicated removal function for clarity.
 		return removeKohlComments(content);
 	}
 
-	if (fromStyle === "none") {
-		return content; // No comments to convert from
+	if (targetStyle !== "html" && targetStyle !== "md") {
+		return content; // Return original content if target is invalid.
 	}
 
-	const fromPattern =
-		fromStyle === "html" ? HTML_KOHL_PATTERN_SRC : MD_KOHL_PATTERN_SRC;
-	const fromRegex = new RegExp(fromPattern, "g");
+	// Use a replacer function to process each match safely.
+	return content.replace(
+		ANY_KOHL_MARKER_REGEX,
+		(match, jsonPayload: string) => {
+			// Safely parse the captured JSON payload.
+			const meta = safeParse<Record<string, unknown>>(jsonPayload);
 
-	return content.replace(fromRegex, (match, jsonMeta) => {
-		const meta = safeParse<KohlMetadata>(jsonMeta);
-		if (!meta) return match; // Keep original if can't parse
+			// If the JSON is malformed, return the original comment block verbatim.
+			// This is a critical data-preservation step.
+			if (!meta) {
+				return match;
+			}
 
-		const newJsonMeta = JSON.stringify(meta);
-		return toStyle === "html"
-			? `<!-- KOHL ${newJsonMeta} -->`
-			: `%% KOHL ${newJsonMeta} %%`;
-	});
-}
+			// Re-stringify the parsed metadata to ensure it's clean and canonical.
+			const newJson = JSON.stringify(meta);
 
-function scanStyle(content: string, style: Style): Marker[] {
-	const re = new RegExp(
-		style === "html" ? HTML_KOHL_PATTERN_SRC : MD_KOHL_PATTERN_SRC,
-		"g",
+			// Generate the new marker in the target style.
+			return targetStyle === "html"
+				? `<!-- KOHL ${newJson} -->`
+				: `%% KOHL ${newJson} %%`;
+		},
 	);
-	const out: Marker[] = [];
-	for (const m of content.matchAll(re)) {
-		const index = (m as RegExpMatchArray).index!;
-		out.push({ style, index, end: index + m[0].length, json: m[1] as string });
-	}
-	return out;
 }
 
 type ScanResult = { markers: Marker[]; styles: Set<Style> };
-const SCAN_CACHE = new SimpleCache<string, ScanResult>(100);
 
-function scanAllCached(content: string): ScanResult {
+export function scanAllCached(
+	content: string,
+	options?: { cache?: SimpleCache<string, ScanResult> },
+): ScanResult {
+	const cache = options?.cache;
 	const key =
 		content.length <= 8192
 			? `s:${content}`
 			: `h:${sha1Hex(content, { normalizeEol: true })}`;
-	const cached = SCAN_CACHE.get(key);
-	if (cached) return cached;
 
-	// Cheap presence tests
-	const hasHtml = HTML_KOHL_TEST.test(content);
-	const hasMd = MD_KOHL_TEST.test(content);
-
-	const htmlMarkers = hasHtml ? scanStyle(content, "html") : [];
-	const mdMarkers = hasMd ? scanStyle(content, "md") : [];
-
-	let merged: Marker[];
-	if (htmlMarkers.length === 0) merged = mdMarkers;
-	else if (mdMarkers.length === 0) merged = htmlMarkers;
-	else {
-		merged = [...htmlMarkers, ...mdMarkers];
-		merged.sort((a, b) => a.index - b.index || (a.style < b.style ? -1 : 1));
+	if (cache) {
+		const cached = cache.get(key);
+		if (cached) return cached;
 	}
-	const result = {
-		markers: merged,
-		styles: new Set<Style>(merged.map((m) => m.style)),
-	};
-	SCAN_CACHE.set(key, result);
-	return result;
-}
 
-function scanAll(content: string): Marker[] {
-	return scanAllCached(content).markers;
+	const re = makeAnyKohlRegex("g");
+	const markers: Marker[] = [];
+	for (const m of content.matchAll(re)) {
+		const index = (m as RegExpMatchArray).index!;
+		const block = m[0] as string;
+		const json = m[1] as string;
+		const style = inferStyleFromBlock(block);
+		markers.push({ style, index, end: index + block.length, json });
+	}
+
+	markers.sort((a, b) => a.index - b.index || (a.style < b.style ? -1 : 1));
+	const result = {
+		markers,
+		styles: new Set<Style>(markers.map((m) => m.style)),
+	};
+
+	cache?.set(key, result);
+	return result;
 }
 
 function chooseStyle(preferred: Style, markers: Marker[]): Style | null {
@@ -303,9 +292,4 @@ function chooseStyle(preferred: Style, markers: Marker[]): Style | null {
 	if (present.has(preferred)) return preferred;
 	const fallback: Style = preferred === "html" ? "md" : "html";
 	return present.has(fallback) ? fallback : null;
-}
-
-// Optional test hook
-export function __clearHighlightScanCache(): void {
-	SCAN_CACHE.clear();
 }

@@ -1,15 +1,26 @@
 import { SimpleCache } from "src/lib/cache";
 import { err, ok, type Result } from "src/lib/core/result";
-import type { ParseFailure } from "../errors";
+import type { ParseFailure } from "../errors/types";
 
 const MASK_CACHE = new SimpleCache<string, (d: Date) => string>(64);
 
 function compileMask(mask: string): (date: Date) => string {
 	return (date) =>
 		mask
-			.replace(/YYYY/g, String(date.getFullYear()))
-			.replace(/MM/g, String(date.getMonth() + 1).padStart(2, "0"))
-			.replace(/DD/g, String(date.getDate()).padStart(2, "0"));
+			.replace(/\{YYYY\}/g, String(date.getFullYear()))
+			.replace(/\{MM\}/g, String(date.getMonth() + 1).padStart(2, "0"))
+			.replace(/\{DD\}/g, String(date.getDate()).padStart(2, "0"));
+}
+
+function isValidCustomFormat(format: string): boolean {
+	const tokenRegex = /\{([^}]+)\}/g;
+	let match = tokenRegex.exec(format);
+	while (match !== null) {
+		const token = match[1];
+		if (token !== "YYYY" && token !== "MM" && token !== "DD") return false;
+		match = tokenRegex.exec(format);
+	}
+	return true;
 }
 
 /**
@@ -78,6 +89,9 @@ export function formatDate(
 	}
 
 	// Custom mask
+	if (!isValidCustomFormat(format)) {
+		return "";
+	}
 	let fn = MASK_CACHE.get(format);
 	if (!fn) {
 		fn = compileMask(format);
@@ -111,6 +125,9 @@ export function formatDateResult(
 		return ok(`[[${y}-${m}-${d}]]`);
 	}
 	if (format !== "locale" && format !== "daily-note") {
+		if (!isValidCustomFormat(format)) {
+			return err({ kind: "DateParseError", input: format });
+		}
 		let fn = MASK_CACHE.get(format);
 		if (!fn) {
 			fn = compileMask(format);
@@ -118,11 +135,7 @@ export function formatDateResult(
 		}
 		return ok(fn(date));
 	}
-	const s = format
-		.replace(/YYYY/g, String(date.getFullYear()))
-		.replace(/MM/g, String(date.getMonth() + 1).padStart(2, "0"))
-		.replace(/DD/g, String(date.getDate()).padStart(2, "0"));
-	return ok(s);
+	return err({ kind: "DateParseError", input: format });
 }
 
 /**

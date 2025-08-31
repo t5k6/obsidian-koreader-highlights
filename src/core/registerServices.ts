@@ -1,16 +1,15 @@
 import type { App } from "obsidian";
 import { CacheManager } from "src/lib/cache/CacheManager";
 import type KoreaderImporterPlugin from "src/main";
-import { CapabilityManager } from "src/services/CapabilityManager";
 import { CommandManager } from "src/services/command/CommandManager";
 import { DeviceService } from "src/services/device/DeviceService";
 import { FileSystemService } from "src/services/FileSystemService";
 import { ImportService } from "src/services/import/ImportService";
 import { LoggingService } from "src/services/LoggingService";
-import { FrontmatterService } from "src/services/parsing/FrontmatterService";
+import { NoteEditorService } from "src/services/parsing/NoteEditorService";
 import { TemplateManager } from "src/services/parsing/TemplateManager";
 import { SqlJsManager } from "src/services/SqlJsManager";
-import { PromptService } from "src/services/ui/PromptService";
+
 import { DuplicateFinder } from "src/services/vault/DuplicateFinder";
 import { IndexCoordinator } from "src/services/vault/index/IndexCoordinator";
 import { IndexDatabase } from "src/services/vault/index/IndexDatabase";
@@ -27,6 +26,13 @@ import {
 	VAULT_TOKEN,
 } from "./tokens";
 
+/**
+ * Registers services in dependency layers to ensure correct instantiation order.
+ * - Level 0: Foundational (no internal dependencies).
+ * - Level 1: Core I/O and State (FileSystem, Device, Caches).
+ * - Level 2: Business Logic (Persistence, Merging, Indexing).
+ * - Level 3: Orchestration & UI (ImportService, Commands, StatusBar).
+ */
 export function registerServices(
 	container: DIContainer,
 	plugin: KoreaderImporterPlugin,
@@ -50,18 +56,10 @@ export function registerServices(
 
 	// --- Level 0.5: Depends on LoggingService ---
 	container.register(CacheManager, [LoggingService]);
-	container.register(FrontmatterService, [
+	container.register(NoteEditorService, [
 		APP_TOKEN,
 		LoggingService,
 		FileSystemService,
-	]);
-
-	container.register(NotePersistenceService, [
-		APP_TOKEN,
-		FrontmatterService,
-		FileSystemService,
-		LoggingService,
-		CapabilityManager,
 	]);
 
 	// --- Level 1: Depends on Level 0 or Tokens ---
@@ -69,6 +67,7 @@ export function registerServices(
 		VAULT_TOKEN,
 		PLUGIN_TOKEN,
 		CacheManager,
+		LoggingService,
 	]);
 
 	// Unified DeviceService (environment + scanning + statistics)
@@ -81,11 +80,6 @@ export function registerServices(
 	]);
 
 	container.register(SqlJsManager, [LoggingService, FileSystemService]);
-	container.register(CapabilityManager, [
-		APP_TOKEN,
-		FileSystemService,
-		LoggingService,
-	]);
 	container.register(TemplateManager, [
 		PLUGIN_TOKEN,
 		VAULT_TOKEN,
@@ -102,17 +96,19 @@ export function registerServices(
 		CommandManager,
 	]);
 
-	// Prompt/Interaction service
-	// Policy: reserve symbol tokens for factories or primitives only. Resolve concrete services by class.
-	container.register(PromptService, [APP_TOKEN]);
-
 	// --- Level 2: Depends on Level 1 ---
+
+	container.register(NotePersistenceService, [
+		APP_TOKEN,
+		NoteEditorService,
+		FileSystemService,
+		LoggingService,
+	]);
 
 	container.register(MergeHandler, [
 		APP_TOKEN,
 		PLUGIN_TOKEN,
 		DUPLICATE_MODAL_FACTORY_TOKEN,
-		FrontmatterService,
 		TemplateManager,
 		NotePersistenceService,
 		LoggingService,
@@ -129,13 +125,11 @@ export function registerServices(
 		APP_TOKEN,
 		PLUGIN_TOKEN,
 		IndexDatabase,
-		FrontmatterService,
+		NoteEditorService,
 		FileSystemService,
 		LoggingService,
 		CacheManager,
 	]);
-
-	// LocalIndexService removed – use IndexCoordinator directly.
 
 	// --- Level 2.5: Duplicate Finding
 	container.register(DuplicateFinder, [
@@ -143,7 +137,7 @@ export function registerServices(
 		VAULT_TOKEN,
 		PLUGIN_TOKEN,
 		IndexCoordinator,
-		FrontmatterService,
+		NoteEditorService,
 		NotePersistenceService,
 		LoggingService,
 		FileSystemService,
@@ -157,10 +151,9 @@ export function registerServices(
 		IndexCoordinator,
 		NotePersistenceService,
 		LoggingService,
-		PromptService,
 		FileSystemService,
 		DuplicateFinder,
-		FrontmatterService,
+		NoteEditorService,
 		TemplateManager,
 		MergeHandler,
 	]);
@@ -175,7 +168,6 @@ export function registerServices(
 		LoggingService,
 		IndexCoordinator,
 		FileSystemService,
-		CapabilityManager,
-		FrontmatterService,
+		NoteEditorService,
 	]);
 }

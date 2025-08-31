@@ -1,12 +1,15 @@
-const esbuild = require("esbuild");
-const fs = require("node:fs/promises");
-const { statSync } = require("node:fs");
-const path = require("node:path");
-const { builtinModules } = require("node:module");
-const process = require("node:process");
+import { statSync } from "node:fs";
+import fs from "node:fs/promises";
+import { builtinModules } from "node:module";
+import path, { dirname } from "node:path";
+import process from "node:process";
+import { fileURLToPath } from "node:url";
+import esbuild from "esbuild";
+
+const __filename = fileURLToPath(import.meta.url);
+const rootDir = dirname(__filename);
 
 const isProd = process.env.NODE_ENV === "production";
-const rootDir = __dirname;
 
 /* -------------------------------------------------- */
 /* helpers                                            */

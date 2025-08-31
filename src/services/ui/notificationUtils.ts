@@ -1,7 +1,11 @@
 import { Notice } from "obsidian";
 import { isErr, type Result } from "src/lib/core/result";
-import type { AppFailure, AppResult } from "src/lib/errors";
-import { formatAppFailure } from "src/lib/errors";
+import type {
+	AppFailure,
+	AppResult,
+	FileSystemFailure,
+} from "src/lib/errors/types";
+import { formatAppFailure } from "src/lib/errors/types";
 
 /**
  * Shell-level helper: awaits an AppResult-returning promise and shows a Notice on Err.
@@ -47,4 +51,54 @@ function formatFallback(err: unknown): string {
 	} catch {
 		return "Operation failed";
 	}
+}
+
+/**
+ * A specific overload to handle filesystem failures with consistent messaging.
+ */
+export async function notifyOnFsError<T>(
+	operation: Promise<AppResult<T>>,
+	ops?: {
+		message?: string | ((err: any) => string);
+		timeout?: number;
+		onceKey?: string;
+	},
+): Promise<AppResult<T>> {
+	const res = await operation;
+
+	// We only act on FileSystemFailure types. Other errors are ignored by this specific handler.
+	if (isErr(res) && isFileSystemFailure(res.error)) {
+		const msg = ops?.message
+			? typeof ops.message === "function"
+				? ops.message(res.error)
+				: ops.message
+			: formatAppFailure(res.error);
+
+		// Simple de-duplication to prevent notice spam for a session.
+		const noticeKey = `kohl-notice-once:${ops?.onceKey}`;
+		if (ops?.onceKey && sessionStorage.getItem(noticeKey)) {
+			// Already shown this session, do nothing.
+		} else {
+			new Notice(msg, ops?.timeout ?? 7000);
+			if (ops?.onceKey) {
+				sessionStorage.setItem(noticeKey, "true");
+			}
+		}
+	}
+	return res;
+}
+
+// Helper guard to identify filesystem-related failures
+function isFileSystemFailure(e: AppFailure): e is FileSystemFailure {
+	const fsKinds = new Set([
+		"NotFound",
+		"PermissionDenied",
+		"NotADirectory",
+		"IsADirectory",
+		"AlreadyExists",
+		"NameTooLong",
+		"WriteFailed",
+		"ReadFailed",
+	]);
+	return fsKinds.has(e.kind);
 }

@@ -104,6 +104,10 @@ export function runExclusiveWithMap<T>(
 	// Track this key with the newest promise
 	map.set(key, chained as Promise<unknown>);
 
+	const result = new Promise<T>((resolve, reject) => {
+		chained.then(resolve, reject);
+	});
+
 	// Cleanup once the task settles, but only if still the tail
 	chained.finally(() => {
 		if (map.get(key) === chained) {
@@ -117,7 +121,7 @@ export function runExclusiveWithMap<T>(
 		/* no-op */
 	});
 
-	return chained as Promise<T>;
+	return result as Promise<T>;
 }
 
 /**
@@ -157,6 +161,10 @@ export class KeyedQueue {
 
 		this.queues.set(key, current);
 
+		const result = new Promise<T>((resolve, reject) => {
+			current.then(resolve, reject);
+		});
+
 		current.finally(() => {
 			if (this.queues.get(key) === current) {
 				this.queues.delete(key);
@@ -169,7 +177,7 @@ export class KeyedQueue {
 			/* no-op */
 		});
 
-		return current;
+		return result;
 	}
 
 	/**
@@ -179,4 +187,39 @@ export class KeyedQueue {
 	public _getInternalQueueCount(): number {
 		return this.queues.size;
 	}
+}
+
+/**
+ * Calculates an optimal concurrency level for I/O-bound pools.
+ * It adapts to the host's hardware, provides a safe fallback,
+ * and clamps the value to prevent resource exhaustion or underutilization.
+ *
+ * @param options - Configuration for the calculation.
+ * @param options.factor - Multiplier for hardwareConcurrency. Defaults to 0.75 for a good balance.
+ * @param options.max - The maximum concurrency allowed. Defaults to 8.
+ * @param options.min - The minimum concurrency allowed. Defaults to 2.
+ * @param options.fallback - The value to use if hardwareConcurrency is unavailable. Defaults to 4.
+ * @returns The calculated optimal concurrency.
+ */
+export function getOptimalConcurrency(
+	options: {
+		factor?: number;
+		max?: number;
+		min?: number;
+		fallback?: number;
+	} = {},
+): number {
+	const { factor = 0.75, max = 8, min = 2, fallback = 4 } = options;
+
+	const hc =
+		typeof navigator !== "undefined" && (navigator as any).hardwareConcurrency
+			? (navigator as any).hardwareConcurrency
+			: 0;
+
+	if (hc <= 0) {
+		return fallback;
+	}
+
+	const calculated = Math.floor(hc * factor);
+	return Math.max(min, Math.min(max, calculated));
 }

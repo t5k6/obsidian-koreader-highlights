@@ -16,7 +16,9 @@ export class FolderRenderer implements FieldRenderer<FolderSpec> {
 			s.setDesc(typeof spec.desc === "function" ? spec.desc() : spec.desc);
 
 		s.addSearch((search) => {
-			const suggester = new FolderSuggest(ctx.app, search.inputEl);
+			const suggester = new FolderSuggest(ctx.app, search.inputEl, {
+				maxVisibleItems: 20,
+			});
 			ctx.parent.addChild(suggester);
 			if (spec.placeholder) search.setPlaceholder(spec.placeholder);
 			search.setValue(spec.get());

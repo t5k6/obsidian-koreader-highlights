@@ -1,4 +1,4 @@
-import { setIcon } from "obsidian";
+import { Setting, setIcon } from "obsidian";
 
 /**
  * ModalContentBuilder: helper for building rich modal content with consistent semantics/styles.
@@ -69,4 +69,44 @@ export class ModalContentBuilder {
 		}
 		return this;
 	}
+}
+
+type SessionWithApplyAll = { applyToAll: boolean };
+
+export function createApplyToAllToggle(
+	container: HTMLElement,
+	session: SessionWithApplyAll,
+): Setting {
+	return new Setting(container)
+		.setName("Apply to all remaining files in this import")
+		.setDesc("Use the same action for all subsequent items during this run.")
+		.addToggle((toggle) =>
+			toggle.setValue(session.applyToAll).onChange((value) => {
+				session.applyToAll = value;
+			}),
+		);
+}
+
+export function renderValidationError(
+	container: HTMLElement,
+	messages: string | string[],
+): HTMLElement {
+	container.empty(); // Clear previous errors
+	const el = container.createDiv({
+		cls: "koreader-inline-error",
+		attr: { role: "alert" },
+	});
+
+	if (Array.isArray(messages)) {
+		if (messages.length > 0) {
+			const listEl = el.createEl("ul");
+			for (const msg of messages) {
+				listEl.createEl("li", { text: msg });
+			}
+		}
+	} else if (messages) {
+		el.setText(messages);
+	}
+
+	return el;
 }

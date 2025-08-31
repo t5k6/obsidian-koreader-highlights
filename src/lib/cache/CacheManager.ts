@@ -1,7 +1,10 @@
 import type { LoggingService } from "src/services/LoggingService";
 import type { AsyncLoader, Cache, Disposable } from "src/types";
+import type { AppResult } from "../errors/types";
 import { memoizeAsync, SimpleCache } from "./SimpleCache";
 import type { IterableCache } from "./types";
+
+export type MemoizedLoader<K, V> = (key: K) => Promise<AppResult<V>>;
 
 /**
  * A DI-managed service to create, track, and invalidate all caches for the plugin.
@@ -110,14 +113,34 @@ export class CacheManager implements Disposable {
 		return clearedCount;
 	}
 
+	public createTtlCache<K, V>(
+		name: string,
+		ttlMs: number,
+	): IterableCache<K, V> {
+		const cache = new SimpleCache<K, V>(undefined, ttlMs);
+		return this.register(name, cache);
+	}
+
+	public createTtlLru<K, V>(
+		name: string,
+		max: number,
+		ttlMs: number,
+	): IterableCache<K, V> {
+		const cache = new SimpleCache<K, V>(max, ttlMs);
+		return this.register(name, cache);
+	}
+
 	/** Wrap a loader with in-flight caching using a registered LRU Promise cache. */
 	public createMemoized<K, V>(
 		name: string,
 		loader: AsyncLoader<K, V>,
 		max = 100,
-	): (key: K) => Promise<V> {
-		const promiseCache = this.createLru<K, Promise<V>>(name, max);
-		return memoizeAsync(promiseCache, loader);
+		ttlMs?: number,
+	): MemoizedLoader<K, V> {
+		const cache = ttlMs
+			? this.createTtlLru<K, Promise<AppResult<V>>>(name, max, ttlMs)
+			: this.createLru<K, Promise<AppResult<V>>>(name, max);
+		return memoizeAsync(cache, loader);
 	}
 
 	public keys(): string[] {

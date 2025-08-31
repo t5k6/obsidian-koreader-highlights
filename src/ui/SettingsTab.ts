@@ -1,11 +1,11 @@
 import { type App, debounce, PluginSettingTab } from "obsidian";
 import type KoreaderImporterPlugin from "src/main";
+
 import type { DebouncedFn } from "src/types";
 import { SectionStateManager } from "src/ui/settings/SectionStateManager";
 import type { SettingsSection } from "src/ui/settings/SettingsSection";
 import { AdvancedSettingsSection } from "src/ui/settings/sections/AdvancedSettingsSection";
 import { CoreSettingsSection } from "src/ui/settings/sections/CoreSettingsSection";
-import { FilteringSettingsSection } from "src/ui/settings/sections/FilteringSettingsSection";
 import { FormattingSettingsSection } from "src/ui/settings/sections/FormattingSettingsSection";
 import { ImportActionsSection } from "src/ui/settings/sections/ImportActionsSection";
 import { TemplateSettingsSection } from "src/ui/settings/sections/TemplateSettingsSection";
@@ -56,11 +56,6 @@ export class SettingsTab extends PluginSettingTab {
 				this.debouncedSave,
 				"Import Actions",
 				true,
-			),
-			new FilteringSettingsSection(
-				this.koreaderPlugin,
-				this.debouncedSave,
-				"Filtering & Exclusion",
 			),
 			new FormattingSettingsSection(
 				this.koreaderPlugin,

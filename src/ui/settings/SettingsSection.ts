@@ -18,11 +18,15 @@ export abstract class SettingsSection extends Component {
 	public display(containerEl: HTMLElement): void {
 		const details = containerEl.createEl("details", {
 			cls: "koreader-settings-section",
-			attr: { "data-title": this.title, ...(this.startOpen && { open: true }) },
 		});
-		// Ensure sections can be restored by title and respect default open state
-		details.dataset.title = this.title;
-		details.open = this.startOpen;
+		// Set attributes separately to satisfy stricter createEl typings
+		details.setAttr("data-title", this.title);
+		if (this.startOpen) {
+			details.setAttr("open", "true");
+			details.open = true;
+		} else {
+			details.open = false;
+		}
 
 		details.createEl("summary", { text: this.title });
 		this.renderContent(details.createDiv());

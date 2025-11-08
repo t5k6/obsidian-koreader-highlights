@@ -1,4 +1,4 @@
-import { validateFileNameTemplate } from "src/lib/pathing";
+import { Pathing } from "src/lib/pathing";
 import { FrontmatterFieldModal } from "src/ui/FrontmatterFieldModal";
 import { renderValidationError } from "src/ui/utils/modalComponents";
 import { renderSettingsSection, type SettingSpec } from "../SettingsKit";
@@ -57,7 +57,8 @@ export class FormattingSettingsSection extends SettingsSection {
 					});
 
 					const update = (value: string) => {
-						const { errors, warnings } = validateFileNameTemplate(value);
+						const { errors, warnings } =
+							Pathing.validateFileNameTemplate(value);
 						const allMessages = [...errors, ...warnings];
 						renderValidationError(validationEl, allMessages);
 						validationEl.style.color =

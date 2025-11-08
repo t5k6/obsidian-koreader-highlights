@@ -1,9 +1,9 @@
 import { Setting } from "obsidian";
-import { normalizeSystemPath } from "src/lib/pathing";
+import { Pathing } from "src/lib/pathing";
 import type { ExternalFolderSpec, RenderCtx } from "../SettingsKit";
 import type { FieldRenderer } from "../SettingsRenderer";
 import { withSave } from "../SettingsRenderer";
-import { pickDirectory } from "../utils";
+import { attachBrowseIconButton, pickDirectory } from "../utils";
 
 export class ExternalFolderRenderer
 	implements FieldRenderer<ExternalFolderSpec>
@@ -27,19 +27,23 @@ export class ExternalFolderRenderer
 			});
 		});
 
-		const textInput = s.controlEl.querySelector("input")!;
-		s.addButton((button) =>
-			button
-				.setIcon("folder-open")
-				.setTooltip("Browse…")
-				.onClick(async () => {
-					const dir = await pickDirectory(spec.browseTitle ?? "Select folder");
-					if (!dir) return;
-					const normalizedDir = normalizeSystemPath(dir);
+		const textInput = s.controlEl.querySelector(
+			"input",
+		) as HTMLInputElement | null;
+		if (textInput) {
+			attachBrowseIconButton({
+				setting: s,
+				inputEl: textInput,
+				icon: "folder-open",
+				tooltip: "Browse…",
+				onPick: () => pickDirectory(spec.browseTitle ?? "Select folder"),
+				onSave: async (value: string) => {
+					const normalizedDir = Pathing.normalizeSystemPath(value);
 					await withSave(spec.set, ctx.onSave)(normalizedDir);
-					(textInput as HTMLInputElement).value = normalizedDir;
-				}),
-		);
+					textInput.value = normalizedDir;
+				},
+			});
+		}
 
 		return s;
 	}

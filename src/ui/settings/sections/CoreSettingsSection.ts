@@ -2,6 +2,7 @@ import { DEFAULT_HIGHLIGHTS_FOLDER } from "src/constants";
 import { DeviceService } from "src/services/device/DeviceService";
 import { renderSettingsSection } from "../SettingsKit";
 import { SettingsSection } from "../SettingsSection";
+import { attachBrowseIconButton, pickFile } from "../utils";
 
 export class CoreSettingsSection extends SettingsSection {
 	protected renderContent(container: HTMLElement): void {
@@ -62,6 +63,44 @@ export class CoreSettingsSection extends SettingsSection {
 							validate((e.target as HTMLInputElement).value),
 						);
 						validate(this.plugin.settings.koreaderScanPath); // Initial validation
+					},
+				},
+				{
+					key: "statsDbPathOverride",
+					type: "text",
+					name: "Statistics database path override",
+					desc: "Optional: Directly specify the path to statistics.sqlite3 file. When set, automatic discovery is bypassed. Leave empty for automatic detection.",
+					placeholder:
+						"Example: /mnt/KOReader/.adds/koreader/settings/statistics.sqlite3",
+					get: () => this.plugin.settings.statsDbPathOverride,
+					set: (v) => {
+						this.plugin.settings.statsDbPathOverride = v;
+					},
+					afterRender: (setting) => {
+						const inputEl = setting.controlEl.querySelector(
+							"input",
+						) as HTMLInputElement | null;
+						if (!inputEl) return;
+
+						attachBrowseIconButton({
+							setting,
+							inputEl,
+							icon: "folder-open",
+							tooltip: "Browse…",
+							onPick: () =>
+								pickFile("Select KOReader statistics database", {
+									filters: [
+										{
+											name: "SQLite DB",
+											extensions: ["sqlite3", "sqlite", "db"],
+										},
+									],
+								}),
+							onSave: (value: string) => {
+								this.plugin.settings.statsDbPathOverride = value;
+								this.debouncedSave();
+							},
+						});
 					},
 				},
 				{

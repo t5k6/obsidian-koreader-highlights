@@ -1,20 +1,20 @@
 import { sha1Hex } from "src/lib/core/crypto";
 import { err, ok, type Result } from "src/lib/core/result";
 import type { CfiParseError } from "src/lib/errors/types";
-import { toMatchKey } from "src/lib/pathing";
 import { normalizeWhitespace } from "src/lib/strings/stringUtils";
 import type { Annotation, DocProps, PositionObject } from "src/types";
+import { buildNormalizedBookKey } from "./bookIdentity";
 
 /**
  * Generates a deterministic key from document properties.
  * Used for consistent book identification across imports.
  * @param props - Document properties containing title and authors
  * @returns Normalized key in format "author::title"
+ *
+ * NOTE: Kept for backward compatibility. New code should use buildNormalizedBookKey.
  */
 export function bookKeyFromDocProps(props: DocProps): string {
-	const authorSlug = toMatchKey(props.authors);
-	const titleSlug = toMatchKey(props.title);
-	return `${authorSlug}::${titleSlug}`;
+	return buildNormalizedBookKey(props);
 }
 
 interface CfiParts {

@@ -1,9 +1,6 @@
 import { groupSuccessiveHighlights } from "src/lib/formatting/annotationGrouper";
 import { formatDate } from "src/lib/formatting/dateUtils";
-import {
-	compareAnnotations,
-	computeAnnotationId,
-} from "src/lib/formatting/formatUtils";
+import { compareAnnotations } from "src/lib/formatting/formatUtils";
 import { styleHighlight } from "src/lib/formatting/highlightStyle";
 import { escapeHtml, stripHtml } from "src/lib/strings/stringUtils";
 import type {
@@ -13,6 +10,7 @@ import type {
 	TemplateData,
 } from "src/types";
 import type { IterableCache } from "./cache";
+import { createKohlMarkers } from "./kohlMarkers";
 
 export type TemplateToken =
 	| { type: "text"; value: string }
@@ -486,50 +484,4 @@ export function joinBlocks(
 		}
 	}
 	return out;
-}
-
-/**
- * Creates KOHL markers for multiple annotations.
- * @param annotations - Array of annotations
- * @param style - Comment style (html or md)
- * @returns Joined KOHL comment strings
- */
-export function createKohlMarkers(
-	annotations: Annotation[],
-	style: CommentStyle,
-): string {
-	return annotations.map((ann) => createKohlMarker(ann, style)).join("\n");
-}
-
-/**
- * Creates a KOHL comment marker for an annotation.
- * @param annotation - The annotation to create a marker for
- * @param style - Comment style (html or md)
- * @returns KOHL comment string
- */
-export function createKohlMarker(
-	annotation: Annotation,
-	style: CommentStyle,
-): string {
-	const meta = {
-		// No longer KohlMetadata, but a dynamic object
-		v: 1,
-		id: annotation.id ?? computeAnnotationId(annotation),
-		p: annotation.pageno,
-		pos0: annotation.pos0,
-		pos1: annotation.pos1,
-		t: annotation.datetime,
-		c: annotation.color,
-		d: annotation.drawer,
-	};
-
-	// Filter out undefined keys to keep comments clean
-	const cleanMeta = Object.fromEntries(
-		Object.entries(meta).filter(([, v]) => v !== undefined),
-	);
-
-	const jsonMeta = JSON.stringify(cleanMeta);
-	return style === "html"
-		? `<!-- KOHL ${jsonMeta} -->`
-		: `%% KOHL ${jsonMeta} %%`;
 }

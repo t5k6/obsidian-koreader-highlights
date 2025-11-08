@@ -27,12 +27,13 @@ import {
 	snapshotPathForUid,
 	verifySnapshotIntegrity,
 } from "src/lib/snapshotCore";
+import type { ImportWarning } from "src/services/import/types";
+import type { NoteEditorService } from "src/services/parsing/NoteEditorService";
+import { notifyOnFsError } from "src/services/ui/notificationUtils";
 import type { NoteUpdater } from "src/types";
 import type { FileSystemService, FolderScanResult } from "../FileSystemService";
-import type { ImportWarning } from "../import/types";
 import type { LoggingService } from "../LoggingService";
-import type { NoteEditorService } from "../parsing/NoteEditorService";
-import { notifyOnFsError } from "../ui/notificationUtils";
+import { VaultBookScanner } from "./VaultBookScanner";
 
 // consolidated error type for all persistence operations.
 type NotePersistenceFailure = AppFailure;
@@ -46,12 +47,14 @@ export class NotePersistenceService {
 	private readonly snapshotDir: string;
 	private readonly backupDir: string;
 	private readonly queue = new KeyedQueue();
+	private isGCRunning = false;
 
 	constructor(
 		private readonly app: App,
 		private readonly noteEditorService: NoteEditorService,
 		private readonly fs: FileSystemService,
 		private readonly loggingService: LoggingService,
+		private readonly vaultScanner: VaultBookScanner,
 	) {
 		this.log = this.loggingService.scoped("NotePersistenceService");
 		this.snapshotDir = this.fs.joinPluginDataPath("snapshots");
@@ -113,6 +116,7 @@ export class NotePersistenceService {
 
 				const commit = await this.updateFrontmatterUid(file, newUid, oldUid);
 
+				// If frontmatter update fails, roll back any newly-created snapshot.
 				if (isErr(commit)) {
 					if (status.oldExists && !status.newExists) {
 						const rb = await this.removeSnapshot(newUid);
@@ -197,12 +201,15 @@ export class NotePersistenceService {
 
 	public async cleanupOldBackups(
 		retentionDays: number,
+		maxBackupsPerNote: number,
 	): Promise<Result<void, AppFailure>> {
-		if (retentionDays <= 0) {
+		if (retentionDays <= 0 && maxBackupsPerNote <= 0) {
 			return ok(undefined);
 		}
 
-		this.log.info(`Cleaning backups older than ${retentionDays} days...`);
+		this.log.info(
+			`Cleaning backups (retention: ${retentionDays} days, max per note: ${maxBackupsPerNote})...`,
+		);
 
 		const getFilesPromise: Promise<AppResult<FolderScanResult>> = (async () => {
 			try {
@@ -228,12 +235,53 @@ export class NotePersistenceService {
 			return err(scanResult.error as AppFailure);
 		}
 
-		const cutoffTime = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
-		const oldFiles = scanResult.value.files.filter((file: TFile) => {
-			return file.stat.mtime < cutoffTime;
-		});
+		const allFiles = scanResult.value.files;
+		const filesToDelete = new Set<TFile>();
 
-		if (oldFiles.length === 0) {
+		// Age-based cleanup
+		if (retentionDays > 0) {
+			const cutoffTime = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+			const oldFiles = allFiles.filter((file: TFile) => {
+				return file.stat.mtime < cutoffTime;
+			});
+			for (const file of oldFiles) {
+				filesToDelete.add(file);
+			}
+		}
+
+		// Per-note limit cleanup
+		if (maxBackupsPerNote > 0) {
+			// Group files by pathHash (second part of filename before timestamp)
+			const filesByNote = new Map<string, TFile[]>();
+
+			for (const file of allFiles) {
+				const baseName = file.basename; // without .md
+				const parts = baseName.split("-");
+				if (parts.length >= 3) {
+					// Format: baseName-pathHash-timestamp
+					const pathHash = parts[parts.length - 2]; // second to last
+					if (!filesByNote.has(pathHash)) {
+						filesByNote.set(pathHash, []);
+					}
+					filesByNote.get(pathHash)!.push(file);
+				}
+			}
+
+			// For each note, sort by mtime descending and mark excess for deletion
+			for (const [pathHash, files] of filesByNote) {
+				if (files.length > maxBackupsPerNote) {
+					// Sort by modification time descending (newest first)
+					files.sort((a, b) => b.stat.mtime - a.stat.mtime);
+					// Mark older ones for deletion
+					const excessFiles = files.slice(maxBackupsPerNote);
+					for (const file of excessFiles) {
+						filesToDelete.add(file);
+					}
+				}
+			}
+		}
+
+		if (filesToDelete.size === 0) {
 			return ok(undefined);
 		}
 
@@ -241,12 +289,12 @@ export class NotePersistenceService {
 		const concurrency = getOptimalConcurrency({ min: 1 });
 
 		const resultsStream = runPool(
-			oldFiles,
+			Array.from(filesToDelete),
 			async (file: TFile) => {
 				const removeResult = await this.fs.removeVaultPath(file.path);
 				if (isErr(removeResult)) {
 					this.log.warn(
-						`Failed to delete old backup: ${file.path}`,
+						`Failed to delete backup: ${file.path}`,
 						removeResult.error,
 					);
 				}
@@ -261,7 +309,7 @@ export class NotePersistenceService {
 			}
 		}
 
-		this.log.info(`Cleanup complete. Deleted ${deletedCount} old backup(s).`);
+		this.log.info(`Cleanup complete. Deleted ${deletedCount} backup(s).`);
 		return ok(undefined);
 	}
 
@@ -273,16 +321,23 @@ export class NotePersistenceService {
 
 		return this.withSnapshotLock(uid, async () => {
 			const legacyExistsRes = await this.fs.vaultExists(legacyPath);
-			if (isErr(legacyExistsRes) || !legacyExistsRes.value) {
+
+			// Treat non-Result or Err as "no legacy snapshot"; avoid passing bad values to isErr.
+			if (
+				!legacyExistsRes ||
+				isErr(legacyExistsRes) ||
+				!legacyExistsRes.value
+			) {
 				return ok(undefined);
 			}
 
+			// If a snapshot for the UID already exists, just remove legacy and exit.
 			if (await this.snapshotExists(uid)) {
-				const removeResult = await this.fs.removeVaultPath(legacyPath);
-				if (isErr(removeResult)) {
+				const rm = await this.fs.removeVaultPath(legacyPath);
+				if (isErr(rm)) {
 					this.log.warn(
 						`Failed to remove legacy snapshot at ${legacyPath}`,
-						removeResult.error,
+						rm.error,
 					);
 				}
 				return ok(undefined);
@@ -303,11 +358,11 @@ export class NotePersistenceService {
 				return writeRes;
 			}
 
-			const removeResult = await this.fs.removeVaultPath(legacyPath);
-			if (isErr(removeResult)) {
+			const rm = await this.fs.removeVaultPath(legacyPath);
+			if (isErr(rm)) {
 				this.log.warn(
 					`Failed to remove legacy snapshot at ${legacyPath}`,
-					removeResult.error,
+					rm.error,
 				);
 			}
 
@@ -433,8 +488,20 @@ export class NotePersistenceService {
 
 	private async snapshotExists(uid: string): Promise<boolean> {
 		const path = snapshotPathForUid(this.snapshotDir, uid).fullPath;
-		const ex = await this.fs.vaultExists(path);
-		return !isErr(ex) && Boolean(ex.value);
+		const res = await this.fs.vaultExists(path);
+
+		if (isErr(res)) {
+			// NotFound -> no snapshot; other errors logged but treated as "no snapshot"
+			if (res.error.kind !== "NotFound") {
+				this.log.warn(
+					`Failed to check snapshot existence at ${path}`,
+					res.error,
+				);
+			}
+			return false;
+		}
+
+		return Boolean(res.value);
 	}
 
 	private withSnapshotLock<T>(uid: string, task: () => Promise<T>): Promise<T> {
@@ -583,5 +650,133 @@ export class NotePersistenceService {
 				warnings: warnings.length > 0 ? warnings : undefined,
 			});
 		});
+	}
+
+	public async collectOrphanedSnapshots(highlightsFolder: string): Promise<{
+		scanned: number;
+		deleted: number;
+		failed: number;
+	}> {
+		if (this.isGCRunning) {
+			this.log.info(
+				"Snapshot GC is already in progress. Skipping concurrent run.",
+			);
+			return { scanned: 0, deleted: 0, failed: 0 };
+		}
+		this.isGCRunning = true;
+		try {
+			// Delegate to the private core implementation
+			return await this._collectOrphanedSnapshotsCore(highlightsFolder);
+		} finally {
+			this.isGCRunning = false;
+		}
+	}
+
+	private async _collectOrphanedSnapshotsCore(
+		highlightsFolder: string,
+	): Promise<{
+		scanned: number;
+		deleted: number;
+		failed: number;
+	}> {
+		const summary = { scanned: 0, deleted: 0, failed: 0 };
+		this.log.info("Starting orphaned snapshot garbage collection...");
+
+		// --- MARK PHASE (via VaultBookScanner) ---
+		const activeUids = new Set<string>();
+
+		try {
+			const stream = this.vaultScanner.scanBooks({
+				folder: highlightsFolder,
+				recursive: true,
+			});
+
+			for await (const item of stream) {
+				if (isErr(item)) {
+					this.log.warn(
+						"Error while scanning for active UIDs during snapshot GC",
+						{
+							file: item.error.file.path,
+							error: item.error.error,
+						},
+					);
+					continue;
+				}
+
+				const { file } = item.value;
+				const uid = this.tryGetId(file);
+				if (uid) {
+					activeUids.add(uid);
+				}
+			}
+
+			this.log.info(
+				`Mark phase complete. Found ${activeUids.size} active UIDs.`,
+			);
+		} catch (error) {
+			this.log.error(
+				"Failed to scan vault for active UIDs during snapshot GC",
+				error,
+			);
+			return summary; // Abort on failure to scan
+		}
+
+		// --- SWEEP PHASE ---
+		const listResult = await this.fs.listVaultDir(this.snapshotDir);
+		if (isErr(listResult)) {
+			this.log.error(
+				"Failed to list snapshot directory during GC",
+				listResult.error,
+			);
+			return summary; // Abort on failure to list
+		}
+
+		const snapshotFiles = listResult.value.files;
+		summary.scanned = snapshotFiles.length;
+
+		const orphansToDelete = snapshotFiles.filter((fileName) => {
+			if (!fileName.endsWith(".md")) return false;
+			const uid = fileName.slice(0, -3); // remove .md
+			return validateUid(uid) && !activeUids.has(uid);
+		});
+
+		if (orphansToDelete.length === 0) {
+			this.log.info("Sweep phase complete. No orphaned snapshots found.");
+			return summary;
+		}
+
+		this.log.info(
+			`Sweep phase: Found ${orphansToDelete.length} orphaned snapshots to delete.`,
+		);
+
+		const concurrency = getOptimalConcurrency({ min: 1, max: 4 });
+		const resultsStream = runPool(
+			orphansToDelete,
+			async (fileName: string) => {
+				const fullPath = Pathing.joinVaultPath(this.snapshotDir, fileName);
+				const removeResult = await this.fs.removeVaultPath(fullPath);
+				if (isErr(removeResult)) {
+					this.log.warn(
+						`Failed to delete orphaned snapshot ${fullPath}`,
+						removeResult.error,
+					);
+					return "failed";
+				}
+				return "deleted";
+			},
+			{ concurrency },
+		);
+
+		for await (const result of resultsStream) {
+			if (result.ok) {
+				if (result.value === "deleted") summary.deleted++;
+				else if (result.value === "failed") summary.failed++;
+			}
+		}
+
+		this.log.info(
+			`Snapshot GC complete. Scanned: ${summary.scanned}, Deleted: ${summary.deleted}, Failed: ${summary.failed}`,
+		);
+		return summary;
 	}
 }

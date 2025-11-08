@@ -15,15 +15,11 @@ import { err, isErr, ok, type Result } from "src/lib/core/result";
 import { safeParse } from "src/lib/core/validationUtils";
 import { verifyWrittenFile } from "src/lib/data-integrity";
 import { toFailure } from "src/lib/errors/mapper";
-import {
-	type AppFailure,
-	FileSystemError,
-	type FileSystemFailure,
-} from "src/lib/errors/types";
+import type { AppFailure, FileSystemFailure } from "src/lib/errors/types";
 import type { ObsidianAdapter } from "src/lib/obsidian/adapterTypes";
 import { createExtensionFilter } from "src/lib/obsidian/fileFilters";
 import { isTFile, isTFolder } from "src/lib/obsidian/typeguards";
-import { Pathing, type VaultPath } from "src/lib/pathing";
+import { Pathing, type ScanCacheKey, type VaultPath } from "src/lib/pathing";
 import { depthFirstTraverse } from "src/lib/traversal";
 import type { Cache } from "src/types";
 import type { ImportWarning } from "./import/types";
@@ -40,7 +36,7 @@ export interface CreateFileResult {
 
 function _shouldInvalidateScanCache(
 	changedPath: VaultPath,
-	key: { rootPath: VaultPath; recursive: boolean },
+	key: ScanCacheKey,
 ): boolean {
 	const { rootPath, recursive } = key;
 
@@ -53,7 +49,7 @@ function _shouldInvalidateScanCache(
 			return true;
 		}
 		const parentOfChange = Pathing.vaultDirname(changedPath);
-		return parentOfChange === rootPath;
+		return String(parentOfChange) === String(rootPath);
 	}
 
 	return false;
@@ -78,7 +74,6 @@ export interface FolderScanResult {
 
 export class FileSystemService {
 	private readonly log;
-	private readonly LOG_PREFIX = "KOReader Importer: FileSystemService:";
 	private readonly folderExistsCache!: Cache<string, CacheEntry<boolean>>;
 	private readonly nodeStatsCache!: Cache<
 		string,
@@ -129,14 +124,33 @@ export class FileSystemService {
 			signal?: AbortSignal;
 		},
 	): Promise<FolderScanResult> {
+		const recursive = options?.recursive ?? true;
+		const extensions = options?.extensions ?? ["md"];
+		const signal = options?.signal;
+
+		const rootPath =
+			typeof folderVaultPathOrFolder === "string"
+				? Pathing.toVaultPath(folderVaultPathOrFolder)
+				: Pathing.toVaultPath(folderVaultPathOrFolder.path);
+
+		const key = Pathing.generateScanCacheKey({
+			rootPath,
+			recursive,
+			extensions,
+		});
+		const cached = this.folderScanCache.get(key);
+		if (cached && !signal?.aborted) return cached;
+
 		const files = await toArray(
 			this.iterateVaultFiles(folderVaultPathOrFolder, {
-				recursive: options?.recursive ?? true,
-				signal: options?.signal,
-				extensions: options?.extensions ?? ["md"],
+				recursive,
+				signal,
+				extensions,
 			}),
 		);
-		return { files, aborted: Boolean(options?.signal?.aborted) };
+		const res = { files, aborted: Boolean(signal?.aborted) };
+		if (!res.aborted) this.folderScanCache.set(key, res);
+		return res;
 	}
 
 	public async *iterateVaultFiles(
@@ -190,17 +204,30 @@ export class FileSystemService {
 
 	private registerVaultEvents(): void {
 		// Invalidate scan cache when vault changes that can affect folder contents occur.
+		// We intentionally type parameters as unknown here and guard at runtime.
 		this.plugin.registerEvent(
-			this.vault.on("create", (file) => this.invalidateCacheFor(file.path)),
+			this.vault.on("create", (file: unknown) => {
+				if (file && typeof (file as any).path === "string") {
+					this.invalidateCacheFor((file as any).path);
+				}
+			}),
 		);
 		this.plugin.registerEvent(
-			this.vault.on("delete", (file) => this.invalidateCacheFor(file.path)),
+			this.vault.on("delete", (file: unknown) => {
+				if (file && typeof (file as any).path === "string") {
+					this.invalidateCacheFor((file as any).path);
+				}
+			}),
 		);
 		this.plugin.registerEvent(
-			this.vault.on("rename", (file, oldPath) => {
+			this.vault.on("rename", (file: unknown, oldPath: unknown) => {
 				// Invalidate both old and new locations
-				this.invalidateCacheFor(oldPath);
-				this.invalidateCacheFor(file.path);
+				if (typeof oldPath === "string") {
+					this.invalidateCacheFor(oldPath);
+				}
+				if (file && typeof (file as any).path === "string") {
+					this.invalidateCacheFor((file as any).path);
+				}
 			}),
 		);
 	}
@@ -225,50 +252,68 @@ export class FileSystemService {
 	 * Always normalized and without leading slash.
 	 */
 	public getPluginDataDir(): VaultPath {
-		return Pathing.toVaultPath(
-			`${this.vault.configDir}/plugins/${this.plugin.manifest.id}`,
-		);
+		// Obsidian's Vault has configDir in app.vault; some environments/mocks may not.
+		const cfg =
+			(this.vault as Vault & { configDir?: string }).configDir ?? ".obsidian";
+		return Pathing.toVaultPath(`${cfg}/plugins/${this.plugin.manifest.id}`);
 	}
 
 	/**
 	 * Joins segments inside the plugin data dir and returns a vault-relative path.
 	 */
 	public joinPluginDataPath(...segments: string[]): VaultPath {
-		const rel = Pathing.joinSystemPath(this.getPluginDataDir(), ...segments);
-		return Pathing.toVaultPath(rel);
+		return Pathing.joinVaultPath(this.getPluginDataDir(), ...segments);
 	}
+
+	private renameReplaceProbePromise: Promise<boolean> | null = null;
 
 	private async probeRenameReplaceSupport(): Promise<boolean> {
 		if (this.renameReplaceSupported !== null)
 			return this.renameReplaceSupported;
+		if (this.renameReplaceProbePromise) return this.renameReplaceProbePromise;
 
-		const dir = this.getPluginDataDir();
-		const a = Pathing.joinVaultPath(dir, `.__probe_a__${Date.now()}`);
-		const b = Pathing.joinVaultPath(dir, `.__probe_b__${Date.now()}`);
-		try {
-			await this.vault.adapter.write(a, "a");
-			await this.vault.adapter.write(b, "b");
-			try {
-				await this.vault.adapter.rename(a, b);
-				this.renameReplaceSupported = true;
-			} catch {
-				this.renameReplaceSupported = false;
-			}
-		} finally {
-			try {
-				await this.vault.adapter.remove(a);
-			} catch {}
-			try {
-				await this.vault.adapter.remove(b);
-			} catch {}
-		}
-		if (this.renameReplaceSupported === false && !this.loggedCapabilityOnce) {
-			console.info(
-				`${this.LOG_PREFIX} Adapter does not support rename-over-existing; using fallback swap for atomic writes.`,
-			);
-			this.loggedCapabilityOnce = true;
-		}
-		return this.renameReplaceSupported!;
+		this.renameReplaceProbePromise = this.keyedQueue.run(
+			"__probe_rename_replace__",
+			async () => {
+				if (this.renameReplaceSupported !== null)
+					return this.renameReplaceSupported;
+				const ensured = await this.ensurePluginDataDir();
+				if (isErr(ensured)) {
+					// safest default: assume not supported on unusual adapters
+					this.renameReplaceSupported = false;
+					return this.renameReplaceSupported;
+				}
+
+				const dir = this.getPluginDataDir();
+				const a = Pathing.joinVaultPath(dir, `.__probe_a__${Date.now()}`);
+				const b = Pathing.joinVaultPath(dir, `.__probe_b__${Date.now()}`);
+				try {
+					await this.vault.adapter.write(a, "a");
+					await this.vault.adapter.write(b, "b");
+					try {
+						await this.vault.adapter.rename(a, b);
+						this.renameReplaceSupported = true;
+					} catch {
+						this.renameReplaceSupported = false;
+					}
+				} finally {
+					await this.vault.adapter.remove(a).catch(() => {});
+					await this.vault.adapter.remove(b).catch(() => {});
+				}
+				if (
+					this.renameReplaceSupported === false &&
+					!this.loggedCapabilityOnce
+				) {
+					this.log.info(
+						"Adapter does not support rename-over-existing; using swap fallback.",
+					);
+					this.loggedCapabilityOnce = true;
+				}
+				return this.renameReplaceSupported;
+			},
+		);
+
+		return this.renameReplaceProbePromise;
 	}
 
 	/**
@@ -277,14 +322,14 @@ export class FileSystemService {
 	 */
 	public async readVaultBinary(
 		vaultPath: string,
-	): Promise<Result<ArrayBuffer, AppFailure>> {
+	): Promise<Result<Uint8Array, AppFailure>> {
 		const p = Pathing.toVaultPath(vaultPath);
 		try {
 			const data = await readWithRetry(this.vault.adapter, p, {
 				maxAttempts: 5,
 				baseDelayMs: 30,
 			});
-			return ok(data);
+			return ok(new Uint8Array(data));
 		} catch (e: unknown) {
 			return err(toFailure(e, p, "ReadFailed"));
 		}
@@ -296,13 +341,17 @@ export class FileSystemService {
 	 */
 	public async writeVaultBinary(
 		vaultPath: string,
-		data: ArrayBuffer,
+		data: Uint8Array,
 	): Promise<Result<void, AppFailure>> {
 		const p = Pathing.toVaultPath(vaultPath);
 		const ensured = await this.ensureParentDirectory(p);
 		if (isErr(ensured)) return ensured;
 		try {
-			await writeBinaryWithRetry(this.vault.adapter, p, data, {
+			const arrayBuffer = data.buffer.slice(
+				data.byteOffset,
+				data.byteOffset + data.byteLength,
+			) as ArrayBuffer;
+			await writeBinaryWithRetry(this.vault.adapter, p, arrayBuffer, {
 				maxAttempts: 4,
 				baseDelayMs: 30,
 			});
@@ -317,7 +366,7 @@ export class FileSystemService {
 	 */
 	public async writeVaultBinaryAtomic(
 		vaultPath: string,
-		data: ArrayBuffer,
+		data: Uint8Array,
 	): Promise<Result<void, AppFailure>> {
 		const dst = Pathing.toVaultPath(vaultPath);
 		const ensured = await this.ensureParentDirectory(dst);
@@ -328,7 +377,11 @@ export class FileSystemService {
 				`${dst}.__tmp__${Date.now()}-${Math.random().toString(36).slice(2)}`,
 			);
 			try {
-				await writeBinaryWithRetry(this.vault.adapter, tmp, data, {
+				const arrayBuffer = data.buffer.slice(
+					data.byteOffset,
+					data.byteOffset + data.byteLength,
+				) as ArrayBuffer;
+				await writeBinaryWithRetry(this.vault.adapter, tmp, arrayBuffer, {
 					maxAttempts: 4,
 					baseDelayMs: 30,
 				});
@@ -338,7 +391,7 @@ export class FileSystemService {
 				const preCommitCheck = await verifyWrittenFile(
 					this.vault.adapter,
 					tmp,
-					data,
+					arrayBuffer,
 				);
 				if (isErr(preCommitCheck)) {
 					this.log.error(
@@ -364,7 +417,7 @@ export class FileSystemService {
 				// The backup-swap fallback remains as a secondary defense mechanism.
 				// Its own internal verification can be updated to use the new utility as well.
 				// For this change, we will pass the expected data down.
-				return await this.replaceViaBackupSwapResult(dst, tmp, data);
+				return await this.replaceViaBackupSwapResult(dst, tmp, arrayBuffer);
 			} catch (e: unknown) {
 				return err(toFailure(e, dst, "WriteFailed"));
 			} finally {
@@ -400,7 +453,7 @@ export class FileSystemService {
 			const verifyResult = await verifyWrittenFile(
 				this.vault.adapter,
 				dst,
-				originalData,
+				originalData as ArrayBuffer,
 			);
 			if (isErr(verifyResult)) {
 				this.log.error(
@@ -446,7 +499,7 @@ export class FileSystemService {
 		vaultPath: string,
 		content: string,
 	): Promise<Result<void, AppFailure>> {
-		const buffer = new TextEncoder().encode(content).buffer;
+		const buffer = new TextEncoder().encode(content);
 		return this.writeVaultBinaryAtomic(Pathing.toVaultPath(vaultPath), buffer);
 	}
 
@@ -458,15 +511,49 @@ export class FileSystemService {
 		const p = Pathing.toVaultPath(vaultPath);
 		const ensured = await this.ensureParentDirectory(p);
 		if (isErr(ensured)) return ensured;
-		try {
-			await withFsRetry(() => this.vault.adapter.append(p, text), {
-				maxAttempts: 6,
-				baseDelayMs: 40,
-			});
-			return ok(void 0);
-		} catch (e: unknown) {
-			return err(toFailure(e, p, "WriteFailed"));
-		}
+
+		return this.keyedQueue.run(`append:${p}`, async () => {
+			try {
+				if (typeof this.vault.adapter.append === "function") {
+					await withFsRetry(
+						() =>
+							(
+								this.vault.adapter.append as NonNullable<
+									typeof this.vault.adapter.append
+								>
+							)(p, text),
+						{
+							maxAttempts: 6,
+							baseDelayMs: 40,
+						},
+					);
+				} else {
+					// Fallback
+					const existing = await this.readVaultText(p);
+					if (isErr(existing)) {
+						if (existing.error.kind === "NotFound") {
+							await withFsRetry(() => this.vault.adapter.write(p, text), {
+								maxAttempts: 6,
+								baseDelayMs: 40,
+							});
+						} else {
+							return err(existing.error);
+						}
+					} else {
+						await withFsRetry(
+							() => this.vault.adapter.write(p, existing.value + text),
+							{
+								maxAttempts: 6,
+								baseDelayMs: 40,
+							},
+						);
+					}
+				}
+				return ok(void 0);
+			} catch (e: unknown) {
+				return err(toFailure(e, p, "WriteFailed"));
+			}
+		});
 	}
 
 	/** Result-based read of UTF-8 text from vault. */
@@ -532,9 +619,7 @@ export class FileSystemService {
 			// Calls the new, clean, purpose-built method. Much clearer!
 			return this.readNodeFileBinary(filePath);
 		} else {
-			const res = await this.readVaultBinary(filePath);
-			if (isErr(res)) return res;
-			return ok(new Uint8Array(res.value));
+			return this.readVaultBinary(filePath);
 		}
 	}
 
@@ -544,13 +629,14 @@ export class FileSystemService {
 		data: Uint8Array,
 	): Promise<Result<void, AppFailure>> {
 		if (Pathing.isSystemPath(filePath)) {
-			return this.writeNodeFile(filePath, data) as any;
+			const result = await this.writeNodeFile(filePath, data);
+			if (isErr(result)) {
+				// Map FileSystemFailure to AppFailure
+				return err(result.error as unknown as AppFailure);
+			}
+			return ok(void 0);
 		} else {
-			const arrayBuffer = (data.buffer as ArrayBuffer).slice(
-				data.byteOffset,
-				data.byteOffset + data.byteLength,
-			);
-			return this.writeVaultBinary(filePath, arrayBuffer);
+			return this.writeVaultBinary(filePath, data);
 		}
 	}
 
@@ -588,7 +674,9 @@ export class FileSystemService {
 			});
 			return ok(created);
 		} catch (e: unknown) {
-			const code = (e as any)?.code ?? (e as any)?.Code;
+			const code =
+				(e as unknown as { code?: string; Code?: string })?.code ??
+				(e as unknown as { code?: string; Code?: string })?.Code;
 			if (code === "EEXIST") {
 				const now = this.getTFileByPath(p);
 				if (now) {
@@ -622,6 +710,7 @@ export class FileSystemService {
 	/** Result-based remove of a vault path (canonical). */
 	public async removeVaultPath(
 		vaultPath: string,
+		opts?: { ignoreNotFound?: boolean },
 	): Promise<Result<void, AppFailure>> {
 		const p = Pathing.toVaultPath(vaultPath);
 		try {
@@ -631,7 +720,9 @@ export class FileSystemService {
 			});
 			return ok(void 0);
 		} catch (e: unknown) {
-			return err(toFailure(e, p, "WriteFailed"));
+			const f = toFailure(e, p, "WriteFailed");
+			if (opts?.ignoreNotFound && f.kind === "NotFound") return ok(void 0);
+			return err(f);
 		}
 	}
 
@@ -642,6 +733,8 @@ export class FileSystemService {
 	): Promise<Result<void, AppFailure>> {
 		const from = Pathing.toVaultPath(fromPath);
 		const to = Pathing.toVaultPath(toPath);
+		const ensured = await this.ensureParentDirectory(to);
+		if (isErr(ensured)) return ensured;
 		try {
 			await renameWithRetry(this.vault.adapter, from, to, {
 				maxAttempts: 6,
@@ -1001,7 +1094,7 @@ export class FileSystemService {
 		try {
 			const data = await withFsRetry(() => fsp.readFile(filePath, "utf-8"));
 			return ok(data);
-		} catch (error: any) {
+		} catch (error: unknown) {
 			return err(toFailure(error, filePath, "ReadFailed"));
 		}
 	}
@@ -1012,7 +1105,7 @@ export class FileSystemService {
 		try {
 			const data = await withFsRetry(() => fsp.readFile(filePath));
 			return ok(data as Uint8Array);
-		} catch (error: any) {
+		} catch (error: unknown) {
 			return err(toFailure(error, filePath, "ReadFailed"));
 		}
 	}
@@ -1028,7 +1121,7 @@ export class FileSystemService {
 			});
 			this.nodeStatsCache.delete(filePath);
 			return ok(void 0);
-		} catch (error: any) {
+		} catch (error: unknown) {
 			return err(toFailure(error, filePath, "WriteFailed"));
 		}
 	}
@@ -1040,7 +1133,7 @@ export class FileSystemService {
 			await withFsRetry(() => fsp.unlink(filePath));
 			this.nodeStatsCache.delete(filePath);
 			return ok(void 0);
-		} catch (error: any) {
+		} catch (error: unknown) {
 			return err(toFailure(error, filePath, "WriteFailed"));
 		}
 	}

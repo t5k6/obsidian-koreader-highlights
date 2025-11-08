@@ -6,11 +6,7 @@ import type {
 	LuaMetadata,
 } from "src/types";
 import { bookKeyFromDocProps, getHighlightKey } from "./formatting";
-import {
-	getFileNameWithoutExt,
-	normalizeWhitespace,
-	toMatchKey,
-} from "./pathing";
+import { Pathing } from "./pathing";
 
 export type DuplicateCounts = {
 	newHighlights: number;
@@ -27,14 +23,14 @@ export function buildExpectedFilenameKeys(docProps: DocProps): Set<string> {
 	const title = docProps.title ?? "";
 	const authors = docProps.authors ?? "";
 
-	if (title) keys.add(toMatchKey(title));
-	if (authors) keys.add(toMatchKey(authors));
+	if (title) keys.add(Pathing.toMatchKey(title));
+	if (authors) keys.add(Pathing.toMatchKey(authors));
 
 	if (title && authors) {
-		keys.add(toMatchKey(`${title} ${authors}`));
-		keys.add(toMatchKey(`${authors} ${title}`));
-		keys.add(toMatchKey(`${title} - ${authors}`));
-		keys.add(toMatchKey(`${authors} - ${title}`));
+		keys.add(Pathing.toMatchKey(`${title} ${authors}`));
+		keys.add(Pathing.toMatchKey(`${authors} ${title}`));
+		keys.add(Pathing.toMatchKey(`${title} - ${authors}`));
+		keys.add(Pathing.toMatchKey(`${authors} - ${title}`));
 	}
 
 	return keys;
@@ -47,13 +43,13 @@ export function filenameMatchesKeys(
 	basename: string, // This is the full filename, e.g., "My Book.md"
 	expectedKeys: Set<string>,
 ): boolean {
-	const stemWithMetadata = getFileNameWithoutExt(basename);
+	const stemWithMetadata = Pathing.getFileNameWithoutExt(basename);
 	// Then, strip any trailing metadata like [tags] or (notes) before matching.
 	const stem = stemWithMetadata.replace(
 		/(?:\s*(?:\[[^\]]*]|\([^)]*\)))+$/g,
 		"",
 	);
-	const key = toMatchKey(stem);
+	const key = Pathing.toMatchKey(stem);
 	return expectedKeys.has(key);
 }
 
@@ -107,11 +103,19 @@ export function analyzeAnnotations(
 		if (!prev) {
 			newCount++;
 		} else {
-			const prevNormText = normalizeWhitespace(prev.text ?? "").toLowerCase();
-			const incNormText = normalizeWhitespace(n.text ?? "").toLowerCase();
+			const prevNormText = Pathing.normalizeWhitespace(
+				prev.text ?? "",
+			).toLowerCase();
+			const incNormText = Pathing.normalizeWhitespace(
+				n.text ?? "",
+			).toLowerCase();
 
-			const prevNormNote = normalizeWhitespace(prev.note ?? "").toLowerCase();
-			const incNormNote = normalizeWhitespace(n.note ?? "").toLowerCase();
+			const prevNormNote = Pathing.normalizeWhitespace(
+				prev.note ?? "",
+			).toLowerCase();
+			const incNormNote = Pathing.normalizeWhitespace(
+				n.note ?? "",
+			).toLowerCase();
 
 			if (prevNormText !== incNormText || prevNormNote !== incNormNote) {
 				modifiedCount++;
@@ -138,8 +142,11 @@ export function sortDuplicateMatches(
 	matches: DuplicateMatch[],
 	highlightsFolder: string,
 ): DuplicateMatch[] {
+	if (matches.length === 0) return [];
+
 	const folder = (highlightsFolder ?? "").replace(/\/+$/, "");
 	const inFolder = (p: string): boolean => {
+		if (!p) return false;
 		if (!folder) {
 			// If no folder is set, prefer root-level files.
 			return !p.includes("/");
@@ -180,9 +187,14 @@ export function sortDuplicateMatches(
 		const folderComparison = aInFolder - bInFolder;
 		if (folderComparison !== 0) return folderComparison;
 
-		// Criterion 5: Newest file first
-		const aMtime = a.file.stat.mtime ?? 0;
-		const bMtime = b.file.stat.mtime ?? 0;
+		// Criterion 5: Newest file first.
+		// Be defensive: some callers/tests may accidentally include entries without a file.
+		if (!a.file && !b.file) return 0;
+		if (!a.file) return 1;
+		if (!b.file) return -1;
+
+		const aMtime = a.file.stat?.mtime ?? 0;
+		const bMtime = b.file.stat?.mtime ?? 0;
 		return bMtime - aMtime;
 	});
 }

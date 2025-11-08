@@ -3,7 +3,7 @@ import {
 	DEFAULT_LOGS_FOLDER,
 	DEFAULT_TEMPLATES_FOLDER,
 } from "src/constants";
-import { normalizeSystemPath, toVaultPath } from "src/lib/pathing";
+import { Pathing } from "src/lib/pathing";
 import type { KoreaderHighlightImporterSettings, PluginData } from "src/types";
 import { CURRENT_SCHEMA_VERSION } from "src/types";
 import { z } from "zod";
@@ -99,6 +99,12 @@ export const RawSettingsSchema = z
 			.min(0)
 			.catch(() => BASE_DEFAULTS.backupRetentionDays)
 			.optional(),
+		maxBackupsPerNote: z.coerce
+			.number()
+			.int()
+			.min(0)
+			.catch(() => BASE_DEFAULTS.maxBackupsPerNote)
+			.optional(),
 		scanTimeoutSeconds: z.coerce
 			.number()
 			.int()
@@ -107,11 +113,11 @@ export const RawSettingsSchema = z
 			.optional(),
 		lastDeviceTimestamp: z.string().optional(),
 
-		// Nested blocks (optional + partial + passthrough)
+		// Nested blocks (optional + partial + strip)
 		template: TemplateSchema.partial().optional(),
 		frontmatter: FrontmatterSchema.partial().optional(),
 	})
-	.passthrough();
+	.strip();
 
 // --- Base defaults (no circular refs) ---
 export const BASE_DEFAULTS: KoreaderHighlightImporterSettings = {
@@ -141,6 +147,7 @@ export const BASE_DEFAULTS: KoreaderHighlightImporterSettings = {
 	mergeOverlappingHighlights: true,
 	commentStyle: "html" as const,
 	backupRetentionDays: 30,
+	maxBackupsPerNote: 5,
 	scanTimeoutSeconds: 8,
 	template: {
 		useCustomTemplate: false,
@@ -184,13 +191,17 @@ export function normalizeSettings(
 	const merged = deepMerge(BASE_DEFAULTS, migratedData);
 
 	// 4. Perform all post-merge normalizations (path handling, boolean coercion, array cleanup).
-	merged.koreaderScanPath = normalizeSystemPath(merged.koreaderScanPath);
+	merged.koreaderScanPath = Pathing.normalizeSystemPath(
+		merged.koreaderScanPath,
+	);
 	merged.statsDbPathOverride = merged.statsDbPathOverride
-		? normalizeSystemPath(merged.statsDbPathOverride)
+		? Pathing.normalizeSystemPath(merged.statsDbPathOverride)
 		: "";
-	merged.highlightsFolder = toVaultPath(merged.highlightsFolder);
-	merged.logsFolder = toVaultPath(merged.logsFolder);
-	merged.template.templateDir = toVaultPath(merged.template.templateDir);
+	merged.highlightsFolder = Pathing.toVaultPath(merged.highlightsFolder);
+	merged.logsFolder = Pathing.toVaultPath(merged.logsFolder);
+	merged.template.templateDir = Pathing.toVaultPath(
+		merged.template.templateDir,
+	);
 
 	const rawObj = (raw ?? {}) as Record<string, unknown>;
 	if ("logToFile" in rawObj) {

@@ -151,6 +151,9 @@ export class TemplatePreviewModal extends BaseModal<boolean> {
 	}
 
 	private async refreshPreview(): Promise<void> {
+		// If renderContent hasn't run correctly, avoid throwing from preview updates.
+		if (!this.previewEl) return;
+
 		this.previewEl.setText("Rendering…");
 		await new Promise((resolve) => setTimeout(resolve, 10));
 

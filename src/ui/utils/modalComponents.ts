@@ -94,8 +94,9 @@ export function renderValidationError(
 	container.empty(); // Clear previous errors
 	const el = container.createDiv({
 		cls: "koreader-inline-error",
-		attr: { role: "alert" },
 	});
+	// Set ARIA role separately to satisfy stricter typings on createDiv options
+	el.setAttr("role", "alert");
 
 	if (Array.isArray(messages)) {
 		if (messages.length > 0) {

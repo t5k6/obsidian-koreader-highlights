@@ -1,14 +1,10 @@
-import type { App } from "obsidian";
 import type { Database } from "sql.js";
-import { isAbortError } from "src/lib/concurrency";
 import { ConcurrentDatabase } from "src/lib/concurrency/ConcurrentDatabase";
 import { isErr } from "src/lib/core/result";
-import { isTFolder } from "src/lib/obsidian/typeguards";
+import { ConcurrentDbExecutor } from "src/lib/database/IndexDbExecutor";
 import type { FileSystemService } from "src/services/FileSystemService";
 import type { LoggingService } from "src/services/LoggingService";
-import type { NoteEditorService } from "src/services/parsing/NoteEditorService";
 import type { SqlJsManager } from "src/services/SqlJsManager";
-import { ParallelIndexProcessor } from "../ParallelIndexProcessor";
 import { CURRENT_DB_VERSION, DDL, migrateDb } from "./schema";
 
 export type IndexState = "persistent" | "in_memory" | "unavailable";
@@ -23,15 +19,6 @@ export type RebuildStatus = {
 	phase: RebuildPhase;
 	progress?: { current: number; total: number };
 	error?: unknown;
-};
-
-type RebuildOptions = {
-	app: App;
-	noteEditorService: NoteEditorService;
-	highlightsFolder: string;
-	writer: (batch: import("src/types").BookMetadata[]) => Promise<void>;
-	workers?: number;
-	batchSize?: number;
 };
 
 export class IndexDatabase {
@@ -78,6 +65,14 @@ export class IndexDatabase {
 		return this.concurrent;
 	}
 
+	/**
+	 * Create an executor that repositories can use for typed read/write operations.
+	 * This keeps tx/locking details encapsulated in ConcurrentDatabase.
+	 */
+	public getExecutor(): ConcurrentDbExecutor {
+		return new ConcurrentDbExecutor(this.getConcurrent());
+	}
+
 	public onRebuildStatus(
 		listener: (status: RebuildStatus) => void,
 	): () => void {
@@ -99,100 +94,11 @@ export class IndexDatabase {
 		await this.rebuildP?.catch(() => {});
 	}
 
-	public async startBackgroundRebuild(opts: RebuildOptions): Promise<void> {
-		if (this.state !== "in_memory" || this.isRebuilding()) {
-			return;
-		}
-
-		this.rebuildAbortController = new AbortController();
-		const signal = this.rebuildAbortController.signal;
-
-		this.setRebuildStatus({
-			phase: "rebuilding",
-			progress: { current: 0, total: 0 },
-		});
-
-		this.rebuildP = (async () => {
-			try {
-				await new Promise((resolve) => setTimeout(resolve, 0));
-
-				const root = opts.app.vault.getAbstractFileByPath(
-					opts.highlightsFolder ?? "",
-				);
-				if (!isTFolder(root)) {
-					const error = new Error(`Missing folder: ${opts.highlightsFolder}`);
-					this.setRebuildStatus({ phase: "failed", error });
-					this.log.error("Index rebuild failed", error);
-					return; // Exit gracefully
-				}
-
-				const { getOptimalConcurrency } = await import("src/lib/concurrency");
-				const workers = opts.workers ?? getOptimalConcurrency();
-				const batchSize = opts.batchSize ?? 64;
-
-				const filesStream = this.fs.iterateMarkdownFiles(root, {
-					recursive: true,
-					signal,
-				});
-
-				const processor = new ParallelIndexProcessor(
-					opts.noteEditorService,
-					opts.writer,
-					this.log,
-					{ workers, batchSize },
-				);
-
-				const onProgress = (current: number) => {
-					this.setRebuildStatus({
-						phase: "rebuilding",
-						progress: { current, total: 0 },
-					});
-				};
-
-				const result = await processor.processFiles(
-					filesStream,
-					onProgress,
-					signal,
-				);
-
-				if (signal.aborted) {
-					this.setRebuildStatus({ phase: "cancelled" });
-					return;
-				}
-
-				if (isErr(result)) {
-					this.log.error("Index rebuild failed", result.error);
-					throw result.error;
-				}
-
-				const processResult = result.value;
-				if (processResult.errors.length > 0) {
-					this.log.warn(
-						`Index rebuild completed with ${processResult.errors.length} errors.`,
-					);
-				}
-
-				this.setRebuildStatus({ phase: "complete" });
-				this.log.info("In-memory index rebuild completed.");
-			} catch (e) {
-				if (isAbortError(e)) {
-					this.setRebuildStatus({ phase: "cancelled" });
-					this.log.warn("Index rebuild cancelled.");
-				} else {
-					this.setRebuildStatus({ phase: "failed", error: e });
-					this.log.error("Index rebuild failed", e);
-				}
-			} finally {
-				this.rebuildAbortController = null;
-			}
-		})();
-	}
-
 	public cancelRebuild(): void {
 		this.rebuildAbortController?.abort();
 	}
 
-	private setRebuildStatus(status: RebuildStatus): void {
+	public setRebuildStatus(status: RebuildStatus): void {
 		this.rebuildStatus = status;
 		for (const l of this.rebuildListeners) {
 			try {
@@ -221,6 +127,28 @@ export class IndexDatabase {
 	public async dispose(): Promise<void> {
 		await this.flush();
 		this.sql.closeDatabase(this.dbPath);
+	}
+
+	public async forceFallbackToInMemory(): Promise<void> {
+		if (this.state !== "persistent") return;
+
+		this.log.warn("Forcing fallback to in-memory mode");
+
+		try {
+			const mem = await this.sql.createInMemoryDatabase();
+			this.idxDb = mem;
+			this.sql.applySchema(mem, DDL);
+			mem.run(`PRAGMA user_version = ${CURRENT_DB_VERSION};`);
+			migrateDb(mem, this.log);
+			this.state = "in_memory";
+			this.concurrent = new ConcurrentDatabase(async () => this.idxDb!);
+			this.setRebuildStatus({ phase: "rebuilding" });
+		} catch (e) {
+			this.log.error("Fallback failed", e);
+			this.state = "unavailable";
+			this.idxDb = null;
+			this.concurrent = null;
+		}
 	}
 
 	private async ensureReady(): Promise<void> {

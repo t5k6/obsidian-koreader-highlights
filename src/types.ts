@@ -175,6 +175,7 @@ export interface KoreaderHighlightImporterSettings {
 	template: KoreaderTemplateSettings;
 	commentStyle: CommentStyle;
 	backupRetentionDays: number;
+	maxBackupsPerNote: number;
 	lastDeviceTimestamp?: string;
 	scanTimeoutSeconds: number;
 }
@@ -380,6 +381,8 @@ export interface PluginData {
 	appliedMigrations: string[];
 	/** Last plugin version that successfully ran migrations (diagnostics). */
 	lastPluginMigratedTo?: string;
+	/** Timestamp of last successful snapshot GC run (epoch ms). */
+	lastSnapshotGCRunAt?: number;
 }
 
 export const CURRENT_SCHEMA_VERSION = 1;

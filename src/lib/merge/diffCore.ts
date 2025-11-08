@@ -50,9 +50,9 @@ export function formatConflictRegions(regions: MergeRegion<string>[]): {
 			}
 			mergedLines.push(
 				`\n> [!conflict]- Conflict Start: Your Edits (Vault)`,
-				...region.conflict.a.map((line) => `> ${line}`),
+				...region.conflict.a.map((line: string) => `> ${line}`),
 				`> [!tip]- Incoming Changes (KOReader)`,
-				...region.conflict.b.map((line) => `> ${line}`),
+				...region.conflict.b.map((line: string) => `> ${line}`),
 				`> [!conflict]- Conflict End`,
 				`\n`,
 			);

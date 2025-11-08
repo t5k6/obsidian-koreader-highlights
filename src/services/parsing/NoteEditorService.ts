@@ -140,7 +140,7 @@ export class NoteEditorService implements FileMetadataExtractor {
 	): Promise<void> {
 		throwIfAborted(signal);
 		try {
-			await this.app.fileManager.processFrontMatter(file, (fm) => {
+			await this.app.fileManager.processFrontMatter(file, (fm: any) => {
 				updater(fm as unknown as Record<string, any>);
 			});
 		} catch (e) {

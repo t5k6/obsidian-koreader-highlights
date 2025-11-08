@@ -1,5 +1,5 @@
 import { err, ok, type Result } from "../core/result";
-import { getFsCode } from "../errors/mapper";
+import { getFsCode, toFailure } from "../errors/mapper";
 import type { AppFailure } from "../errors/types";
 
 /**
@@ -102,9 +102,10 @@ export function createValidationError(
  */
 export const DatabaseErrors = {
 	fromRaw(operation: string, cause: unknown): AppFailure {
-		const code = getFsCode(cause);
-		if (code === "EACCES") return { kind: "PermissionDenied", path: operation };
-		if (code === "ENOENT") return { kind: "NotFound", path: operation };
+		// Delegate filesystem error interpretation to the canonical mapper
+		if (getFsCode(cause)) {
+			return toFailure(cause, operation, "ReadFailed");
+		}
 		return createDbError(operation, cause);
 	},
 };

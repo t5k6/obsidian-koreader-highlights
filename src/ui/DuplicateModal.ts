@@ -55,10 +55,11 @@ export class DuplicateHandlingModal
 		container.addClass("duplicate-modal-container");
 		container.setAttr("aria-labelledby", "modal-title");
 
-		container.createDiv({
+		const sidebar = container.createDiv({
 			cls: "duplicate-modal-sidebar",
-			attr: { "data-type": this.match.matchType },
 		});
+		// Set data attribute separately to satisfy stricter createDiv typings
+		sidebar.setAttr("data-type", this.match.matchType);
 
 		const main = container.createDiv();
 

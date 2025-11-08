@@ -3,8 +3,8 @@ import type { CacheManager } from "src/lib/cache/CacheManager";
 import { isAbortError, runPool } from "src/lib/concurrency";
 import { err, isErr, ok } from "src/lib/core/result";
 import type { AppFailure, AppResult } from "src/lib/errors/types";
-import { convertKohlMarkers } from "src/lib/parsing/highlightExtractor";
-import { normalizeSystemPath, Pathing } from "src/lib/pathing";
+import { convertKohlMarkers } from "src/lib/kohlMarkers";
+import { Pathing } from "src/lib/pathing";
 import type KoreaderImporterPlugin from "src/main";
 import type { ImportService } from "src/services/import/ImportService";
 import { notifyOnError } from "src/services/ui/notificationUtils";
@@ -15,6 +15,7 @@ import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 import type { NoteEditorService } from "../parsing/NoteEditorService";
 import type { IndexCoordinator } from "../vault/index/IndexCoordinator";
+import type { NotePersistenceService } from "../vault/NotePersistenceService";
 
 // Unified command result types
 type CmdStatus = "success" | "cancelled" | "skipped" | "error";
@@ -39,6 +40,7 @@ export class CommandManager {
 		private readonly localIndexService: IndexCoordinator,
 		private readonly fs: FileSystemService,
 		private readonly noteEditorService: NoteEditorService,
+		private readonly persistence: NotePersistenceService,
 	) {
 		this.log = this.loggingService.scoped("CommandManager");
 	}
@@ -242,6 +244,96 @@ export class CommandManager {
 					return true;
 				},
 			},
+			{
+				id: "cleanup-orphaned-data",
+				name: "Clean up orphaned data files",
+				callback: () => {
+					void (async () => {
+						const res = await this.notifyCmd(
+							this.executeCleanupOrphanedData(),
+							{
+								message: () => "Cleanup failed. Check console for details.",
+							},
+						);
+						if (res.status === "success" && res.data) {
+							const { deleted } = res.data;
+							new Notice(
+								`Cleaned up ${deleted} orphaned snapshot file${deleted === 1 ? "" : "s"}.`,
+								5000,
+							);
+						}
+					})();
+				},
+			},
+			{
+				id: "finalize-note",
+				name: "KOReader: Finalize note (remove tracking comments)",
+				icon: "check-circle",
+				checkCallback: (checking) => {
+					const file = this.app.workspace.getActiveFile();
+					if (!file || file.extension !== "md") return false;
+					// Only show command if file is in highlights folder
+					if (
+						!Pathing.isAncestor(
+							this.plugin.settings.highlightsFolder,
+							file.path,
+						)
+					)
+						return false;
+					if (!checking) {
+						void this.notifyCmd<{ changed: boolean }>(
+							this.executeFinalizeCurrentNote(file),
+							{ message: () => "Finalize failed. See console for details." },
+						)
+							.then((res) => {
+								if (res.status === "skipped") {
+									new Notice("No active file to finalize.", 4000);
+									return;
+								}
+								const changed = !!res.data?.changed;
+								new Notice(
+									changed
+										? "KOReader tracking comments removed from this note."
+										: "No tracking comments found in this note.",
+									5000,
+								);
+							})
+							.catch((e: any) => {
+								// Should be rare since notifyCmd swallows error into result; log just in case
+								console.error("Finalize failed", e);
+							});
+					}
+					return true;
+				},
+			},
+			{
+				id: "cleanup-completed-books",
+				name: "KOReader: Clean up comments from all completed books",
+				callback: () => {
+					void (async () => {
+						const res = await this.notifyCmd<{
+							scanned: number;
+							changed: number;
+						}>(this.executeCleanupCompletedBooks(), {
+							message: () => "Cleanup failed. See console for details.",
+						});
+						if (res.status === "success") {
+							const { changed, scanned } = res.data ?? {
+								changed: 0,
+								scanned: 0,
+							};
+							new Notice(
+								changed > 0
+									? `Cleaned up ${changed} completed book${changed === 1 ? "" : "s"} (${scanned} total scanned).`
+									: `No changes needed. Scanned ${scanned} file${scanned === 1 ? "" : "s"}.`,
+								5000,
+							);
+						} else if (res.status === "cancelled") {
+							new Notice("Cleanup cancelled.");
+						}
+					})();
+				},
+			},
 		];
 	}
 
@@ -285,7 +377,7 @@ export class CommandManager {
 			});
 		}
 
-		const mountPoint = normalizeSystemPath(rawMountPoint);
+		const mountPoint = Pathing.normalizeSystemPath(rawMountPoint);
 
 		if (mountPoint !== this.plugin.settings.koreaderScanPath) {
 			this.log.info(`Using scan path: ${mountPoint}`);
@@ -541,6 +633,129 @@ export class CommandManager {
 			existingNoteOverride: file,
 		});
 		return ok({ changed: !!changed });
+	}
+
+	/**
+	 * Executes cleanup of orphaned snapshot data files.
+	 */
+	public async executeCleanupOrphanedData(): Promise<
+		AppResult<{
+			scanned: number;
+			deleted: number;
+			failed: number;
+		}>
+	> {
+		this.log.info("Cleanup orphaned data triggered by user command.");
+		const result = await this.persistence.collectOrphanedSnapshots(
+			this.plugin.settings.highlightsFolder,
+		);
+		return ok(result);
+	}
+
+	/**
+	 * Finalizes a single note by removing Kohl tracking comments.
+	 * @param file - The file to finalize
+	 */
+	async executeFinalizeCurrentNote(
+		file: TFile,
+	): Promise<AppResult<{ changed: boolean }>> {
+		const result = await this._convertSingleFile(file, "none");
+		if (isErr(result)) return result;
+		return ok({ changed: result.value });
+	}
+
+	/**
+	 * Cleans up comments from all completed books.
+	 * Finds files with readingStatus: 'completed', shows confirmation, then processes batch.
+	 */
+	async executeCleanupCompletedBooks(): Promise<
+		AppResult<{ scanned: number; changed: number }>
+	> {
+		const folder = this.plugin.settings.highlightsFolder;
+		const summary: ConversionSummary = { scanned: 0, changed: 0 };
+
+		// Find all MD files in highlights folder
+		const { files } = await this.fs.getFilesInFolder(folder, {
+			extensions: ["md"],
+			recursive: true,
+		});
+
+		// Filter for completed books
+		const completedFiles: TFile[] = [];
+		for (const file of files) {
+			const frontmatter =
+				this.app.metadataCache.getFileCache(file)?.frontmatter;
+			if (frontmatter && frontmatter["readingStatus"] === "completed") {
+				completedFiles.push(file);
+			}
+		}
+
+		summary.scanned = files.length; // We scanned all files, but filtered for completed
+
+		if (completedFiles.length === 0) {
+			return ok({ scanned: summary.scanned, changed: 0 });
+		}
+
+		// Show confirmation
+		const fileList =
+			completedFiles.length <= 10
+				? completedFiles.map((f) => f.basename).join(", ")
+				: `${completedFiles.length} files`;
+
+		const confirmed = await InteractionModal.confirm(this.app, {
+			title: `Clean up ${completedFiles.length} completed book${completedFiles.length === 1 ? "" : "s"}?`,
+			message: `Found ${completedFiles.length} completed books: ${fileList}. Remove tracking comments from these files? This action cannot be undone.`,
+			ctaText: "Clean up",
+		});
+
+		if (!confirmed) {
+			// Handle cancellation properly
+			return ok({ scanned: summary.scanned, changed: 0 });
+		}
+
+		// Process batch with error handling
+		try {
+			await withProgress(
+				this.app,
+				0,
+				async (tick, signal) => {
+					tick.setStatus(
+						`Processing ${completedFiles.length} completed books...`,
+					);
+					tick.setTotal(completedFiles.length);
+
+					await runPool(
+						completedFiles,
+						async (file: TFile) => {
+							tick.setStatus(`Cleaning: ${file.name}`);
+							const result = await this._convertSingleFile(file, "none");
+							if (isErr(result)) {
+								this.log.warn(`Failed to clean ${file.path}`, result.error);
+							} else if (result.value) {
+								summary.changed++;
+							}
+							tick();
+						},
+						{ concurrency: 4, signal },
+					);
+				},
+				{
+					title: "Cleaning up completed books",
+					showWhenTotalIsZero: true,
+					autoMessage: false,
+				},
+			);
+		} catch (error) {
+			// Handle any unexpected errors from withProgress
+			this.log.error("Error during batch cleanup", error);
+			return err({
+				kind: "WriteFailed",
+				path: "batch_cleanup",
+				cause: error,
+			} as any);
+		}
+
+		return ok({ scanned: summary.scanned, changed: summary.changed });
 	}
 
 	/**

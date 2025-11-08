@@ -7,14 +7,13 @@ import {
 	type TAbstractFile,
 	type TFile,
 } from "obsidian";
-import type { Database } from "sql.js";
 import type { CacheManager, IterableCache } from "src/lib/cache";
 
 import { isAbortError } from "src/lib/concurrency";
-import { isErr } from "src/lib/core/result";
-import { BookRepository } from "src/lib/database/bookRepository";
-import { SourceRepository } from "src/lib/database/sourceRepository";
+import { isErr, wrapResult } from "src/lib/core/result";
+import type { IndexRepository } from "src/lib/database/indexRepository";
 import type { ImportSourceRow } from "src/lib/database/types";
+import type { AppResult } from "src/lib/errors/types";
 import {
 	isMarkdownFile,
 	isTFile,
@@ -25,12 +24,13 @@ import type KoreaderImporterPlugin from "src/main";
 import type { FileSystemService } from "src/services/FileSystemService";
 import type { LoggingService } from "src/services/LoggingService";
 import type { NoteEditorService } from "src/services/parsing/NoteEditorService";
+
 import type {
 	KoreaderHighlightImporterSettings,
 	SettingsObserver,
 } from "src/types";
+import type { VaultBookScanner } from "../VaultBookScanner";
 import type { IndexDatabase } from "./IndexDatabase";
-import { executeTyped, executeWrite, RowMappers } from "./schema";
 
 export class IndexCoordinator implements SettingsObserver {
 	private readonly log;
@@ -43,9 +43,8 @@ export class IndexCoordinator implements SettingsObserver {
 		void
 	>;
 
-	private rebuildNotice: Notice | null = null;
-	private unsubscribeRebuild?: () => void;
 	private readonly recentlyImportedPaths = new Set<string>();
+	private rebuildController: AbortController | null = null;
 
 	constructor(
 		private readonly app: App,
@@ -55,6 +54,8 @@ export class IndexCoordinator implements SettingsObserver {
 		private readonly fsService: FileSystemService,
 		logging: LoggingService,
 		cacheManager: CacheManager,
+		private readonly vaultBookScanner: VaultBookScanner,
+		private readonly indexRepo: IndexRepository,
 	) {
 		this.log = logging.scoped("IndexCoordinator");
 		this.settings = this.plugin.settings;
@@ -78,28 +79,87 @@ export class IndexCoordinator implements SettingsObserver {
 		);
 	}
 
-	private async executeBookQueries(
-		queries: Array<{ sql: string; params: readonly unknown[] }>,
-	): Promise<void> {
-		await this._withIndexTx(async (db) => {
-			for (const query of queries) {
-				executeWrite(db, query);
+	public async startBackgroundRebuild(): Promise<void> {
+		// Cancel any existing rebuild before starting a new one.
+		if (this.rebuildController) {
+			this.rebuildController.abort();
+		}
+
+		const controller = new AbortController();
+		const signal = controller.signal;
+
+		this.rebuildController = controller;
+
+		try {
+			// Set initial status
+			this.indexDb.setRebuildStatus({
+				phase: "rebuilding",
+				progress: { current: 0, total: 0 },
+			});
+
+			const batchSize = 64; // Same as ParallelIndexProcessor default
+			const batch: import("src/types").BookMetadata[] = [];
+			let processed = 0;
+
+			const stream = this.vaultBookScanner.scanBooks({
+				signal,
+				onProgress: (current) => {
+					processed = current;
+					this.indexDb.setRebuildStatus({
+						phase: "rebuilding",
+						progress: { current, total: 0 },
+					});
+				},
+			});
+
+			for await (const item of stream) {
+				if (isErr(item)) {
+					// Log scan error but continue rebuilding
+					this.log.warn(
+						`Scan error during index rebuild: ${item.error.file.path}`,
+						item.error.error,
+					);
+					continue;
+				}
+
+				const { metadata } = item.value;
+				batch.push(metadata);
+				if (batch.length >= batchSize) {
+					await this.writeBatchToIndex(batch.splice(0, batch.length));
+				}
 			}
-		});
+
+			// Write remaining items
+			if (batch.length > 0) {
+				await this.writeBatchToIndex(batch);
+			}
+
+			// Success
+			this.indexDb.setRebuildStatus({ phase: "complete" });
+			this.log.info("Index rebuild completed successfully");
+		} catch (e) {
+			if (isAbortError(e)) {
+				this.indexDb.setRebuildStatus({ phase: "cancelled" });
+				this.log.info("Index rebuild was cancelled");
+			} else {
+				this.indexDb.setRebuildStatus({ phase: "failed", error: e });
+				this.log.error("Index rebuild failed", e);
+				throw e;
+			}
+		} finally {
+			this.rebuildController = null;
+		}
 	}
 
-	private createRebuildWriter(): (
+	private async writeBatchToIndex(
 		batch: import("src/types").BookMetadata[],
-	) => Promise<void> {
-		return async (batch) => {
-			const queries = batch.flatMap(({ key, title, authors, vaultPath }) =>
-				BookRepository.upsertBookWithInstance(
-					{ key, id: null, title, authors },
-					vaultPath,
-				),
+	): Promise<void> {
+		for (const { key, title, authors, vaultPath } of batch) {
+			await this.indexRepo.upsertBookWithInstance(
+				{ key, id: null, title, authors },
+				vaultPath,
 			);
-			await this.executeBookQueries(queries);
-		};
+		}
 	}
 
 	public async initialize(): Promise<void> {
@@ -107,64 +167,8 @@ export class IndexCoordinator implements SettingsObserver {
 		this.registerVaultEvents();
 
 		if (this.indexDb.getState() === "in_memory") {
-			this.subscribeRebuildUi();
-			const writer = this.createRebuildWriter();
-			void this.indexDb.startBackgroundRebuild({
-				app: this.app,
-				noteEditorService: this.noteEditorService,
-				highlightsFolder: this.settings.highlightsFolder ?? "",
-				writer: writer,
-			});
+			void this.startBackgroundRebuild();
 		}
-	}
-
-	private subscribeRebuildUi(): void {
-		this.unsubscribeRebuild?.();
-		this.unsubscribeRebuild = this.indexDb.onRebuildStatus((s) => {
-			switch (s.phase) {
-				case "rebuilding": {
-					if (!this.rebuildNotice) {
-						this.rebuildNotice = new Notice("📚 Building temporary index…", 0);
-					}
-					const { current = 0, total = 0 } = s.progress ?? {};
-					const message =
-						total > 0
-							? `📚 Building index: ${current}/${total} files (${Math.round((current / total) * 100)}%)`
-							: `📚 Building index: ${current} files scanned...`;
-					this.rebuildNotice.setMessage(message);
-					break;
-				}
-				case "complete":
-					this.safeHideNotice();
-					new Notice("✅ Temporary index ready", 3000);
-					break;
-				case "failed":
-					this.safeHideNotice();
-					new Notice(
-						"⚠️ Rebuild failed. Using slower duplicate detection",
-						5000,
-					);
-					break;
-				case "cancelled":
-					this.safeHideNotice();
-					new Notice("⏸ Index rebuild cancelled", 3000);
-					break;
-				case "idle":
-				default:
-					break;
-			}
-		});
-	}
-
-	private safeHideNotice(): void {
-		try {
-			this.rebuildNotice?.hide();
-		} catch {}
-		this.rebuildNotice = null;
-	}
-
-	public register(plugin: { registerEvent: (e: any) => void }): void {
-		this.registerVaultEvents();
 	}
 
 	public onSettingsChanged(
@@ -178,14 +182,11 @@ export class IndexCoordinator implements SettingsObserver {
 		) {
 			this.invalidateIndexCaches();
 			if (this.indexDb.getState() === "in_memory") {
-				this.indexDb.cancelRebuild();
-				const writer = this.createRebuildWriter();
-				void this.indexDb.startBackgroundRebuild({
-					app: this.app,
-					noteEditorService: this.noteEditorService,
-					highlightsFolder: this.settings.highlightsFolder ?? "",
-					writer: writer,
-				});
+				// Cancel any ongoing rebuild for previous settings and start a new one.
+				if (this.rebuildController) {
+					this.rebuildController.abort();
+				}
+				void this.startBackgroundRebuild();
 			}
 		}
 	}
@@ -206,52 +207,36 @@ export class IndexCoordinator implements SettingsObserver {
 		file: TAbstractFile,
 		oldPath: string,
 	): Promise<void> {
-		this.invalidateIndexCaches();
-		await this._withIndexTx(async (d) => {
-			if (isTFolder(file)) {
-				const renameQuery = BookRepository.handleRenameFolder(
-					oldPath,
-					file.path,
-				);
-				executeWrite(d, renameQuery);
-			} else if (isTFile(file)) {
-				const renameQuery = BookRepository.handleRenameFile(file.path, oldPath);
-				executeWrite(d, renameQuery);
+		if (isTFolder(file)) {
+			await this.indexRepo.handleRenameFolder(oldPath, file.path);
+		} else if (isTFile(file)) {
+			const key = await this.findKeyByVaultPath(oldPath);
+			await this.indexRepo.handleRenameFile(oldPath, file.path);
+			if (key) {
+				this.pathCache.delete(key);
 			}
-		});
+		}
 	}
 
 	public async handleDelete(file: TAbstractFile): Promise<void> {
-		this.invalidateIndexCaches();
-		await this._withIndexTx(async (d) => {
-			if (isTFile(file)) {
-				const pathToDelete = file.path;
-				const findKeyQuery = BookRepository.findKeyByPath(pathToDelete);
-				const [bookKey] = executeTyped(d, findKeyQuery, RowMappers.bookKey);
-
-				if (bookKey) {
-					const latestSourceQuery =
-						SourceRepository.latestSourceForBook(bookKey);
-					const [sourcePath] = executeTyped(
-						d,
-						latestSourceQuery,
-						RowMappers.sourcePath,
-					);
-					if (sourcePath) {
-						executeWrite(d, SourceRepository.deleteByPath(sourcePath));
-						this.log.info(
-							`Reset import status for source '${sourcePath}' due to deletion of note '${pathToDelete}'`,
-						);
-					}
-				}
-				executeWrite(d, BookRepository.deleteInstanceByPath(pathToDelete)); // This triggers the GC
-			} else if (isTFolder(file)) {
-				executeWrite(d, {
-					sql: `DELETE FROM book_instances WHERE vault_path LIKE ?`,
-					params: [`${file.path}/%`] as const,
-				});
+		if (isTFile(file)) {
+			const pathToDelete = file.path;
+			const key = await this.findKeyByVaultPath(pathToDelete);
+			const sourcePath =
+				await this.indexRepo.deleteNoteAndResetSource(pathToDelete);
+			if (sourcePath) {
+				this.log.info(
+					`Reset import status for source '${sourcePath}' due to deletion of note '${pathToDelete}'`,
+				);
 			}
-		});
+			if (key) {
+				this.pathCache.delete(key);
+			}
+		} else if (isTFolder(file)) {
+			await this.indexRepo.deleteInstancesInFolder(file.path);
+			// For folders, invalidate all as it may affect multiple entries
+			this.invalidateIndexCaches();
+		}
 	}
 
 	private shouldSkipMetadataUpdate(path: string): boolean {
@@ -283,38 +268,24 @@ export class IndexCoordinator implements SettingsObserver {
 
 			const metadata = await this.noteEditorService.extractMetadata(file);
 
-			const result = await this._withIndexTx((d) => {
-				const findKeyQuery = BookRepository.findKeyByPath(file.path);
-				const bookKeys = executeTyped(d, findKeyQuery, RowMappers.bookKey);
-				const oldKey = bookKeys[0] ?? null;
-				if (!metadata) {
-					if (oldKey) {
-						const deleteInstanceQuery = BookRepository.deleteInstanceByPath(
-							file.path,
-						);
-						executeWrite(d, deleteInstanceQuery);
-					}
-					return { changed: !!oldKey, oldKey, newKey: null };
-				}
-
-				const upsertQueries = BookRepository.upsertBookWithInstance(
-					{
-						key: metadata.key,
-						id: null,
-						title: metadata.title,
-						authors: metadata.authors,
-					},
+			if (!metadata) {
+				const { changed, oldKey } = await this.indexRepo.deleteInstanceForFile(
 					file.path,
 				);
-				for (const query of upsertQueries) {
-					executeWrite(d, query);
+				if (changed && oldKey) {
+					this.pathCache.delete(oldKey);
 				}
-				return { changed: true, oldKey, newKey: metadata.key };
-			});
-
-			if (result.changed) {
-				if (result.oldKey) this.pathCache.delete(result.oldKey);
-				if (result.newKey) this.pathCache.delete(result.newKey);
+			} else {
+				const { changed, oldKey, newKey } =
+					await this.indexRepo.upsertFromMetadata(file.path, {
+						key: metadata.key,
+						title: metadata.title,
+						authors: metadata.authors,
+					});
+				if (changed) {
+					if (oldKey) this.pathCache.delete(oldKey);
+					if (newKey) this.pathCache.delete(newKey);
+				}
 			}
 		} catch (e) {
 			if (!isAbortError(e)) {
@@ -325,11 +296,24 @@ export class IndexCoordinator implements SettingsObserver {
 
 	public async getImportSource(path: string): Promise<ImportSourceRow | null> {
 		await this.indexDb.whenReady();
-		const query = SourceRepository.getByPath(path);
-		const rows = await this.indexDb
-			.getConcurrent()
-			.execute((d) => executeTyped(d, query, RowMappers.importSource));
-		return rows[0] ?? null;
+		return this.indexRepo.getByPath(path);
+	}
+
+	public async getImportSourceSafe(
+		path: string,
+	): Promise<AppResult<ImportSourceRow | null>> {
+		return wrapResult(
+			async () => {
+				await this.indexDb.whenReady();
+				return this.indexRepo.getByPath(path);
+			},
+			(e) =>
+				({
+					kind: "DbOperationFailed",
+					operation: "getImportSource",
+					cause: e,
+				}) as const,
+		);
 	}
 
 	public async recordImportSuccess(params: {
@@ -343,32 +327,7 @@ export class IndexCoordinator implements SettingsObserver {
 		title?: string;
 		authors?: string;
 	}): Promise<void> {
-		await this._withIndexTx((d) => {
-			const upsertQuery = SourceRepository.upsertSuccess(
-				params.path,
-				params.mtime,
-				params.size,
-				params.newestAnnotationTs,
-				params.bookKey ?? null,
-				params.md5 ?? null,
-			);
-			executeWrite(d, upsertQuery);
-			if (params.vaultPath && params.bookKey) {
-				const book = {
-					key: params.bookKey,
-					id: null,
-					title: params.title ?? "Untitled",
-					authors: params.authors ?? "Unknown Author",
-				};
-				const queries = BookRepository.upsertBookWithInstance(
-					book,
-					params.vaultPath,
-				);
-				for (const query of queries) {
-					executeWrite(d, query);
-				}
-			}
-		});
+		await this.indexRepo.recordImportSuccess(params);
 
 		if (params.bookKey) {
 			this.pathCache.delete(params.bookKey);
@@ -376,34 +335,101 @@ export class IndexCoordinator implements SettingsObserver {
 
 		if (params.vaultPath) {
 			this.recentlyImportedPaths.add(params.vaultPath);
+			// TTL of 3000ms to guard against redundant metadata updates triggered by the import itself,
+			// providing resilience under slow or bursty environments.
 			setTimeout(() => {
 				this.recentlyImportedPaths.delete(params.vaultPath!);
-			}, 1000);
+			}, 3000);
 		}
+	}
+
+	public async recordImportSuccessSafe(params: {
+		path: string;
+		mtime: number;
+		size: number;
+		newestAnnotationTs: string | null;
+		bookKey?: string | null;
+		md5?: string | null;
+		vaultPath?: string | null;
+		title?: string;
+		authors?: string;
+	}): Promise<AppResult<void>> {
+		return wrapResult(
+			async () => {
+				await this.indexRepo.recordImportSuccess(params);
+
+				if (params.bookKey) {
+					this.pathCache.delete(params.bookKey);
+				}
+
+				if (params.vaultPath) {
+					this.recentlyImportedPaths.add(params.vaultPath);
+					setTimeout(() => {
+						this.recentlyImportedPaths.delete(params.vaultPath!);
+					}, 3000);
+				}
+			},
+			(e) =>
+				({
+					kind: "DbOperationFailed",
+					operation: "recordImportSuccess",
+					cause: e,
+				}) as const,
+		);
 	}
 
 	public async recordImportFailure(
 		path: string,
 		error: unknown,
 	): Promise<void> {
-		await this._withIndexTx((d) => {
-			const upsertQuery = SourceRepository.upsertFailure(path, error);
-			executeWrite(d, upsertQuery);
-		});
+		await this.indexRepo.recordImportFailure(path, error);
+	}
+
+	public async recordImportFailureSafe(
+		path: string,
+		error: unknown,
+	): Promise<AppResult<void>> {
+		return wrapResult(
+			() => this.indexRepo.recordImportFailure(path, error),
+			(e) =>
+				({
+					kind: "DbOperationFailed",
+					operation: "recordImportFailure",
+					cause: e,
+				}) as const,
+		);
 	}
 
 	public async deleteImportSource(path: string): Promise<void> {
-		await this._withIndexTx((d) => {
-			const deleteQuery = SourceRepository.deleteByPath(path);
-			executeWrite(d, deleteQuery);
-		});
+		await this.indexRepo.deleteByPath(path);
+	}
+
+	public async deleteImportSourceSafe(path: string): Promise<AppResult<void>> {
+		return wrapResult(
+			() => this.indexRepo.deleteByPath(path),
+			(e) =>
+				({
+					kind: "DbOperationFailed",
+					operation: "deleteImportSource",
+					cause: e,
+				}) as const,
+		);
 	}
 
 	public async clearImportSource(): Promise<void> {
-		await this._withIndexTx((d) => {
-			const clearQuery = SourceRepository.clearAll();
-			executeWrite(d, clearQuery);
-		});
+		await this.indexRepo.clearAll();
+	}
+
+	public async clearImportSourceSafe(): Promise<AppResult<void>> {
+		return wrapResult(
+			() => this.indexRepo.clearAll(),
+			(e) =>
+				({
+					kind: "DbOperationFailed",
+					operation: "clearImportSource",
+					cause: e,
+				}) as const,
+		);
 	}
 
 	public async findExistingBookFiles(bookKey: string): Promise<string[]> {
@@ -411,11 +437,7 @@ export class IndexCoordinator implements SettingsObserver {
 		if (cached) return cached;
 
 		await this.indexDb.whenReady();
-		const query = BookRepository.findPathsByKey(bookKey);
-		const rows = await this.indexDb
-			.getConcurrent()
-			.execute((d) => executeTyped(d, query, RowMappers.vaultPath));
-		const paths = rows;
+		const paths = await this.indexRepo.findPathsByKey(bookKey);
 		this.pathCache.set(bookKey, paths);
 		return paths;
 	}
@@ -427,22 +449,18 @@ export class IndexCoordinator implements SettingsObserver {
 		authors: string,
 		vaultPath?: string,
 	): Promise<void> {
-		const queries = BookRepository.upsertBookWithInstance(
+		await this.indexRepo.upsertBookWithInstance(
 			{ key, id, title, authors },
 			vaultPath,
 		);
-		await this.executeBookQueries(queries);
 		this.pathCache.delete(key);
 	}
 
 	public async findKeyByVaultPath(vaultPath: string): Promise<string | null> {
-		const findKeyQuery = BookRepository.findKeyByPath(vaultPath);
 		try {
 			await this.indexDb.whenReady();
-			const bookKeys = await this.indexDb
-				.getConcurrent()
-				.execute((d) => executeTyped(d, findKeyQuery, RowMappers.bookKey));
-			return bookKeys[0] ?? null;
+			const key = await this.indexRepo.findKeyByPath(vaultPath);
+			return key ?? null;
 		} catch (error) {
 			this.log.warn(`Failed to find book key for path ${vaultPath}: ${error}`);
 			return null;
@@ -451,22 +469,23 @@ export class IndexCoordinator implements SettingsObserver {
 
 	public async deleteBookInstanceByPath(vaultPath: string): Promise<void> {
 		const key = await this.findKeyByVaultPath(vaultPath);
-		const changed = await this._withIndexTx((d) => {
-			const deleteQuery = BookRepository.deleteInstanceByPath(vaultPath);
-			executeWrite(d, deleteQuery);
-			return d.getRowsModified() > 0;
-		});
+		const changed = await this.indexRepo.deleteInstanceByPath(vaultPath);
 		if (changed && key) this.pathCache.delete(key);
 	}
 
 	public async latestSourceForBook(bookKey: string): Promise<string | null> {
 		await this.indexDb.whenReady();
-		const query = SourceRepository.latestSourceForBook(bookKey);
-		const sourcePaths = await this.indexDb
-			.getConcurrent()
-			.execute((d) => executeTyped(d, query, RowMappers.sourcePath));
-		const raw = sourcePaths[0] ?? null;
+		const raw = await this.indexRepo.latestSourceForBook(bookKey);
 		return raw ? Pathing.stripRootFromDevicePath(raw) : null;
+	}
+
+	public async getImportSourcesByMd5(
+		md5: string,
+	): Promise<
+		Array<{ source_path: string; book_key: string | null; md5: string | null }>
+	> {
+		await this.indexDb.whenReady();
+		return this.indexRepo.getImportSourcesByMd5(md5);
 	}
 
 	public async deleteIndexFile(): Promise<void> {
@@ -489,7 +508,7 @@ export class IndexCoordinator implements SettingsObserver {
 	public invalidateIndexCaches(): void {
 		try {
 			this.pathCache.clear();
-			this.log.info("Index caches invalidated");
+			this.log.info("Index path cache invalidated");
 		} catch (e) {
 			this.log.warn("Error invalidating index caches", e);
 		}
@@ -507,6 +526,14 @@ export class IndexCoordinator implements SettingsObserver {
 			);
 			throw e;
 		}
+	}
+
+	public async flushIndexSafe(): Promise<AppResult<void>> {
+		this.persistIndexDebounced.cancel();
+		return wrapResult(
+			() => this.indexDb.flush(),
+			(e) => ({ kind: "DbPersistFailed", path: "index.db", cause: e }) as const,
+		);
 	}
 
 	public isRebuildingIndex(): boolean {
@@ -541,17 +568,5 @@ export class IndexCoordinator implements SettingsObserver {
 
 	public isIndexPersistent(): boolean {
 		return this.indexDb.getState() === "persistent";
-	}
-
-	private async _withIndexTx<T>(
-		operation: (db: Database) => T | Promise<T>,
-		signal?: AbortSignal,
-	): Promise<T> {
-		signal?.throwIfAborted();
-		await this.indexDb.whenReady();
-		const concurrentDb = this.indexDb.getConcurrent();
-		const result = await concurrentDb.writeTx(operation);
-		this.persistIndexDebounced();
-		return result;
 	}
 }

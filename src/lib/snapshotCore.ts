@@ -3,7 +3,7 @@ import { err, ok, type Result } from "src/lib/core/result";
 import { formatDateForTimestamp } from "src/lib/formatting";
 import type { AppFailure, SnapshotError } from "./errors/types";
 import { composeFrontmatter, parseFrontmatter } from "./frontmatter";
-import { toFileSafe } from "./pathing";
+import { Pathing } from "./pathing";
 
 const SNAPSHOT_HASH_CANONICALIZE_OPTS = { normalizeEol: true };
 
@@ -113,7 +113,7 @@ export function generateBackupFileName(
 	baseName: string,
 	filePath: string,
 ): string {
-	const safeBase = toFileSafe(baseName, {
+	const safeBase = Pathing.toFileSafe(baseName, {
 		lower: false,
 		fallback: "note",
 	}).slice(0, 50);

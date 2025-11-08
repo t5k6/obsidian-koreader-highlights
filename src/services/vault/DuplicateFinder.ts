@@ -5,7 +5,7 @@ import {
 	runPool,
 	throwIfAborted,
 } from "src/lib/concurrency";
-import { runConcurrentScan, type ScanResult } from "src/lib/concurrency/scan";
+import type { ScanResult } from "src/lib/concurrency/scan";
 import { isErr } from "src/lib/core/result";
 import {
 	buildExpectedFilenameKeys,
@@ -13,10 +13,14 @@ import {
 	isPotentialMatch,
 	sortDuplicateMatches,
 } from "src/lib/duplicatesCore";
+import {
+	getStrongIdentifiers,
+	isUniqueMd5,
+} from "src/lib/formatting/bookIdentity";
 import { bookKeyFromDocProps } from "src/lib/formatting/formatUtils";
 import { isTFile, isTFolder } from "src/lib/obsidian/typeguards";
 import { extractHighlightsAuto } from "src/lib/parsing/highlightExtractor";
-import { generateFileName, Pathing } from "src/lib/pathing";
+import { Pathing } from "src/lib/pathing";
 import type KoreaderImporterPlugin from "src/main";
 import type { NoteEditorService } from "src/services/parsing/NoteEditorService";
 import type {
@@ -28,10 +32,12 @@ import type {
 	LuaMetadata,
 	SettingsObserver,
 } from "src/types";
+import type { DeviceService } from "../device/DeviceService";
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 import type { IndexCoordinator } from "./index/IndexCoordinator";
 import type { NotePersistenceService } from "./NotePersistenceService";
+import type { VaultBookScanner } from "./VaultBookScanner";
 
 type FindResult = ScanResult<TFile>;
 type FrontmatterForMatch = { title?: string; authors?: string | string[] };
@@ -48,6 +54,8 @@ export class DuplicateFinder implements SettingsObserver {
 		private persistence: NotePersistenceService,
 		private loggingService: LoggingService,
 		private fs: FileSystemService,
+		private vaultBookScanner: VaultBookScanner,
+		private deviceService: DeviceService,
 	) {
 		this.log = this.loggingService.scoped("DuplicateFinder");
 
@@ -65,6 +73,7 @@ export class DuplicateFinder implements SettingsObserver {
 	): Promise<DuplicateScanResult> {
 		const bookKey = bookKeyFromDocProps(luaMetadata.docProps);
 
+		// Priority 1: Direct filename probe (fastest, most specific)
 		const directCandidates = await this._findViaDirectProbe(luaMetadata);
 		if (directCandidates.length > 0) {
 			const match = await this._findAndAnalyzeBest(
@@ -79,26 +88,66 @@ export class DuplicateFinder implements SettingsObserver {
 			}
 		}
 
+		// Priority 2: Strong identifiers from KOReader metadata
+		const strongIds = getStrongIdentifiers(luaMetadata.docProps);
+		if (strongIds.length > 0) {
+			const candidates = await this._findViaStrongIdentifiers(strongIds);
+			if (candidates.length > 0) {
+				const match = await this._findAndAnalyzeBest(candidates, luaMetadata);
+				if (match) {
+					this.log.info(
+						`Found duplicate match via strong identifiers (${strongIds.map((id) => id.scheme).join(", ")}): ${match.file.path}`,
+					);
+					return { match, confidence: "full" };
+				}
+			}
+		}
+
+		// Priority 3: Unique MD5 from KOReader stats
+		const md5 = luaMetadata.md5 ?? luaMetadata.statistics?.book.md5;
+		if (md5 && (await this._isMd5UniqueInStats(md5))) {
+			const candidates = await this._findViaUniqueMd5(md5);
+			if (candidates.length > 0) {
+				const match = await this._findAndAnalyzeBest(candidates, luaMetadata);
+				if (match) {
+					this.log.info(
+						`Found duplicate match via unique MD5 (${md5.slice(0, 8)}...): ${match.file.path}`,
+					);
+					return { match, confidence: "full" };
+				}
+			}
+		}
+
+		// Priority 4: Index lookup by normalized book key
 		const useIndex =
 			this.localIndexService.isReady() &&
 			!this.localIndexService.isRebuildingIndex();
 
 		if (useIndex) {
 			const indexCandidates = await this._findViaIndex(bookKey);
-			const match = await this._findAndAnalyzeBest(
-				indexCandidates,
-				luaMetadata,
-			);
-			return { match, confidence: "full" };
+			if (indexCandidates.length > 0) {
+				const match = await this._findAndAnalyzeBest(
+					indexCandidates,
+					luaMetadata,
+				);
+				if (match) {
+					return { match, confidence: "full" };
+				}
+			}
 		}
 
-		this.log.warn("Index is unavailable. Falling back to degraded vault scan.");
+		// Fallback: Degraded vault scan
+		this.log.warn(
+			"No matches found via priority methods. Falling back to degraded vault scan.",
+		);
 
 		let confidence: "full" | "partial" = "partial";
 		let scanCandidates: TFile[];
 
 		if (degradedScanCache) {
 			scanCandidates = degradedScanCache.get(bookKey) ?? [];
+			// Cache represents complete scan results, so we're confident
+			confidence = "full";
 		} else {
 			const scanResult = await this.scanVaultForKey(
 				bookKey,
@@ -106,8 +155,8 @@ export class DuplicateFinder implements SettingsObserver {
 				this.plugin.settings.scanTimeoutSeconds * 1000,
 			);
 			scanCandidates = scanResult.files;
-			if (scanResult.timedOut) {
-				confidence = "partial";
+			if (!scanResult.timedOut) {
+				confidence = "full";
 			}
 		}
 
@@ -184,71 +233,56 @@ export class DuplicateFinder implements SettingsObserver {
 		docProps: DocProps,
 		signal: AbortSignal,
 	): Promise<FindResult> {
-		const highlightsFolder = this.plugin.settings.highlightsFolder || "";
+		const expectedFilenameKeys = buildExpectedFilenameKeys(docProps);
+		const matches: TFile[] = [];
+
+		const folder = this.plugin.settings.highlightsFolder || "";
 		const root =
-			highlightsFolder === ""
-				? this.vault.getRoot()
-				: this.vault.getAbstractFileByPath(highlightsFolder);
+			folder === ""
+				? this.app.vault.getRoot()
+				: this.app.vault.getAbstractFileByPath(folder);
 
 		if (!isTFolder(root)) {
-			this.log.warn(
-				`Highlights folder not found or not a directory: '${highlightsFolder}'`,
+			throw new Error(
+				`Highlights folder not found or not a directory: '${folder}'`,
 			);
-			return { kind: "complete", items: [] };
 		}
-
-		const expectedFilenameKeys = buildExpectedFilenameKeys(docProps);
 
 		const fileStream = this.fs.iterateMarkdownFiles(root, {
 			recursive: true,
 			signal,
 		});
 
-		return await runConcurrentScan(
-			fileStream,
-			async (file: TFile) => {
+		try {
+			for await (const file of fileStream) {
 				throwIfAborted(signal); // Always check for cancellation first.
 
 				const fm = this.app.metadataCache.getFileCache(file)?.frontmatter as
 					| FrontmatterForMatch
 					| undefined;
 
-				// Fast path: Check heuristics first.
+				// Check if file matches via frontmatter or filename heuristic.
 				if (
 					isPotentialMatch(fm, file.basename, bookKey, expectedFilenameKeys)
 				) {
-					return file;
+					matches.push(file);
 				}
+			}
+		} catch (e) {
+			if (!isAbortError(e)) {
+				this.log.error("Unexpected error during degraded scan", e);
+			}
+			// For AbortError, we still return partial results
+		}
 
-				// Slow path: If heuristics fail, perform a full metadata extraction.
-				try {
-					const md = await this.noteEditorService.extractMetadata(file, signal);
-					if (md?.key === bookKey) {
-						return file;
-					}
-				} catch (e) {
-					// Re-throw AbortError to allow cancellation to propagate.
-					if (isAbortError(e)) {
-						throw e;
-					}
-					// Log other errors but do not crash the entire scan.
-					this.log.warn(
-						`Metadata extraction failed for ${file.path} during scan`,
-						e,
-					);
-				}
-
-				return null;
-			},
-			{ signal },
-		);
+		return { kind: "complete", items: matches };
 	}
 
 	private async _findViaDirectProbe(
 		luaMetadata: LuaMetadata,
 	): Promise<TFile[]> {
 		try {
-			const expectedFileName = generateFileName(
+			const expectedFileName = Pathing.generateFileName(
 				{
 					useCustomTemplate: this.plugin.settings.useCustomFileNameTemplate,
 					template: this.plugin.settings.fileNameTemplate,
@@ -327,38 +361,101 @@ export class DuplicateFinder implements SettingsObserver {
 
 	public async buildDegradedScanCache(): Promise<Map<string, TFile[]>> {
 		this.log.info("Building degraded scan cache by pre-scanning the vault...");
-		const highlightsFolder =
-			this.plugin.settings.highlightsFolder ?? this.app.vault.getRoot().path;
-		const files = await this.fs.listMarkdownFiles(highlightsFolder, {
-			recursive: true,
-		});
 
+		const scanResult = await this.vaultBookScanner.scanAllMetadata();
 		const results = new Map<string, TFile[]>();
-		const concurrency = getOptimalConcurrency();
 
-		const stream = runPool(
-			files,
-			async (file: TFile) => {
-				const metadata = await this.noteEditorService.extractMetadata(file);
-				if (metadata?.key) {
-					return { key: metadata.key, file };
-				}
-				return null;
-			},
-			{ concurrency },
-		);
-
-		for await (const result of stream) {
-			if (result.ok && result.value) {
-				const { key, file } = result.value;
-				const existing = results.get(key) ?? [];
+		for (const metadata of scanResult.items) {
+			const existing = results.get(metadata.key) ?? [];
+			const file = this.vault.getAbstractFileByPath(metadata.vaultPath);
+			if (isTFile(file)) {
 				existing.push(file);
-				results.set(key, existing);
+				results.set(metadata.key, existing);
 			}
 		}
+
 		this.log.info(
 			`Pre-scan complete. Found potential duplicates for ${results.size} unique books.`,
 		);
 		return results;
+	}
+
+	/**
+	 * Find existing notes that match strong identifiers from KOReader stats DB.
+	 * This queries the KOReader database for books with matching identifiers,
+	 * then finds existing notes that correspond to those books.
+	 */
+	private async _findViaStrongIdentifiers(
+		strongIds: import("src/lib/formatting/bookIdentity").ParsedIdentifier[],
+	): Promise<TFile[]> {
+		try {
+			// Filter to only identifiers with valid schemes
+			const validIds = strongIds.filter((id) => id.scheme != null);
+			if (validIds.length === 0) return [];
+
+			// Query KOReader stats DB for books with matching identifiers
+			const statsBooks = await this.deviceService.queryBooksByIdentifiers(
+				validIds as { scheme: string; value: string }[],
+			);
+			if (statsBooks.length === 0) return [];
+
+			// For each matching book, find existing notes via their MD5 or other keys
+			const candidates: TFile[] = [];
+			for (const book of statsBooks) {
+				// Try to find notes by MD5 first
+				if (book.md5) {
+					const md5Candidates = await this._findViaUniqueMd5(book.md5);
+					candidates.push(...md5Candidates);
+				}
+				// Could also try by title/author if needed, but MD5 should be sufficient
+			}
+
+			return candidates;
+		} catch (e) {
+			this.log.warn("Failed to find via strong identifiers", e);
+			return [];
+		}
+	}
+
+	/**
+	 * Check if an MD5 is unique in the KOReader stats database.
+	 */
+	private async _isMd5UniqueInStats(md5: string): Promise<boolean> {
+		try {
+			const count = await this.deviceService.getMd5OccurrenceCount(md5);
+			return isUniqueMd5(md5, count);
+		} catch (e) {
+			this.log.warn(`Failed to check MD5 uniqueness for ${md5}`, e);
+			return false;
+		}
+	}
+
+	/**
+	 * Find existing notes that were imported with a specific MD5.
+	 * This queries the import_source table in the plugin's index.
+	 */
+	private async _findViaUniqueMd5(md5: string): Promise<TFile[]> {
+		try {
+			const sourceRows =
+				await this.localIndexService.getImportSourcesByMd5(md5);
+			const candidates: TFile[] = [];
+
+			for (const row of sourceRows) {
+				if (row.book_key) {
+					const paths = await this.localIndexService.findExistingBookFiles(
+						row.book_key,
+					);
+					const files = paths
+						.map((p) => this.vault.getAbstractFileByPath(p))
+						.filter(isTFile);
+					candidates.push(...files);
+				}
+			}
+
+			return candidates;
+		} catch (e) {
+			this.log.warn(`Failed to find via MD5 ${md5}`, e);
+			return [];
+		}
 	}
 }

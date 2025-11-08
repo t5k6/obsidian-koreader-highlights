@@ -30,40 +30,98 @@ import type {
 	ParsedFrontmatter,
 	TemplateData,
 } from "src/types";
-import { deepCanonicalize } from "./core/objectUtils";
+import { deepCanonicalize, deepEqual } from "./core/objectUtils";
 import { hasValue } from "./core/validationUtils";
-import { formatDateResult, secondsToHoursMinutesSeconds } from "./formatting";
+import { formatDateResult } from "./formatting";
+import { formatDurationHms, formatShortDuration } from "./formatting/dateUtils";
 import { FRONTMATTER_REGEX, parseFrontmatter } from "./frontmatter";
 import { formatConflictRegions, performDiff3 } from "./merge/diffCore";
 import { parseBookMetadataFields } from "./parsing/fieldParsers";
-import { generateFileName, getFileNameWithoutExt, toMatchKey } from "./pathing";
+import { Pathing } from "./pathing";
 import { splitAndTrim, stripHtml } from "./strings/stringUtils";
 
-// Create a simple logger for this module
-const logger = {
-	error: (message: string, error?: unknown) => {
-		console.error(`[noteCore] ${message}`, error);
-	},
+// Define a logger interface for the functional core
+export interface LoggerLike {
+	error(message: string, error?: unknown): void;
+	warn(message: string, context?: unknown): void;
+	info(message: string, context?: unknown): void;
+}
+
+// Default no-op logger for optional injection (or if not provided)
+const NO_OP_LOGGER: LoggerLike = {
+	error: () => {},
+	warn: () => {},
+	info: () => {},
 };
 
-type ProgKey =
-	| "title"
-	| "authors"
-	| "description"
-	| "keywords"
-	| "series"
-	| "language"
-	| "pages"
-	| "highlightCount"
-	| "noteCount"
-	| "lastRead"
-	| "firstRead"
-	| "totalReadTime"
-	| "progress"
-	| "readingStatus"
-	| "averageTimePerPage";
+// Derive ProgKey from the concrete FrontmatterData to avoid manual sync
+type ProgKey = keyof FrontmatterData;
 
-import { err, ok, type Result } from "./core/result";
+type InternalFrontmatter = {
+	"kohl-uid"?: string;
+	"last-merged"?: string;
+	sha256?: string;
+	conflicts?: "unresolved" | "resolved";
+};
+
+type ExtFrontmatter = Partial<FrontmatterData> & Partial<InternalFrontmatter>;
+
+// Use a utility to safely assign properties without 'any'
+function assignProperty<T extends object, K extends PropertyKey, V>(
+	obj: T,
+	key: K,
+	value: V,
+): T & Record<K, V> {
+	Object.assign(obj, { [key]: value });
+	return obj as T & Record<K, V>;
+}
+
+function normalizeKeySet(keys?: string[]): Set<keyof FrontmatterData> {
+	return new Set(
+		(keys ?? []).map((k) => normalizeField(k) as keyof FrontmatterData),
+	);
+}
+
+function toPersistedCanonical(data: Record<string, unknown>) {
+	const canonical: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(data)) {
+		if (value === undefined || value === null) continue;
+		const canonicalKey = normalizeField(key);
+		if (
+			canonicalKey === "kohl-uid" ||
+			canonicalKey === "last-merged" ||
+			canonicalKey === "sha256"
+		)
+			continue;
+		canonical[canonicalKey] = deepCanonicalize(value);
+	}
+	return canonical;
+}
+
+const FRONTMATTER_KEY_ORDER: ProgKey[] = [
+	// Bibliographic
+	"title",
+	"authors",
+	"description",
+	"keywords",
+	"series",
+	"language",
+	"pages",
+
+	// Reading stats
+	"readingStatus",
+	"progress",
+	"firstRead",
+	"lastRead",
+	"totalReadTime",
+	"averageTimePerPage",
+	"highlightCount",
+	"noteCount",
+];
+
+const ORDERED_KEY_SET = new Set(FRONTMATTER_KEY_ORDER);
+
+import { err, isErr, ok, type Result } from "./core/result";
 import type { ParseFailure } from "./errors/types";
 
 export type ParsedNote = Result<
@@ -71,28 +129,25 @@ export type ParsedNote = Result<
 	ParseFailure
 >;
 
-export type MergePolicy =
-	| { kind: "overwrite" }
-	| { kind: "preserveIfMissing" }
-	| { kind: "preserveAlways" }
-	| { kind: "custom"; fn: (oldValue: unknown, newValue: unknown) => unknown };
+export type MergeStrategy =
+	| "overwrite"
+	| "preserveIfMissing"
+	| "preserveAlways";
 
 // Pure policy applicator
 export function applyMergePolicy(
 	key: keyof FrontmatterData,
 	oldValue: unknown,
 	newValue: unknown,
-	policy: MergePolicy,
+	strategy: MergeStrategy,
 ): unknown {
-	switch (policy.kind) {
+	switch (strategy) {
 		case "overwrite":
 			return hasValue(newValue) ? newValue : oldValue;
 		case "preserveIfMissing":
 			return hasValue(oldValue) ? oldValue : newValue;
 		case "preserveAlways":
 			return oldValue;
-		case "custom":
-			return policy.fn(oldValue, newValue);
 		default:
 			return oldValue;
 	}
@@ -108,6 +163,17 @@ export type MergePreparation =
 			snapshotUsed: boolean;
 			diagnostics: { reason: string; userMessage?: string };
 	  };
+
+type SnapshotState =
+	| { kind: "valid"; content: string }
+	| { kind: "empty" }
+	| { kind: "missing" };
+
+function getSnapshotState(body: string | null): SnapshotState {
+	if (body === null) return { kind: "missing" };
+	if (body.trim() === "") return { kind: "empty" };
+	return { kind: "valid", content: body };
+}
 
 /**
  * [CORE] Parses a string into its frontmatter and body.
@@ -146,8 +212,8 @@ export function generateFrontmatter(
 	uid?: string,
 ): FrontmatterData {
 	const fm: Partial<FrontmatterData> = {};
-	const disabled = new Set(opts.disabledFields ?? []);
-	const extra = new Set(opts.customFields ?? []);
+	const disabled = normalizeKeySet(opts.disabledFields);
+	const extra = normalizeKeySet(opts.customFields);
 
 	// DocProps
 	for (const [k, val] of Object.entries(meta.docProps ?? {}) as [
@@ -167,8 +233,8 @@ export function generateFrontmatter(
 	// Highlight stats
 	const hl = meta.annotations?.length ?? 0;
 	const notes = meta.annotations?.filter((a) => a.note?.trim()).length ?? 0;
-	if (!disabled.has("highlightCount")) fm.highlightCount = hl;
-	if (!disabled.has("noteCount")) fm.noteCount = notes;
+	if (!disabled.has("highlightCount")) assignProperty(fm, "highlightCount", hl);
+	if (!disabled.has("noteCount")) assignProperty(fm, "noteCount", notes);
 
 	// Reading statistics
 	const s = meta.statistics;
@@ -185,10 +251,10 @@ export function generateFrontmatter(
 
 		for (const [k, val] of Object.entries(statsMap) as [
 			keyof typeof statsMap,
-			any,
+			unknown,
 		][]) {
 			if (!disabled.has(k) && hasValue(val)) {
-				(fm as any)[k] = val;
+				assignProperty(fm, k as keyof FrontmatterData, val);
 			}
 		}
 	}
@@ -197,12 +263,12 @@ export function generateFrontmatter(
 	for (const k of extra) {
 		const docPropKey = k as keyof DocProps;
 		if (!disabled.has(k) && hasValue(meta.docProps?.[docPropKey])) {
-			(fm as any)[k] = meta.docProps?.[docPropKey] as any;
+			assignProperty(fm, k, meta.docProps?.[docPropKey]);
 		}
 	}
 
 	if (uid) {
-		(fm as any)[KOHL_UID_KEY] = uid;
+		assignProperty(fm, KOHL_UID_KEY, uid);
 	}
 	return fm as FrontmatterData;
 }
@@ -219,49 +285,45 @@ export function mergeFrontmatter(
 	const incoming = generateFrontmatter(meta, opts);
 
 	// Canonicalize existing keys
-	const existingCanon: Partial<FrontmatterData> = {};
+	const existingCanon: ExtFrontmatter = {};
 	for (const [k, v] of Object.entries(existing)) {
 		const canon = normalizeField(k) as keyof FrontmatterData;
-		(existingCanon as any)[canon] = v;
+		assignProperty(existingCanon, canon, v);
 	}
 
 	// Default policies
-	type PolicyMap = { [K in keyof FrontmatterData]?: MergePolicy };
+	type PolicyMap = { [K in keyof FrontmatterData]?: MergeStrategy };
 
 	const MERGE_POLICIES: PolicyMap = {
-		lastRead: { kind: "overwrite" },
-		firstRead: { kind: "overwrite" },
-		totalReadTime: { kind: "overwrite" },
-		progress: { kind: "overwrite" },
-		readingStatus: { kind: "overwrite" },
-		averageTimePerPage: { kind: "overwrite" },
-		highlightCount: { kind: "overwrite" },
-		noteCount: { kind: "overwrite" },
-		pages: { kind: "overwrite" },
+		lastRead: "overwrite",
+		firstRead: "overwrite",
+		totalReadTime: "overwrite",
+		progress: "overwrite",
+		readingStatus: "overwrite",
+		averageTimePerPage: "overwrite",
+		highlightCount: "overwrite",
+		noteCount: "overwrite",
+		pages: "overwrite",
 
-		title: { kind: "preserveIfMissing" },
-		authors: { kind: "preserveIfMissing" },
-		description: { kind: "preserveIfMissing" },
-		keywords: { kind: "preserveIfMissing" },
-		series: { kind: "preserveIfMissing" },
-		language: { kind: "preserveIfMissing" },
+		title: "preserveIfMissing",
+		authors: "preserveIfMissing",
+		description: "preserveIfMissing",
+		keywords: "preserveIfMissing",
+		series: "preserveIfMissing",
+		language: "preserveIfMissing",
 	};
 
 	const effectivePolicies: PolicyMap = { ...MERGE_POLICIES };
 
-	const disabled = new Set(opts.disabledFields ?? []);
+	const disabled = normalizeKeySet(opts.disabledFields);
 	for (const key of disabled) {
-		effectivePolicies[key as keyof FrontmatterData] = {
-			kind: "preserveAlways",
-		};
+		effectivePolicies[key] = "preserveAlways";
 	}
 
-	const custom = new Set(opts.customFields ?? []);
+	const custom = normalizeKeySet(opts.customFields);
 	for (const key of custom) {
-		if (!effectivePolicies[key as keyof FrontmatterData]) {
-			effectivePolicies[key as keyof FrontmatterData] = {
-				kind: "preserveIfMissing",
-			};
+		if (!effectivePolicies[key]) {
+			effectivePolicies[key] = "preserveIfMissing";
 		}
 	}
 
@@ -272,24 +334,88 @@ export function mergeFrontmatter(
 
 	const merged: Partial<FrontmatterData> = {};
 	for (const key of allKeys) {
-		const policy = effectivePolicies[key] ?? { kind: "preserveAlways" };
-		(merged as any)[key] = applyMergePolicy(
+		const strategy = effectivePolicies[key] ?? "preserveAlways";
+		assignProperty(
+			merged,
 			key,
-			existingCanon[key],
-			incoming[key],
-			policy,
+			applyMergePolicy(key, existingCanon[key], incoming[key], strategy),
 		);
 	}
 
-	merged.title ??= "";
-	merged.authors ??= opts.useUnknownAuthor ? "Unknown Author" : "";
+	assignProperty(merged, "title", merged.title ?? "");
+	assignProperty(
+		merged,
+		"authors",
+		merged.authors ?? (opts.useUnknownAuthor ? "Unknown Author" : ""),
+	);
 
-	const existingUid = (existingCanon as any)[KOHL_UID_KEY];
-	if (existingUid && typeof existingUid === "string") {
-		(merged as any)[KOHL_UID_KEY] = existingUid;
+	const existingUid = (existing as Record<string, unknown>)[KOHL_UID_KEY];
+	if (typeof existingUid === "string") {
+		assignProperty(
+			merged as Record<string, unknown>,
+			KOHL_UID_KEY,
+			existingUid,
+		);
 	}
 
 	return merged as FrontmatterData;
+}
+
+type FieldFormatter = (value: unknown, opts: FrontmatterSettings) => unknown;
+
+const FIELD_FORMATTERS: Record<ProgKey, FieldFormatter | undefined> = {
+	lastRead: (rawValue) => {
+		const r = formatDateResult(String(rawValue), "{YYYY}-{MM}-{DD}");
+		return r.ok ? r.value : "";
+	},
+	firstRead: (rawValue) => {
+		const r = formatDateResult(String(rawValue), "{YYYY}-{MM}-{DD}");
+		return r.ok ? r.value : "";
+	},
+	totalReadTime: (rawValue) => {
+		if (typeof rawValue === "number") return formatDurationHms(rawValue);
+		if (typeof rawValue === "string" && /^\d+$/.test(rawValue.trim())) {
+			const n = Number(rawValue.trim());
+			return Number.isFinite(n) ? formatDurationHms(n) : rawValue;
+		}
+		return String(rawValue);
+	},
+	averageTimePerPage: (rawValue) => {
+		if (typeof rawValue === "number") return formatShortDuration(rawValue);
+		if (typeof rawValue === "string" && /^\d+(\.\d+)?$/.test(rawValue.trim())) {
+			const n = Number(rawValue.trim());
+			return Number.isFinite(n) ? formatShortDuration(n) : rawValue;
+		}
+		return String(rawValue);
+	},
+	progress: (rawValue) => {
+		const n = Number(rawValue);
+		return Number.isFinite(n) ? `${Math.round(n)}%` : String(rawValue ?? "");
+	},
+	authors: (rawValue) => {
+		if (Array.isArray(rawValue)) return rawValue;
+		if (typeof rawValue === "string" && rawValue.startsWith("[["))
+			return rawValue;
+		const arr = splitAndTrim(String(rawValue), /\s*[,;&\n]\s*/);
+		const links = arr.map((a) => {
+			const escaped = a.replace(/([[\]|#^])/g, "\\$1");
+			return `[[${escaped}]]`;
+		});
+		return links.length === 1 ? links[0] : links;
+	},
+	keywords: (rawValue) =>
+		Array.isArray(rawValue) ? rawValue : splitAndTrim(String(rawValue), /,/),
+	description: (rawValue) => stripHtml(String(rawValue ?? "")),
+	// other fields can be undefined, or simple pass-through.
+};
+
+// Consolidated function for checking if a field should be included in output
+function shouldIncludeDisplayField(progKey: ProgKey, value: unknown): boolean {
+	if (value == null) return false;
+	if (typeof value === "string" && value.trim() === "") return false;
+	if ((progKey === "highlightCount" || progKey === "noteCount") && value === 0)
+		return false;
+	return true;
 }
 
 /**
@@ -301,127 +427,97 @@ export function formatFrontmatterDataForDisplay(
 	opts: FrontmatterSettings,
 ): Record<string, unknown> {
 	const output: Record<string, unknown> = {};
-	const disabled = new Set(opts.disabledFields ?? []);
+	const disabled = normalizeKeySet(opts.disabledFields);
 
 	for (const [key, rawValue] of Object.entries(data)) {
-		if (rawValue === undefined || rawValue === null) continue;
+		const canonical = normalizeField(key);
+		const progKey = (canonical ?? key) as ProgKey;
 
-		const progKey = (normalizeField(key) ?? key) as ProgKey;
-
-		// 1. Skip disabled fields entirely
 		if (disabled.has(progKey)) continue;
 
 		let value = rawValue;
-
-		// 2. Apply transformations based on field type
-		switch (progKey) {
-			case "lastRead":
-			case "firstRead": {
-				const r = formatDateResult(String(rawValue), "YYYY-MM-DD");
-				value = r.ok ? r.value : "";
-				break;
-			}
-			case "totalReadTime":
-			case "averageTimePerPage": {
-				const n = Number(rawValue);
-				value = Number.isFinite(n)
-					? secondsToHoursMinutesSeconds(n)
-					: String(rawValue ?? "");
-				break;
-			}
-			case "progress": {
-				const n = Number(rawValue);
-				value = Number.isFinite(n)
-					? `${Math.round(n)}%`
-					: String(rawValue ?? "");
-				break;
-			}
-			case "authors": {
-				if (Array.isArray(rawValue)) {
-					value = rawValue;
-					break;
-				}
-				if (typeof rawValue === "string" && rawValue.startsWith("[[")) {
-					value = rawValue;
-					break;
-				}
-
-				const arr = splitAndTrim(String(rawValue), /\s*[,;&\n]\s*/);
-				const links = arr.map((a) => {
-					const escaped = a.replace(/([|#^```])/g, "\\$1");
-					return `[[${escaped}]]`;
-				});
-				value = links.length === 1 ? links[0] : links;
-				break;
-			}
-			case "keywords":
-				value = Array.isArray(rawValue)
-					? rawValue
-					: splitAndTrim(String(rawValue), /,/);
-				break;
-			case "description":
-				value = stripHtml(String(rawValue ?? ""));
-				break;
+		const formatter = FIELD_FORMATTERS[progKey];
+		if (formatter) {
+			value = formatter(rawValue, opts); // Pass opts if formatters need them
 		}
 
-		// 3. Apply general field visibility rules
-		if (
-			(progKey === "highlightCount" || progKey === "noteCount") &&
-			rawValue === 0
-		) {
-			continue;
-		}
-
-		if (hasValue(value)) {
-			output[key] = value;
+		if (shouldIncludeDisplayField(progKey, value)) {
+			const outKey =
+				canonical in FIELD_FORMATTERS ||
+				ORDERED_KEY_SET.has(canonical as ProgKey)
+					? canonical
+					: key;
+			output[outKey] = value;
 		}
 	}
 	return output;
 }
 
 /**
- * [CORE] Converts a frontmatter object into a sorted, formatted YAML string.
- * Assumes input data is already display-formatted - focuses only on serialization (key sorting and friendly renaming).
+ * [CORE] Converts a frontmatter object into a YAML string with stable key ordering.
+ * Returns a Result to handle YAML serialization errors gracefully.
  */
 export function stringifyFrontmatter(
 	data: Record<string, unknown>,
-	options: { useFriendlyKeys?: boolean; sortKeys?: boolean } = {},
-): string {
-	if (!data || Object.keys(data).length === 0) return "";
+): Result<string, ParseFailure> {
+	if (!data || Object.keys(data).length === 0) return ok("");
 
-	const filteredData = { ...data };
-	delete filteredData["kohl-uid"];
-	delete (filteredData as any)["last-merged"];
-	delete (filteredData as any)["sha256"];
+	// 1. Normalize all input keys to their canonical form first.
+	const canonicalData: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(data)) {
+		if (value === undefined || value === null) continue;
 
-	const { useFriendlyKeys = true, sortKeys = true } = options;
-	const output: Record<string, unknown> = {};
-
-	let entries = Object.entries(filteredData);
-	if (sortKeys) entries = entries.sort(([a], [b]) => a.localeCompare(b));
-
-	for (const [key, rawValue] of entries) {
-		if (rawValue === undefined || rawValue === null) continue;
-
-		const progKey = (normalizeField(key) ?? key) as ProgKey;
-
+		// Filter internal-only fields during normalization.
+		const canonicalKey = normalizeField(key);
 		if (
-			useFriendlyKeys &&
-			(progKey === "highlightCount" || progKey === "noteCount") &&
-			rawValue === 0
+			canonicalKey === "kohl-uid" ||
+			canonicalKey === "last-merged" ||
+			canonicalKey === "sha256"
 		) {
 			continue;
 		}
-
-		const keyOut = useFriendlyKeys ? toFriendlyField(progKey) : key;
-
-		// Note: No formatting logic remains here. It's now purely serialization.
-		if (rawValue !== "" && (!Array.isArray(rawValue) || rawValue.length > 0)) {
-			output[keyOut] = deepCanonicalize(rawValue);
-		}
+		canonicalData[canonicalKey] = value;
 	}
 
-	return Object.keys(output).length > 0 ? stringifyYaml(output) : "";
+	if (Object.keys(canonicalData).length === 0) return ok("");
+
+	// 2. Sort the CANONICAL keys based on the predefined order.
+	const sortedKeys = Object.keys(canonicalData).sort((a, b) => {
+		const aIsOrdered = ORDERED_KEY_SET.has(a as ProgKey);
+		const bIsOrdered = ORDERED_KEY_SET.has(b as ProgKey);
+
+		if (aIsOrdered && bIsOrdered) {
+			return (
+				FRONTMATTER_KEY_ORDER.indexOf(a as ProgKey) -
+				FRONTMATTER_KEY_ORDER.indexOf(b as ProgKey)
+			);
+		}
+		if (aIsOrdered) return -1; // a comes first
+		if (bIsOrdered) return 1; // b comes first
+
+		// Fallback for non-ordered keys is alphabetical.
+		return a.localeCompare(b);
+	});
+
+	// 3. Build the final object for stringification using friendly keys.
+	const friendlyData: Record<string, unknown> = {};
+	for (const key of sortedKeys) {
+		const friendlyKey = toFriendlyField(key);
+		friendlyData[friendlyKey] = deepCanonicalize(canonicalData[key]);
+	}
+
+	try {
+		const yamlContent = stringifyYaml(friendlyData).trim();
+		// Handle empty YAML content explicitly for reconstruction.
+		// stringifyYaml returns 'null\n' for empty objects which is not ideal.
+		if (yamlContent === "null") return ok(""); // Explicitly return empty string for empty frontmatter
+		return ok(yamlContent);
+	} catch (e) {
+		return err({
+			kind: "YamlParseError",
+			message: (e as Error).message,
+		});
+	}
 }
 
 /**
@@ -430,11 +526,17 @@ export function stringifyFrontmatter(
 export function reconstructNoteContent(
 	frontmatter: Record<string, unknown>,
 	body: string,
+	logger?: LoggerLike,
 ): string {
-	const yamlString = stringifyFrontmatter(frontmatter, {
-		useFriendlyKeys: true,
-		sortKeys: true,
-	});
+	const yamlResult = stringifyFrontmatter(frontmatter);
+	if (isErr(yamlResult)) {
+		(logger ?? NO_OP_LOGGER).error(
+			"Failed to stringify frontmatter during reconstruction",
+			yamlResult.error,
+		);
+		return (body || "").trim(); // Fallback to body only
+	}
+	const yamlString = yamlResult.value;
 	if (!yamlString) return (body || "").trim();
 	return `---\n${yamlString}\n---\n\n${(body || "").trim()}`;
 }
@@ -462,8 +564,8 @@ export function extractBookMetadata(
 
 	if (!title && !authors) return null;
 
-	const authorSlug = toMatchKey(authors);
-	const titleSlug = toMatchKey(title);
+	const authorSlug = Pathing.toMatchKey(authors);
+	const titleSlug = Pathing.toMatchKey(title);
 
 	const key = `${authorSlug}::${titleSlug}`;
 
@@ -471,24 +573,14 @@ export function extractBookMetadata(
 }
 
 export function areFrontmattersEqual(
-	fm1: Record<string, unknown>,
-	fm2: Record<string, unknown>,
+	a: Record<string, unknown>,
+	b: Record<string, unknown>,
+	logger?: LoggerLike,
 ): boolean {
 	try {
-		const a = stringifyFrontmatter(fm1 ?? {}, {
-			useFriendlyKeys: true,
-			sortKeys: true,
-		});
-		const b = stringifyFrontmatter(fm2 ?? {}, {
-			useFriendlyKeys: true,
-			sortKeys: true,
-		});
-		return a === b;
-	} catch (error) {
-		logger.error(
-			"Error comparing frontmatters, assuming they are not equal",
-			error,
-		);
+		return deepEqual(toPersistedCanonical(a), toPersistedCanonical(b));
+	} catch (e) {
+		(logger ?? NO_OP_LOGGER).error("Error comparing frontmatters", e);
 		return false;
 	}
 }
@@ -547,7 +639,7 @@ export function prepareNoteCreation(
 	const content = reconstructNoteContent(displayFm, body);
 
 	// Generate filename
-	const fileNameWithExt = generateFileName(
+	const fileNameWithExt = Pathing.generateFileName(
 		{
 			useCustomTemplate: settings.useCustomFileNameTemplate,
 			template: settings.fileNameTemplate,
@@ -555,7 +647,7 @@ export function prepareNoteCreation(
 		lua.docProps,
 		lua.originalFilePath ?? undefined,
 	);
-	const baseStem = getFileNameWithoutExt(fileNameWithExt);
+	const baseStem = Pathing.getFileNameWithoutExt(fileNameWithExt);
 
 	return {
 		targetFolder: settings.highlightsFolder,
@@ -579,11 +671,7 @@ export function prepareForCreate(
 	fmSettings: FrontmatterSettings,
 ): MergePreparation {
 	// For creation, "existing" frontmatter is an empty object.
-	const frontmatter = mergeFrontmatter(
-		{} as ParsedFrontmatter,
-		lua,
-		fmSettings,
-	);
+	const frontmatter = mergeFrontmatter({}, lua, fmSettings);
 	const updater: NoteUpdater = () => ({ frontmatter, body: renderedBody });
 	return { kind: "safe", updater, snapshotUsed: false };
 }
@@ -597,12 +685,18 @@ export function prepareForReplace(
 	fmSettings: FrontmatterSettings,
 ): MergePreparation {
 	const updater: NoteUpdater = (currentDoc: NoteDoc) => {
-		const frontmatter = mergeFrontmatter(
+		// Merge raw frontmatter with latest KOReader metadata
+		const rawFrontmatter = mergeFrontmatter(
 			currentDoc.frontmatter,
 			lua,
 			fmSettings,
 		);
-		return { frontmatter, body: renderedBody };
+		// Apply display formatting so replace has the same behavior as create/merge
+		const displayFrontmatter = formatFrontmatterDataForDisplay(
+			rawFrontmatter,
+			fmSettings,
+		);
+		return { frontmatter: displayFrontmatter, body: renderedBody };
 	};
 	return { kind: "safe", updater, snapshotUsed: false };
 }
@@ -620,15 +714,60 @@ export function prepareForMerge(params: {
 		maxHighlightGap: number;
 	};
 	compiledTemplate: (data: TemplateData) => string;
+	logger?: LoggerLike;
 }): Result<MergePreparation, ParseFailure> {
-	const { baseSnapshotBody, incomingBody, lua, settings } = params;
+	const {
+		baseSnapshotBody,
+		incomingBody,
+		lua,
+		settings,
+		logger = NO_OP_LOGGER,
+	} = params;
 
-	// ALWAYS use 3-way merge - treat missing snapshot as empty
-	const effectiveBaseBody = baseSnapshotBody ?? "";
+	const snapshotState = getSnapshotState(baseSnapshotBody);
+	let effectiveBaseBody: string;
+	let snapshotUsedForMerge: boolean;
+	let diagnostics: { reason: string; userMessage?: string } | undefined;
+
+	switch (snapshotState.kind) {
+		case "valid":
+			effectiveBaseBody = snapshotState.content;
+			snapshotUsedForMerge = true;
+			break;
+		case "empty":
+			logger.warn(
+				"prepareForMerge: Base snapshot was empty. Treating as empty baseline.",
+			);
+			effectiveBaseBody = "";
+			snapshotUsedForMerge = false;
+			diagnostics = {
+				reason:
+					"Base snapshot was empty; treating as full conflict to preserve user data",
+				userMessage:
+					"This merge shows all changes as conflicts because the plugin couldn't find a valid baseline. This ensures no data is lost - please review and resolve manually.",
+			};
+			break;
+		case "missing":
+			logger.warn(
+				"prepareForMerge: No base snapshot found. Treating as empty baseline.",
+			);
+			effectiveBaseBody = "";
+			snapshotUsedForMerge = false;
+			diagnostics = {
+				reason:
+					"No base snapshot found; treating as full conflict to preserve user data",
+				userMessage:
+					"This merge shows all changes as conflicts because the plugin couldn't find a valid baseline. This ensures no data is lost - please review and resolve manually.",
+			};
+			break;
+	}
+
 	const baseDoc = parseNoteContent(effectiveBaseBody);
-
-	if (!baseDoc.ok) {
-		// If even empty base fails to parse, something is very wrong
+	if (isErr(baseDoc)) {
+		logger.error(
+			"prepareForMerge: Failed to parse effective base body",
+			baseDoc.error,
+		);
 		return baseDoc;
 	}
 
@@ -671,8 +810,18 @@ export function prepareForMerge(params: {
 			settings.frontmatter,
 		);
 
-		(rawMergedFm as any)["last-merged"] = new Date().toISOString().slice(0, 10);
-		if (hasConflict) (rawMergedFm as any).conflicts = "unresolved";
+		assignProperty(
+			rawMergedFm,
+			"last-merged",
+			new Date().toISOString().slice(0, 10),
+		);
+		if (
+			hasConflict ||
+			!snapshotUsedForMerge ||
+			snapshotState.kind !== "valid"
+		) {
+			assignProperty(rawMergedFm, "conflicts", "unresolved");
+		}
 
 		const displayFm = formatFrontmatterDataForDisplay(
 			rawMergedFm,
@@ -682,21 +831,13 @@ export function prepareForMerge(params: {
 		return { frontmatter: displayFm, body: mergedBody };
 	};
 
-	const hasValidSnapshot =
-		baseSnapshotBody !== null && baseSnapshotBody.trim() !== "";
-	if (hasValidSnapshot) {
-		return ok({ kind: "safe", updater, snapshotUsed: true });
-	} else {
+	if (diagnostics) {
 		return ok({
 			kind: "conflicted",
 			updater,
-			snapshotUsed: false,
-			diagnostics: {
-				reason:
-					"No base snapshot found or snapshot was empty; treating as full conflict to preserve user data",
-				userMessage:
-					"This merge shows all changes as conflicts because the plugin couldn't find a valid baseline. This ensures no data is lost - please review and resolve manually.",
-			},
+			snapshotUsed: snapshotUsedForMerge,
+			diagnostics,
 		});
 	}
+	return ok({ kind: "safe", updater, snapshotUsed: snapshotUsedForMerge });
 }

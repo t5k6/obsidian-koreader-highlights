@@ -108,7 +108,9 @@ export class FrontmatterFieldModal extends BaseModal<FrontmatterSettings> {
 		const datalist = contentEl.createEl("datalist");
 		datalist.id = "field-suggestions";
 		suggestedFields.forEach((field) => {
-			datalist.createEl("option", { value: field });
+			const option = datalist.createEl("option");
+			// Set via property to avoid relying on createEl option typing for <option>
+			option.value = field;
 		});
 
 		addFieldSetting.addButton((button) =>

@@ -1,5 +1,5 @@
 import { type App, Notice } from "obsidian";
-import { toFileSafe } from "src/lib/pathing";
+import { Pathing } from "src/lib/pathing";
 import type { StaleLocationChoice, StaleLocationSession } from "src/types";
 import { InteractionModal } from "src/ui/InteractionModal";
 
@@ -37,7 +37,7 @@ export async function requestNewFileName(
 			return { cancelled: true };
 		}
 
-		const sanitized = toFileSafe(rawValue, { fallback: "" });
+		const sanitized = Pathing.toFileSafe(rawValue, { fallback: "" });
 		const error = params.validate ? params.validate(sanitized) : null;
 
 		if (error) {

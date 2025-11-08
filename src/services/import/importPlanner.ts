@@ -2,12 +2,12 @@ import type { TFile } from "obsidian";
 import { throwIfAborted } from "src/lib/concurrency/cancellation";
 import { isErr, ok, type Result } from "src/lib/core/result";
 import { timed } from "src/lib/core/timing";
-import { SourceRepository } from "src/lib/database/sourceRepository";
+import { IndexRepository } from "src/lib/database/indexRepository";
 import type { ParseFailure } from "src/lib/errors/types";
 import { bookKeyFromDocProps } from "src/lib/formatting";
 import type { Diagnostic } from "src/lib/parsing/luaParser";
 import { parse as parseMetadata } from "src/lib/parsing/luaParser";
-import { getFileNameWithoutExt, Pathing } from "src/lib/pathing";
+import { Pathing } from "src/lib/pathing";
 import type {
 	DuplicateMatch,
 	DuplicateScanResult,
@@ -54,7 +54,7 @@ export function parseLuaMetadata(
 
 	// Pure title fallback
 	if (!meta.docProps.title) {
-		meta.docProps.title = getFileNameWithoutExt(sdrPath);
+		meta.docProps.title = Pathing.getFileNameWithoutExt(sdrPath);
 		accumulatedDiagnostics.push({
 			severity: "warn",
 			message: `Missing title, using filename for ${sdrPath}`,
@@ -190,6 +190,13 @@ function determineImportAction(
 	}
 
 	if (data.match) {
+		// Skip exact matches - no import needed
+		if (data.match.matchType === "exact") {
+			return Promise.resolve({
+				plan: { kind: "SKIP", reason: "UNCHANGED" },
+				diagnostics,
+			});
+		}
 		return Promise.resolve({
 			plan: { kind: "MERGE", match: data.match },
 			diagnostics,
@@ -262,9 +269,18 @@ export async function planImport(
 		};
 	}
 
+	// Skip duplicate detection for books with no annotations
+	const hasAnnotations = ctx.luaMetadata.annotations?.length > 0;
 	await timed(
 		"Duplicates",
 		async () => {
+			if (!hasAnnotations) {
+				// No annotations means no import needed, skip duplicate detection
+				ctx.match = null;
+				ctx.confidence = "full"; // Not relevant since we're skipping
+				return;
+			}
+
 			if (ctx.forceNote) {
 				ctx.match = await io.dupFinder.analyzeCandidateFile(
 					ctx.forceNote,
@@ -290,7 +306,7 @@ export async function planImport(
 
 	if (!ctx.forceReimport && ctx.stats) {
 		const existingSource = await io.index.getImportSource(ctx.metadataPath);
-		const shouldProcess = SourceRepository.shouldProcess(
+		const shouldProcess = IndexRepository.shouldProcess(
 			existingSource,
 			{ mtime: ctx.stats.mtimeMs, size: ctx.stats.size },
 			ctx.latestTs,

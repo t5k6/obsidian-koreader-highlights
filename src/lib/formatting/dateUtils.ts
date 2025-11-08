@@ -197,6 +197,60 @@ export function secondsToHoursMinutesSeconds(totalSeconds: number): string {
 }
 
 /**
+ * Formats a duration in seconds as a compact "Xh Ym Zs" style string.
+ * Rules:
+ * - No leading 0h.
+ * - No trailing 0s when hours or minutes are present.
+ * - If only seconds exist, show "Xs".
+ * - If everything is zero, show "0s".
+ */
+export function formatDurationHms(totalSeconds: number): string {
+	if (totalSeconds < 0) totalSeconds = 0;
+
+	const hours = Math.floor(totalSeconds / 3600);
+	const minutes = Math.floor((totalSeconds % 3600) / 60);
+	const seconds = Math.floor(totalSeconds % 60);
+
+	const parts: string[] = [];
+
+	if (hours > 0) {
+		parts.push(`${hours}h`);
+	}
+	if (minutes > 0) {
+		parts.push(`${minutes}m`);
+	}
+	if (seconds > 0 || parts.length === 0) {
+		// Include seconds if non-zero, or if there are no hours/minutes (pure seconds/zero case)
+		parts.push(`${seconds}s`);
+	}
+
+	return parts.join(" ");
+}
+
+/**
+ * Formats a short duration in seconds as:
+ * - "Xs" if < 60 seconds
+ * - "Xm Ys" if ≥ 60 seconds
+ */
+export function formatShortDuration(totalSeconds: number): string {
+	if (totalSeconds < 0) totalSeconds = 0;
+
+	const sec = Math.floor(totalSeconds);
+	if (sec < 60) {
+		return `${sec}s`;
+	}
+
+	const minutes = Math.floor(sec / 60);
+	const seconds = sec % 60;
+
+	if (seconds === 0) {
+		return `${minutes}m`;
+	}
+
+	return `${minutes}m ${seconds}s`;
+}
+
+/**
  * Converts seconds to hours and minutes format.
  * @param seconds - Number of seconds to convert
  * @returns Formatted string like "2h 30m"

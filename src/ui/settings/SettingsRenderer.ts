@@ -62,10 +62,20 @@ export class SettingsRenderer {
 			if (spec.type === "callout") {
 				const cs = spec as CalloutSpec;
 				if (cs.if && !cs.if()) continue;
+
 				const callout = container.createDiv({
 					cls: "callout",
-					attr: { "data-callout": cs.calloutType, id: cs.id },
-				});
+				}) as any;
+				// In app, Obsidian elements expose setAttr; in tests our obsidian.mock adds it.
+				// Be defensive so plain HTMLElements won't crash.
+				const setAttr =
+					typeof callout.setAttr === "function"
+						? (k: string, v: string) => callout.setAttr(k, v)
+						: (k: string, v: string) => callout.setAttribute(k, v);
+
+				setAttr("data-callout", cs.calloutType);
+				if (cs.id) setAttr("id", cs.id);
+
 				const titleEl = callout.createDiv({ cls: "callout-title" });
 				const iconEl = titleEl.createDiv({ cls: "callout-icon" });
 				setIcon(iconEl, this.iconForCallout(cs.calloutType));

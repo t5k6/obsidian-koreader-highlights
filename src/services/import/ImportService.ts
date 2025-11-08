@@ -311,6 +311,7 @@ export class ImportService {
 			try {
 				await this.persistence.cleanupOldBackups(
 					this.plugin.settings.backupRetentionDays,
+					this.plugin.settings.maxBackupsPerNote,
 				);
 			} catch (cleanupError) {
 				this.log.error(
@@ -318,6 +319,40 @@ export class ImportService {
 					cleanupError,
 				);
 			}
+
+			// Rate-limited automatic snapshot GC (fire-and-forget)
+			void (async () => {
+				try {
+					const now = Date.now();
+					const data = await this.plugin.pluginDataStore.load();
+					const lastRun = data.lastSnapshotGCRunAt ?? 0;
+					const rateLimitMs = 24 * 60 * 60 * 1000; // 24 hours
+
+					if (now - lastRun >= rateLimitMs) {
+						this.log.info(
+							"Automatic snapshot garbage collection is due. Starting...",
+						);
+						const gcResult = await this.persistence.collectOrphanedSnapshots(
+							this.plugin.settings.highlightsFolder,
+						);
+
+						// Only update the timestamp if GC ran and did work or failed, to avoid resetting the timer on no-op runs.
+						if (gcResult.scanned > 0) {
+							const updatedData = { ...data, lastSnapshotGCRunAt: now };
+							await this.plugin.pluginDataStore.save(updatedData);
+
+							this.log.info(
+								`Automatic snapshot GC finished. Next run will be eligible after ${new Date(now + rateLimitMs).toISOString()}`,
+							);
+						}
+					}
+				} catch (gcError) {
+					this.log.error(
+						"An error occurred during automatic snapshot garbage collection.",
+						gcError,
+					);
+				}
+			})();
 		}
 	}
 

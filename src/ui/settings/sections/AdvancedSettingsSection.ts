@@ -189,6 +189,41 @@ export class AdvancedSettingsSection extends SettingsSection {
 						},
 					],
 				},
+				{
+					key: "cleanupCompletedBooks",
+					type: "buttons",
+					name: "Clean up comments from completed books",
+					desc: "Remove tracking comments from notes marked as 'completed' (readingStatus: completed).",
+					buttons: [
+						{
+							text: "Clean up completed books",
+							warning: true,
+							onClick: async (btn) => {
+								await runAsyncAction(
+									btn,
+									() => this.plugin.triggerCleanupCompletedBooks(),
+									{
+										inProgress: "Scanning and cleaning...",
+										original: "Clean up completed books",
+									},
+								);
+							},
+						},
+					],
+				},
+				{
+					key: "maxBackupsPerNote",
+					type: "number",
+					name: "Maximum backups per note",
+					desc: "The maximum number of backups to keep for each note. Set to 0 to disable the limit.",
+					min: 0,
+					max: 20,
+					step: 1,
+					get: () => this.plugin.settings.maxBackupsPerNote,
+					set: async (value: number) => {
+						this.plugin.settings.maxBackupsPerNote = value;
+					},
+				},
 			],
 			{
 				app: this.app,

@@ -17,8 +17,6 @@ import type {
 import type { FileSystemService } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
 import type { SqlJsManager } from "../SqlJsManager";
-import { detectLayout } from "./layouts";
-import type { KOReaderEnvironment } from "./types";
 
 // --- Constants ---
 const METADATA_REGEX = /^metadata\.(.+)\.lua$/i;
@@ -31,27 +29,12 @@ export class DeviceService implements SettingsObserver, Disposable {
 	private dbFileMtimeMs: number | null = null;
 	private getCdbLazy: () => Promise<ConcurrentDatabase | null>;
 
-	// Simplified discovery config
-	private readonly STATS_DB_PATTERNS = [
-		".adds/koreader/settings/statistics.sqlite3", // Kobo
-		"koreader/settings/statistics.sqlite3", // Generic
-	] as const;
-
-	private readonly MAX_WALK_UP_DEPTH = 3;
-
 	private sdrDirCache: IterableCache<string, Promise<string[]>>;
 	private metadataNameCache: IterableCache<string, string | null>;
 	private findSdrDirectoriesWithMetadataMemoized: (
 		scanPath: string,
 	) => Promise<string[]>;
-	private getEnvironmentMemoized: (
-		settingsKey: string,
-	) => Promise<KOReaderEnvironment | null>;
-
 	private statsCache: IterableCache<string, BookStatisticsBundle | null>;
-
-	// Readiness guard to avoid redundant env discovery from whenReady()
-	private envInitialized = false;
 
 	constructor(
 		private _plugin: KoreaderImporterPlugin,
@@ -71,11 +54,6 @@ export class DeviceService implements SettingsObserver, Disposable {
 		this.findSdrDirectoriesWithMetadataMemoized = memoizeAsync(
 			this.sdrDirCache,
 			(scanPath: string) => this.scan(scanPath),
-		);
-
-		this.getEnvironmentMemoized = memoizeAsync(
-			cacheManager.createMap("device.env.discovery"),
-			(_: string) => this._resolveEnvironment(),
 		);
 
 		this.getCdbLazy = asyncLazy<ConcurrentDatabase | null>(() =>
@@ -112,41 +90,11 @@ export class DeviceService implements SettingsObserver, Disposable {
 			this.createCdbInstance(),
 		);
 		this.statsCache.clear();
-		this.envInitialized = false;
 	}
 
-	// --- Readiness Gate ---
-	async whenReady(): Promise<void> {
-		if (!this.envInitialized) {
-			// Lazily validate configured path; stats DB will be resolved on demand.
-			await this._validateScanPath().catch(() => {});
-			this.envInitialized = true;
-		}
-	}
-
-	// --- Environment Resolution ---
-	async getEnvironment(): Promise<KOReaderEnvironment | null> {
-		const settingsKey = this._settingsKey();
-		const scanPath = this.settings.koreaderScanPath?.trim();
-		let mountHash = "no-path";
-
-		if (scanPath) {
-			const st = await this.fs.getNodeStats(scanPath);
-			mountHash = isErr(st)
-				? "invalid-path"
-				: `${st.value.mtime.getTime()}_${st.value.size}`;
-		}
-
-		const robustKey = `${settingsKey}::${mountHash}`;
-		return this.getEnvironmentMemoized(robustKey);
-	}
-
+	// --- Path Resolution ---
 	async getActiveScanPath(): Promise<string | null> {
 		return this._validateScanPath(); // Directly validates the user-configured path
-	}
-
-	async getDeviceRoot(): Promise<string | null> {
-		return (await this.getEnvironment())?.rootPath ?? null;
 	}
 
 	async getStatsDbPath(): Promise<string | null> {
@@ -159,24 +107,6 @@ export class DeviceService implements SettingsObserver, Disposable {
 		}
 		// The findStatsDatabase method already contains the necessary walk-up logic
 		return this.findStatsDatabase(scanPath);
-	}
-
-	private _settingsKey(): string {
-		const s = this.settings;
-		const scan = s.koreaderScanPath?.trim() || "";
-		const override = s.statsDbPathOverride?.trim() || "";
-		return `${scan}__${override}`;
-	}
-
-	private async _resolveEnvironment(): Promise<KOReaderEnvironment | null> {
-		const scanPath = await this._validateScanPath();
-		if (!scanPath) return null;
-
-		const override = this.settings.statsDbPathOverride?.trim();
-		if (override) {
-			return this._handleOverride(scanPath, override);
-		}
-		return this._discoverEnvironment(scanPath);
 	}
 
 	// --- Discovery & Validation ---
@@ -206,79 +136,57 @@ export class DeviceService implements SettingsObserver, Disposable {
 	}
 
 	/**
-	 * Directly search for the statistics database from the given path.
-	 * Tries direct patterns, then walks up a few levels, then performs a bounded deep search.
+	 * Find the statistics database using the unified walk-up heuristic.
+	 * Walks up from the scan path to find KOReader root markers, then constructs the DB path.
 	 */
 	private async findStatsDatabase(scanPath: string): Promise<string | null> {
-		// Try direct paths relative to provided scanPath
-		for (const pattern of this.STATS_DB_PATTERNS) {
-			const candidate = Pathing.joinSystemPath(scanPath, pattern);
-			if (await this.fs.nodeFileExists(candidate)) {
-				this.log.info(`Found stats DB via direct path: ${candidate}`);
-				return candidate;
-			}
-		}
-
-		// Walk up limited depth
+		const MAX_WALK_UP = 5;
 		let currentPath = scanPath;
-		for (let depth = 0; depth < this.MAX_WALK_UP_DEPTH; depth++) {
-			for (const pattern of this.STATS_DB_PATTERNS) {
-				const candidate = Pathing.joinSystemPath(currentPath, pattern);
-				if (await this.fs.nodeFileExists(candidate)) {
-					this.log.info(
-						`Found stats DB via walk-up at depth ${depth}: ${candidate}`,
-					);
-					return candidate;
+
+		for (let i = 0; i < MAX_WALK_UP; i++) {
+			// Check for the presence of the marker directories.
+			const koboMarker = Pathing.joinSystemPath(currentPath, ".adds");
+			const genericMarker = Pathing.joinSystemPath(currentPath, "koreader");
+
+			const [koboMarkerExists, genericMarkerExists] = await Promise.all([
+				this.fs.nodeFileExists(koboMarker), // Assuming this checks for directories too
+				this.fs.nodeFileExists(genericMarker),
+			]);
+
+			let koReaderRoot: string | null = null;
+			if (koboMarkerExists || genericMarkerExists) {
+				koReaderRoot = currentPath;
+			}
+
+			if (koReaderRoot) {
+				const dbPathsToCheck = [
+					Pathing.joinSystemPath(
+						koReaderRoot,
+						".adds/koreader/settings/statistics.sqlite3",
+					),
+					Pathing.joinSystemPath(
+						koReaderRoot,
+						"koreader/settings/statistics.sqlite3",
+					),
+				];
+
+				for (const dbPath of dbPathsToCheck) {
+					if (await this.fs.nodeFileExists(dbPath)) {
+						this.log.info(`Found stats DB via heuristic: ${dbPath}`);
+						return dbPath;
+					}
 				}
 			}
+
+			// Go up one level.
 			const parent = Pathing.systemDirname(currentPath);
-			if (parent === currentPath) break;
+			if (parent === currentPath) {
+				break; // Reached filesystem root
+			}
 			currentPath = parent;
 		}
 
-		// Bounded deep search from scan path
-		return this.searchForStatsDb(scanPath);
-	}
-
-	/**
-	 * Breadth-first bounded search for statistics.sqlite3 under common subfolders.
-	 */
-	private async searchForStatsDb(
-		root: string,
-		maxDepth: number = 3,
-	): Promise<string | null> {
-		const queue: Array<[string, number]> = [[root, 0]];
-		while (queue.length > 0) {
-			const [dir, depth] = queue.shift()!;
-			if (depth > maxDepth) continue;
-
-			for (const pattern of this.STATS_DB_PATTERNS) {
-				const candidate = Pathing.joinSystemPath(dir, pattern);
-				if (await this.fs.nodeFileExists(candidate)) {
-					this.log.info(`Found stats DB via deep search: ${candidate}`);
-					return candidate;
-				}
-			}
-
-			try {
-				for await (const result of this.fs.iterateNodeDirectory(dir)) {
-					if (isErr(result)) continue;
-					const { path, dirent } = result.value;
-					if (!dirent.isDirectory()) continue;
-					const name = dirent.name.toLowerCase();
-					// Likely candidates or non-hidden
-					if (
-						name === ".adds" ||
-						name === "koreader" ||
-						!name.startsWith(".")
-					) {
-						queue.push([Pathing.joinSystemPath(dir, dirent.name), depth + 1]);
-					}
-				}
-			} catch {
-				// Skip unreadable directories
-			}
-		}
+		this.log.info("Statistics DB not found via walk-up heuristic.");
 		return null;
 	}
 
@@ -297,7 +205,7 @@ export class DeviceService implements SettingsObserver, Disposable {
 			if (depth > 2 || checked > maxCheck) return false;
 			for await (const result of this.fs.iterateNodeDirectory(dir)) {
 				if (isErr(result)) continue;
-				const { path, dirent } = result.value;
+				const { dirent } = result.value;
 				if (++checked > maxCheck) return false;
 				if (dirent.isDirectory() && dirent.name.endsWith(".sdr")) return true;
 				if (dirent.isDirectory() && !dirent.name.startsWith(".")) {
@@ -325,120 +233,6 @@ export class DeviceService implements SettingsObserver, Disposable {
 			configured,
 		);
 		return null;
-	}
-
-	private async _handleOverride(
-		scanPath: string,
-		override: string,
-	): Promise<KOReaderEnvironment> {
-		const explain = [`User override for stats DB is set: ${override}`];
-		const exists = await this.fs.nodeFileExists(override);
-
-		if (!exists) {
-			explain.push("Error: Override path does not point to an existing file.");
-		}
-
-		return {
-			scanPath,
-			rootPath: null,
-			statsDbPath: exists ? override : null,
-			layout: "unknown",
-			discoveredBy: "override",
-			explain,
-		};
-	}
-
-	private async _discoverEnvironment(
-		scanPath: string,
-	): Promise<KOReaderEnvironment> {
-		const explain: string[] = [
-			`Starting discovery from scan path: ${scanPath}`,
-		];
-
-		// 1. Check if the provided path is itself the root.
-		const directResult = await detectLayout(this.fs, scanPath);
-		if (directResult) {
-			explain.push(...directResult.explain);
-			this.log.info(`Environment discovered directly at scan path.`);
-			return {
-				scanPath,
-				...directResult,
-				discoveredBy: directResult.layout,
-				explain,
-			};
-		}
-		explain.push("Probe 1: Provided path is not a KOReader root.");
-
-		// 2. Check immediate subdirectories of the provided path.
-		explain.push(
-			`Probe 2: Checking immediate subdirectories of ${scanPath}...`,
-		);
-		try {
-			for await (const result of this.fs.iterateNodeDirectory(scanPath)) {
-				if (isErr(result)) continue;
-				const { path, dirent } = result.value;
-				if (!dirent.isDirectory()) continue;
-
-				const childPath = Pathing.joinSystemPath(scanPath, dirent.name);
-				const childResult = await detectLayout(this.fs, childPath);
-
-				if (childResult) {
-					explain.push(`Found KOReader root in subdirectory: ${childPath}`);
-					explain.push(...childResult.explain);
-					this.log.info(`Environment discovered in subdirectory: ${childPath}`);
-					return {
-						scanPath,
-						...childResult,
-						discoveredBy: `subdir:${childResult.layout}`,
-						explain,
-					};
-				}
-			}
-			explain.push("Probe 2: No KOReader root found in subdirectories.");
-		} catch (e) {
-			explain.push(
-				`Probe 2: Failed to scan subdirectories. Error: ${e instanceof Error ? e.message : String(e)}`,
-			);
-		}
-
-		// 3. Fallback: Walk up from the original path.
-		explain.push("Probe 3: Walking up parent directories as a fallback...");
-		let currentPath = Pathing.systemResolve(scanPath);
-		for (let i = 0; i < 25; i++) {
-			const parent = Pathing.systemDirname(currentPath);
-			if (parent === currentPath) break; // Reached filesystem root
-			currentPath = parent;
-
-			explain.push(`Walk-up: probing at '${currentPath}'`);
-			const walkUpResult = await detectLayout(this.fs, currentPath);
-			if (walkUpResult) {
-				explain.push(...walkUpResult.explain);
-				this.log.info(
-					`Environment discovered via walk-up at '${currentPath}'.`,
-				);
-				return {
-					scanPath,
-					...walkUpResult,
-					discoveredBy: `walk-up:${walkUpResult.layout}`,
-					explain,
-				};
-			}
-		}
-		explain.push("Probe 3: Walk-up failed to find a KOReader root.");
-
-		// 4. If all else fails, report failure.
-		this.log.warn(
-			"KOReader environment discovery failed for scan path:",
-			scanPath,
-		);
-		return {
-			scanPath,
-			rootPath: null,
-			statsDbPath: null,
-			layout: "unknown",
-			discoveredBy: "none",
-			explain,
-		};
 	}
 
 	// --- SDR Finding ---
@@ -557,7 +351,7 @@ export class DeviceService implements SettingsObserver, Disposable {
 
 		for await (const result of this.fs.iterateNodeDirectory(dir)) {
 			if (isErr(result)) continue;
-			const { path, dirent } = result.value;
+			const { dirent } = result.value;
 			if (!dirent.isFile()) continue;
 
 			const match = dirent.name.match(METADATA_REGEX);
@@ -646,7 +440,7 @@ export class DeviceService implements SettingsObserver, Disposable {
 		if (isErr(bytesRes)) {
 			this.log.error(
 				`Failed to read KOReader stats DB bytes: ${filePath}`,
-				(bytesRes as any).error ?? bytesRes,
+				bytesRes.error,
 			);
 			return null;
 		}
@@ -682,5 +476,38 @@ export class DeviceService implements SettingsObserver, Disposable {
 				e,
 			);
 		}
+	}
+
+	/**
+	 * Get the occurrence count of an MD5 in the KOReader book table.
+	 */
+	async getMd5OccurrenceCount(md5: string): Promise<number> {
+		const db = await this.getConcurrentDb();
+		if (!db) return 0;
+
+		return db.execute(async (database) => {
+			const result = statisticsCore.getMd5OccurrenceCount(database, md5);
+			return result;
+		}, false);
+	}
+
+	/**
+	 * Query books from KOReader stats DB that match the given identifiers.
+	 */
+	async queryBooksByIdentifiers(
+		identifiers: Array<{ scheme: string; value: string }>,
+	): Promise<
+		Array<{ id: number; md5: string; title: string; authors: string }>
+	> {
+		const db = await this.getConcurrentDb();
+		if (!db) return [];
+
+		return db.execute(async (database) => {
+			const result = statisticsCore.queryBooksByIdentifiers(
+				database,
+				identifiers,
+			);
+			return result;
+		}, false);
 	}
 }

@@ -182,7 +182,10 @@ export class SqlJsManager implements Disposable {
 				return err(w.error);
 			}
 		} else {
-			const w = await this.fsService.writeVaultBinaryAtomic(filePath, buffer);
+			const w = await this.fsService.writeVaultBinaryAtomic(
+				filePath,
+				new Uint8Array(buffer),
+			);
 			if (isErr(w)) {
 				this.log.error(`Failed to persist database: ${filePath}`, w.error);
 				return err(w.error);

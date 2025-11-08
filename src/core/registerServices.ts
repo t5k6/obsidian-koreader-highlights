@@ -1,5 +1,6 @@
 import type { App } from "obsidian";
 import { CacheManager } from "src/lib/cache/CacheManager";
+import { IndexRepository } from "src/lib/database/indexRepository";
 import type KoreaderImporterPlugin from "src/main";
 import { CommandManager } from "src/services/command/CommandManager";
 import { DeviceService } from "src/services/device/DeviceService";
@@ -9,12 +10,13 @@ import { LoggingService } from "src/services/LoggingService";
 import { NoteEditorService } from "src/services/parsing/NoteEditorService";
 import { TemplateManager } from "src/services/parsing/TemplateManager";
 import { SqlJsManager } from "src/services/SqlJsManager";
-
+import { IndexRebuildStatusService } from "src/services/ui/IndexRebuildStatusService";
 import { DuplicateFinder } from "src/services/vault/DuplicateFinder";
 import { IndexCoordinator } from "src/services/vault/index/IndexCoordinator";
 import { IndexDatabase } from "src/services/vault/index/IndexDatabase";
 import { MergeHandler } from "src/services/vault/MergeHandler";
 import { NotePersistenceService } from "src/services/vault/NotePersistenceService";
+import { VaultBookScanner } from "src/services/vault/VaultBookScanner";
 import type { DuplicateHandlingSession, DuplicateMatch } from "src/types";
 import { DuplicateHandlingModal } from "src/ui/DuplicateModal";
 import { StatusBarManager } from "src/ui/StatusBarManager";
@@ -23,6 +25,7 @@ import {
 	APP_TOKEN,
 	DUPLICATE_MODAL_FACTORY_TOKEN,
 	PLUGIN_TOKEN,
+	SETTINGS_TOKEN,
 	VAULT_TOKEN,
 } from "./tokens";
 
@@ -88,12 +91,24 @@ export function registerServices(
 		LoggingService,
 	]);
 
+	// Vault book scanner utility
+	container.register(VaultBookScanner, [
+		APP_TOKEN,
+		FileSystemService,
+		NoteEditorService,
+		SETTINGS_TOKEN,
+	]);
+
 	// --- UI-specific Services ---
 	container.register(StatusBarManager, [
 		APP_TOKEN,
 		PLUGIN_TOKEN,
 		IndexCoordinator,
 		CommandManager,
+	]);
+	container.register(IndexRebuildStatusService, [
+		IndexDatabase,
+		LoggingService,
 	]);
 
 	// --- Level 2: Depends on Level 1 ---
@@ -103,6 +118,7 @@ export function registerServices(
 		NoteEditorService,
 		FileSystemService,
 		LoggingService,
+		VaultBookScanner,
 	]);
 
 	container.register(MergeHandler, [
@@ -120,6 +136,9 @@ export function registerServices(
 		LoggingService,
 	]);
 
+	// Index repositories (data access layer)
+	container.register(IndexRepository, [IndexDatabase]);
+
 	// IndexCoordinator handles orchestration and events
 	container.register(IndexCoordinator, [
 		APP_TOKEN,
@@ -129,6 +148,8 @@ export function registerServices(
 		FileSystemService,
 		LoggingService,
 		CacheManager,
+		VaultBookScanner,
+		IndexRepository,
 	]);
 
 	// --- Level 2.5: Duplicate Finding
@@ -141,6 +162,8 @@ export function registerServices(
 		NotePersistenceService,
 		LoggingService,
 		FileSystemService,
+		VaultBookScanner,
+		DeviceService,
 	]);
 
 	// Consolidated ImportService
@@ -169,5 +192,6 @@ export function registerServices(
 		IndexCoordinator,
 		FileSystemService,
 		NoteEditorService,
+		NotePersistenceService,
 	]);
 }

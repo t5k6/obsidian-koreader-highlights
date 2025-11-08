@@ -1,18 +1,23 @@
-import { Notice, Plugin } from "obsidian";
+import { Notice, Plugin, type TFile } from "obsidian";
 import { isErr } from "src/lib/core/result";
 import { CommandManager } from "src/services/command/CommandManager";
 import { FileSystemService } from "src/services/FileSystemService";
 import { LoggingService } from "src/services/LoggingService";
 import { TemplateManager } from "src/services/parsing/TemplateManager";
+import { IndexRebuildStatusService } from "src/services/ui/IndexRebuildStatusService";
 import { IndexCoordinator } from "src/services/vault/index/IndexCoordinator";
+import { InteractionModal } from "src/ui/InteractionModal";
 import { SettingsTab } from "src/ui/SettingsTab";
 import { StatusBarManager } from "src/ui/StatusBarManager";
 import { DIContainer } from "./core/DIContainer";
 import { MigrationManager } from "./core/MigrationManager";
 import { PluginDataStore } from "./core/PluginDataStore";
 import { registerServices } from "./core/registerServices";
+import { DEFAULT_SETTINGS } from "./core/settingsSchema";
 import { SETTINGS_TOKEN } from "./core/tokens";
 import { type AppResult, formatError } from "./lib/errors/types";
+import { isTFile, isTFolder } from "./lib/obsidian/typeguards";
+import { Pathing } from "./lib/pathing";
 import { NotePersistenceService } from "./services/vault/NotePersistenceService";
 import type { KoreaderHighlightImporterSettings } from "./types";
 
@@ -32,6 +37,10 @@ export default class KoreaderImporterPlugin extends Plugin {
 		return this.servicesInitialized;
 	}
 
+	get pluginDataStore(): PluginDataStore {
+		return this.dataStore;
+	}
+
 	async onload() {
 		console.log("KOReaderImporterPlugin: Loading...");
 
@@ -39,6 +48,7 @@ export default class KoreaderImporterPlugin extends Plugin {
 
 		if (this.servicesInitialized) {
 			this.registerPluginCommands();
+			this.registerFileMenuHandler();
 			this.addSettingTab(new SettingsTab(this.app, this));
 			this.loggingService.info(
 				"KoreaderImporterPlugin",
@@ -116,6 +126,8 @@ export default class KoreaderImporterPlugin extends Plugin {
 	private initDI(): void {
 		this.diContainer = new DIContainer(this.loggingService);
 		this.diContainer.registerValue(LoggingService, this.loggingService);
+		// Register default settings early so service dependencies can resolve
+		this.diContainer.registerValue(SETTINGS_TOKEN, { ...DEFAULT_SETTINGS });
 	}
 
 	private registerCoreServices(): void {
@@ -180,6 +192,13 @@ export default class KoreaderImporterPlugin extends Plugin {
 		this.statusBarManager =
 			this.diContainer.resolve<StatusBarManager>(StatusBarManager);
 		this.addChild(this.statusBarManager);
+
+		// Initialize UI services that subscribe to state changes
+		const rebuildStatusService =
+			this.diContainer.resolve<IndexRebuildStatusService>(
+				IndexRebuildStatusService,
+			);
+		rebuildStatusService.initialize();
 	}
 
 	async onunload() {
@@ -203,6 +222,63 @@ export default class KoreaderImporterPlugin extends Plugin {
 		for (const command of commandManager.getCommands()) {
 			this.addCommand(command);
 		}
+	}
+
+	private registerFileMenuHandler(): void {
+		const commandManager =
+			this.diContainer.resolve<CommandManager>(CommandManager);
+		this.registerEvent(
+			this.app.workspace.on("file-menu", (menu, file, source, leaf) => {
+				// Only show for files/folders in highlights folder
+				if (Pathing.isAncestor(this.settings.highlightsFolder, file.path)) {
+					if (isTFile(file)) {
+						menu.addItem((item) => {
+							item
+								.setTitle("Finalize KOReader note(s)")
+								.setIcon("check-circle")
+								.onClick(async () => {
+									void this.runAndNotify(
+										commandManager.executeFinalizeCurrentNote(file),
+										{
+											onSuccess: (result) => {
+												new Notice(
+													result.changed
+														? "KOReader tracking comments removed from this note."
+														: "No tracking comments found in this note.",
+													5000,
+												);
+											},
+										},
+									);
+								});
+						});
+					} else if (isTFolder(file)) {
+						// Folder - show confirmation for recursive
+						menu.addItem((item) => {
+							item
+								.setTitle("Finalize KOReader note(s)")
+								.setIcon("check-circle")
+								.onClick(async () => {
+									// Show confirmation for folder
+									const confirmed = await InteractionModal.confirm(this.app, {
+										title: "Finalize notes in this folder?",
+										message:
+											"This will permanently remove tracking comments from all KOReader notes in this folder and its subfolders. Continue?",
+										ctaText: "Finalize",
+									});
+									if (confirmed) {
+										// TODO: Implement recursive finalization
+										new Notice(
+											"Folder finalization not yet implemented.",
+											4000,
+										);
+									}
+								});
+						});
+					}
+				}
+			}),
+		);
 	}
 
 	// --- Private Helper Methods ---
@@ -274,6 +350,12 @@ export default class KoreaderImporterPlugin extends Plugin {
 				10000,
 			);
 		}
+	}
+
+	public async triggerCleanupCompletedBooks(): Promise<void> {
+		const commandManager =
+			this.diContainer.resolve<CommandManager>(CommandManager);
+		await this.runAndNotify(commandManager.executeCleanupCompletedBooks());
 	}
 
 	async saveSettings(forceUpdate: boolean = false): Promise<void> {

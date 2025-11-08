@@ -2,7 +2,6 @@ import path, { parse, posix as posixPath } from "node:path";
 import { normalizePath } from "obsidian";
 import { FILENAME_TRUNCATION_HASH_LENGTH } from "src/constants";
 import { SimpleCache } from "src/lib/cache";
-import type { CacheManager } from "src/lib/cache/CacheManager";
 import type { IterableCache } from "src/lib/cache/types";
 import { formatDateForDailyNote } from "src/lib/formatting/dateUtils";
 import {
@@ -10,7 +9,6 @@ import {
 	stripDiacritics,
 } from "src/lib/strings/stringUtils";
 import type { DocProps } from "src/types";
-import { memoizePure } from "./cache/cacheUtils";
 import { sha1Hex } from "./core/crypto";
 
 /* ------------------------------------------------------------------ */
@@ -39,7 +37,7 @@ export type SystemPath = string & { __brand: "SystemPath" };
  * Type guard to check if a string is already a VaultPath.
  * Note: This is a runtime no-op but helps with type checking.
  */
-export function isVaultPath(path: string): path is VaultPath {
+function isVaultPath(path: string): path is VaultPath {
 	return true; // Runtime check not feasible for branded types
 }
 
@@ -47,7 +45,7 @@ export function isVaultPath(path: string): path is VaultPath {
  * Type guard to check if a string is already a SystemPath.
  * Note: This is a runtime no-op but helps with type checking.
  */
-export function isSystemPath(path: string): path is SystemPath {
+function isSystemPath(path: string): path is SystemPath {
 	return true; // Runtime check not feasible for branded types
 }
 
@@ -55,7 +53,7 @@ export function isSystemPath(path: string): path is SystemPath {
  * Convert a VaultPath to a string for compatibility with APIs that expect raw strings.
  * Use sparingly - prefer keeping the branded type when possible.
  */
-export function vaultPathToString(path: VaultPath): string {
+function vaultPathToString(path: VaultPath): string {
 	return path as string;
 }
 
@@ -63,7 +61,7 @@ export function vaultPathToString(path: VaultPath): string {
  * Convert a SystemPath to a string for compatibility with APIs that expect raw strings.
  * Use sparingly - prefer keeping the branded type when possible.
  */
-export function systemPathToString(path: SystemPath): string {
+function systemPathToString(path: SystemPath): string {
 	return path as string;
 }
 
@@ -85,44 +83,19 @@ export type MatchKeyOptions = {
 	collapse?: boolean; // default true
 };
 
-/** Ergonomic DI context for pathing helpers. */
-export type PathingContext = {
-	fileSafeCache: IterableCache<string, string>;
-	matchKeyCache: IterableCache<string, string>;
+export type FileNameTemplateOptions = {
+	useCustomTemplate: boolean;
+	template: string;
 };
 
-// Small, module-local default caches. These are the fallbacks when callers don't inject.
-// Use SimpleCache (Map-backed, optional LRU via max size if needed).
-const defaultFileSafeCache: IterableCache<string, string> = new SimpleCache();
-const defaultMatchKeyCache: IterableCache<string, string> = new SimpleCache();
+export interface ScanCacheKey {
+	rootPath: VaultPath;
+	extensions: string[];
+	recursive: boolean;
+}
 
 // Avoid caching pathological inputs
 const MAX_CACHEABLE_INPUT_LEN = 4096;
-
-// Public test/ops hooks
-export function clearSlugCaches(): void {
-	defaultFileSafeCache.clear();
-	defaultMatchKeyCache.clear();
-}
-
-export function getSlugCacheSizes(): { fileSafe: number; matchKey: number } {
-	return {
-		fileSafe: defaultFileSafeCache.size,
-		matchKey: defaultMatchKeyCache.size,
-	};
-}
-
-/** Normalize whitespace: trim + collapse unicode whitespace to a single space. */
-/** Strip combining diacritical marks after NFKD normalize. */
-export {
-	normalizeWhitespace,
-	stripDiacritics,
-} from "src/lib/strings/stringUtils";
-
-// ================================================================
-// FUNCTIONAL CORE (Pure, stateless computation functions)
-// These are not exported directly but used by the factory.
-// ================================================================
 
 /** Remove characters forbidden on Windows/macOS filesystems; also drop control chars. */
 function removeIllegalFsChars(s: string): string {
@@ -191,7 +164,7 @@ function normalizeMatchKeyOpts(opts?: MatchKeyOptions) {
 	};
 }
 
-export function computeToFileSafe(
+function computeToFileSafe(
 	input: string | null | undefined,
 	opts?: FileSafeOptions,
 ): string {
@@ -217,7 +190,7 @@ export function computeToFileSafe(
 	return s || o.fallback;
 }
 
-export function computeMatchKey(
+function computeMatchKey(
 	input: string | null | undefined,
 	opts?: MatchKeyOptions,
 ): string {
@@ -233,118 +206,12 @@ export function computeMatchKey(
 	return s || "untitled";
 }
 
-// ================================================================
-// STATEFUL SHELL (The factory function that creates cached helpers)
-// This is the primary export and entry point for using pathing utilities.
-// ================================================================
-
-type FileSafeArgs = {
-	input: string | null | undefined;
-	opts?: FileSafeOptions;
-};
-type MatchKeyArgs = {
-	input: string | null | undefined;
-	opts?: MatchKeyOptions;
-};
-
-/**
- * Creates a complete, cohesive API for pathing operations, with caching for expensive slug generation.
- * This is the canonical way to get pathing utilities for use in services.
- *
- * @param fileSafeCache A cache instance for `toFileSafe` results, keyed by `string`.
- * @param matchKeyCache A cache instance for `toMatchKey` results, keyed by `string`.
- * @returns An object containing all necessary pathing functions.
- */
-export function createPathingHelpers(
-	fileSafeCache: IterableCache<string, string>,
-	matchKeyCache: IterableCache<string, string>,
-) {
-	const toFileSafe = memoizePure<FileSafeArgs, string>(
-		fileSafeCache,
-		// Hasher: creates a stable string key from the arguments
-		(args) => {
-			const o = normalizeFileSafeOpts(args.opts);
-			return `fs|${String(args.input ?? "")}|${o.maxLength}|${o.lower ? 1 : 0}|${o.ascii ? 1 : 0}|${o.allowUnicode ? 1 : 0}|${o.fallback}`;
-		},
-		// Pure Function: the actual computation
-		(args) => computeToFileSafe(args.input, args.opts),
-	);
-
-	const toMatchKey = memoizePure<MatchKeyArgs, string>(
-		matchKeyCache,
-		// Hasher
-		(args) => {
-			const o = normalizeMatchKeyOpts(args.opts);
-			return `mk|${String(args.input ?? "")}|${o.lower ? 1 : 0}|${o.ascii ? 1 : 0}|${o.collapse ? 1 : 0}`;
-		},
-		// Pure Function
-		(args) => computeMatchKey(args.input, args.opts),
-	);
-
-	// Return the complete API object
-	return {
-		// Cached, stateful functions
-		toFileSafe: (input: string | null | undefined, opts?: FileSafeOptions) =>
-			toFileSafe({ input, opts }),
-		toMatchKey: (input: string | null | undefined, opts?: MatchKeyOptions) =>
-			toMatchKey({ input, opts }),
-
-		// Pure, stateless functions (passed through for convenience)
-		toVaultPath: (rawPath: string | null | undefined): VaultPath => {
-			if (!rawPath) return "" as VaultPath;
-			const p = normalizePath(String(rawPath).trim());
-			if (p === "/" || p === "." || p === "") return "" as VaultPath;
-			return p.replace(/^\/+/, "").replace(/\/+$/, "") as VaultPath;
-		},
-		vaultBasenameOf: (p: VaultPath | string): string => {
-			const norm = typeof p === "string" ? Pathing.toVaultPath(p) : p;
-			const parts = norm.split("/");
-			return parts[parts.length - 1] ?? "";
-		},
-		vaultDirname: (vaultPath: VaultPath | string): VaultPath => {
-			const normalized =
-				typeof vaultPath === "string"
-					? Pathing.toVaultPath(vaultPath)
-					: vaultPath;
-			const parent = posixPath.dirname(normalized);
-			return (parent === "." ? "" : parent) as VaultPath;
-		},
-		vaultExtnameOf: (p: VaultPath | string): string => {
-			const base = Pathing.vaultBasenameOf(p as VaultPath);
-			const idx = base.lastIndexOf(".");
-			return idx >= 0 ? base.slice(idx) : "";
-		},
-		isAncestor: (
-			ancestor: VaultPath | string,
-			child: VaultPath | string,
-		): boolean => {
-			const ancestorNorm =
-				typeof ancestor === "string" ? Pathing.toVaultPath(ancestor) : ancestor;
-			const childNorm =
-				typeof child === "string" ? Pathing.toVaultPath(child) : child;
-			if (ancestorNorm === "") return true; // vault root is ancestor of everything
-			if (ancestorNorm === childNorm) return true;
-			return childNorm.startsWith(`${ancestorNorm}/`);
-		},
-		simplifySdrName,
-		generateFileName,
-		validateFileNameTemplate,
-	};
-}
-
-// Define an exported type for the API object for strong typing elsewhere
-export type PathingAPI = ReturnType<typeof createPathingHelpers>;
-
-// ================================================================
-// Other Pure Functions (to be included in the returned API object)
-// ================================================================
-
 /**
  * Simplifies KOReader SDR directory names to human-readable format.
  * Removes series prefixes, duplicate tokens, and duplicate blocks.
  * Case-insensitive but preserves first spelling encountered.
  */
-export function simplifySdrName(raw: string, delimiter = " - "): string {
+function simplifySdrName(raw: string, delimiter = " - "): string {
 	if (!raw) {
 		return "";
 	}
@@ -404,21 +271,15 @@ export function simplifySdrName(raw: string, delimiter = " - "): string {
 }
 
 /** Extracts filename without extension from a file path. */
-export function getFileNameWithoutExt(filePath: string | undefined): string {
+function getFileNameWithoutExt(filePath: string | undefined): string {
 	if (!filePath) return "";
 	return parse(filePath).name;
 }
 
-// ---------------------- Filename Template Helpers ----------------------
-export type FileNameTemplateOptions = {
-	useCustomTemplate: boolean;
-	template: string;
-};
-
 const FILE_EXTENSION = ".md";
 
 /** Generates a sanitized .md filename based on template or defaults. */
-export function generateFileName(
+function generateFileName(
 	options: FileNameTemplateOptions,
 	docProps: DocProps,
 	originalSdrName?: string,
@@ -441,7 +302,7 @@ export function generateFileName(
 			simplifySdrName(getFileNameWithoutExt(originalSdrName)) || "Untitled";
 	}
 
-	const sanitized = toFileSafe(baseName, {
+	const sanitized = PathingClass.INSTANCE.toFileSafe(baseName, {
 		fallback: "Untitled",
 		maxLength: 0,
 	});
@@ -449,7 +310,7 @@ export function generateFileName(
 }
 
 /** Validates a filename template string for allowed placeholders. */
-export function validateFileNameTemplate(template: string): {
+function validateFileNameTemplate(template: string): {
 	isValid: boolean;
 	errors: string[];
 	warnings: string[];
@@ -511,196 +372,67 @@ function renderTemplate(
 	return template.replace(/\{\{(\w+)\}\}/g, (_, key) => data[key] || "");
 }
 
-function fileSafeCacheKey(input: string, opts?: FileSafeOptions): string {
-	const o = normalizeFileSafeOpts(opts);
-	// Include the input and all relevant options to avoid collisions across different strings
-	// Keep a stable, compact representation
-	return [
-		"fs",
-		input,
-		o.maxLength,
-		o.lower ? 1 : 0,
-		o.ascii ? 1 : 0,
-		o.allowUnicode ? 1 : 0,
-		o.fallback,
-	].join("|");
+function computeStemBudget(
+	absVaultBase: string | null,
+	vaultFolder: string,
+	extensionWithDot: string,
+	targetMaxPathLen: number,
+	suffixReserve: number,
+): number {
+	const sep = absVaultBase && absVaultBase.includes("\\") ? "\\" : "/";
+	const folder = String(vaultFolder || "").replace(/^[/]+|[/]+$/g, "");
+	const fixedParts = [absVaultBase ?? "", folder].filter(Boolean).join(sep);
+
+	// Length of the folder path, the separator, the extension, and the reserved suffix space.
+	const fixedLen =
+		(fixedParts ? fixedParts.length + 1 : 0) +
+		extensionWithDot.length +
+		suffixReserve;
+
+	return Math.max(0, targetMaxPathLen - fixedLen);
 }
 
-export function toFileSafe(
-	input: string | null | undefined,
-	opts?: FileSafeOptions,
-	cache?: IterableCache<string, string>,
+/**
+ * Truncates a filename stem and appends a short hash of the original stem to maintain uniqueness. Pure function.
+ * @param stem The original, potentially oversized filename stem.
+ * @param budget The maximum allowed length for the final stem.
+ * @param hashLength The length of the hash to append.
+ * @returns A new, shortened stem that fits within the budget.
+ */
+function truncateWithHash(
+	stem: string,
+	budget: number,
+	hashLength: number,
 ): string {
-	const o = normalizeFileSafeOpts(opts);
-	const s = String(input ?? "");
-
-	// Caching logic (The "Shell")
-	let key: string | null = null;
-	if (s.length <= MAX_CACHEABLE_INPUT_LEN) {
-		key = fileSafeCacheKey(s, o);
-		const useCache = cache ?? defaultFileSafeCache;
-		const cached = useCache.get(key);
-		if (cached !== undefined) return cached;
+	if (stem.length <= budget) {
+		return stem;
 	}
 
-	// Pure computation (The "Core")
-	const result = computeToFileSafe(input, opts);
-
-	// Caching side-effect (The "Shell")
-	if (key) (cache ?? defaultFileSafeCache).set(key, result);
-	return result;
-}
-
-export function toPathSegment(
-	input: string | null | undefined,
-	opts?: FileSafeOptions,
-	cache?: IterableCache<string, string>,
-): string {
-	return toFileSafe(input, opts, cache);
-}
-
-function matchKeyCacheKey(input: string, opts?: MatchKeyOptions): string {
-	const o = normalizeMatchKeyOpts(opts);
-	return [
-		"mk",
-		o.lower ? 1 : 0,
-		o.ascii ? 1 : 0,
-		o.collapse ? 1 : 0,
-		input,
-	].join("|");
-}
-
-export function toMatchKey(
-	input: string | null | undefined,
-	opts?: MatchKeyOptions,
-	cache?: IterableCache<string, string>,
-): string {
-	const o = normalizeMatchKeyOpts(opts);
-	const s = String(input ?? "");
-
-	// Caching logic (The "Shell")
-	let key: string | null = null;
-	if (s.length <= MAX_CACHEABLE_INPUT_LEN) {
-		key = matchKeyCacheKey(s, o);
-		const useCache = cache ?? defaultMatchKeyCache;
-		const cached = useCache.get(key);
-		if (cached !== undefined) return cached;
+	const separator = "-";
+	// If the budget is too small to even hold a hash, return a timestamp-based fallback.
+	if (budget <= hashLength + separator.length) {
+		return `note-${Date.now().toString(36)}`;
 	}
 
-	// Pure computation (The "Core")
-	const result = computeMatchKey(input, opts);
+	// Truncate the head of the string, leaving space for the separator and hash.
+	const headLength = Math.max(1, budget - (hashLength + separator.length));
+	const head = stem.substring(0, headLength).trim();
 
-	// Caching side-effect (The "Shell")
-	if (key) (cache ?? defaultMatchKeyCache).set(key, result);
-	return result;
+	const hash = sha1Hex(stem).slice(0, hashLength);
+	return `${head}${separator}${hash}`;
 }
 
-/** Create LRU-backed caches and return a DI context. */
-export function createPathingContext(
-	cacheManager: CacheManager,
-	sizes?: { fileSafe?: number; matchKey?: number },
-): PathingContext {
+function generateScanCacheKey(key: ScanCacheKey): string {
+	return `${key.rootPath}|${key.extensions.join(",")}|${key.recursive ? "R" : "NR"}`;
+}
+
+function parseScanCacheKey(raw: string): ScanCacheKey {
+	const [root, exts, rflag] = raw.split("|");
 	return {
-		fileSafeCache: cacheManager.createLru(
-			"pathing.slug.fileSafe",
-			sizes?.fileSafe ?? 500,
-		),
-		matchKeyCache: cacheManager.createLru(
-			"pathing.slug.matchKey",
-			sizes?.matchKey ?? 1000,
-		),
+		rootPath: toVaultPath(root ?? ""),
+		extensions: exts ? exts.split(",").filter(Boolean) : [],
+		recursive: rflag === "R",
 	};
-}
-
-/** Bind helpers to a provided context (or fall back to module defaults). */
-export function withPathing(ctx?: Partial<PathingContext>) {
-	const fcache = ctx?.fileSafeCache ?? defaultFileSafeCache;
-	const mcache = ctx?.matchKeyCache ?? defaultMatchKeyCache;
-	return {
-		toFileSafe: (input: string | null | undefined, opts?: FileSafeOptions) =>
-			toFileSafe(input, opts, fcache),
-		toPathSegment: (input: string | null | undefined, opts?: FileSafeOptions) =>
-			toPathSegment(input, opts, fcache),
-		toMatchKey: (input: string | null | undefined, opts?: MatchKeyOptions) =>
-			toMatchKey(input, opts, mcache),
-	};
-}
-
-/**
- * Strips a Windows drive (e.g., "E:\\" or "E:/") or leading slash from a device path
- * to make it relative to the mount root.
- */
-export function stripRootFromDevicePath(p: string): string {
-	// Windows drive like "E:\\" or "E:/"
-	const win = p.replace(/^[A-Za-z]:[\\/]+/, "");
-	if (win !== p) return win;
-	// POSIX root
-	return p.replace(/^\/+/, "");
-}
-
-/* ------------------------------------------------------------------ */
-/*                 Vault/System Path Normalization Helpers            */
-/* ------------------------------------------------------------------ */
-
-/** Normalize an OS-native system path string to forward slashes and no trailing slash. */
-export function normalizeSystemPath(p: string | null | undefined): SystemPath {
-	if (!p) return "" as SystemPath;
-	let s = String(p)
-		.replace(/\\/g, "/")
-		.replace(/\/{2,}/g, "/");
-	if (s.length > 1 && s.endsWith("/")) s = s.slice(0, -1);
-	return s as SystemPath;
-}
-
-/* ------------------------------------------------------------------ */
-/*                 Vault/System Path Normalization Helpers            */
-/* ------------------------------------------------------------------ */
-
-/**
- * Converts a path to a canonical, vault-relative format.
- * Single source of truth for vault path normalization.
- */
-export function toVaultPath(rawPath: string | null | undefined): VaultPath {
-	if (!rawPath) return "" as VaultPath;
-	const p = normalizePath(String(rawPath).trim());
-	if (p === "/" || p === "." || p === "") return "" as VaultPath;
-	return p.replace(/^\/+/, "").replace(/\/+$/, "") as VaultPath;
-}
-
-/** Basename (final segment) of a vault path string. */
-export function vaultBasenameOf(p: VaultPath | string): string {
-	const norm = typeof p === "string" ? toVaultPath(p) : p;
-	const parts = norm.split("/");
-	return parts[parts.length - 1] ?? "";
-}
-
-/** Extension (including dot) of a vault path's basename, or empty string. */
-export function vaultExtnameOf(p: VaultPath | string): string {
-	const base = vaultBasenameOf(p as VaultPath);
-	const idx = base.lastIndexOf(".");
-	return idx >= 0 ? base.slice(idx) : "";
-}
-
-/** Returns true if ancestor is the same as or a parent of child (vault path semantics). */
-export function isAncestor(
-	ancestor: VaultPath | string,
-	child: VaultPath | string,
-): boolean {
-	const ancestorNorm =
-		typeof ancestor === "string" ? toVaultPath(ancestor) : ancestor;
-	const childNorm = typeof child === "string" ? toVaultPath(child) : child;
-	if (ancestorNorm === "") return true; // vault root is ancestor of everything
-	if (ancestorNorm === childNorm) return true;
-	return childNorm.startsWith(`${ancestorNorm}/`);
-}
-
-/**
- * Internal helper to join path segments into a single VaultPath.
- * Defined before its usage to resolve the scoping issue.
- */
-function joinVaultPath(...segments: string[]): VaultPath {
-	const joined = posixPath.join(...segments.map((s) => toVaultPath(s)));
-	return toVaultPath(joined);
 }
 
 /**
@@ -712,7 +444,7 @@ function joinVaultPath(...segments: string[]): VaultPath {
  * @param options Configuration for the generation and truncation logic.
  * @returns A promise that resolves to an object containing the unique stem and a flag indicating if truncation occurred.
  */
-export async function generateUniqueStem(
+async function generateUniqueStem(
 	desiredStem: string,
 	existsCheck: (candidatePath: VaultPath) => Promise<boolean>,
 	options: {
@@ -736,7 +468,9 @@ export async function generateUniqueStem(
 	} = options;
 
 	const extensionWithDot = `.${ext.replace(/^\./, "")}`;
-	const sanitizedStem = toFileSafe(desiredStem, { fallback: "Untitled" });
+	const sanitizedStem = PathingClass.INSTANCE.toFileSafe(desiredStem, {
+		fallback: "Untitled",
+	});
 
 	// 2. Calculate the maximum allowed length for the stem. This budget already
 	//    accounts for the suffix, ensuring our base stem has enough room.
@@ -789,161 +523,300 @@ export async function generateUniqueStem(
 	return { stem: finalStem, wasTruncated: true };
 }
 
-// Consolidated API object
-export const Pathing = {
-	clearSlugCaches,
-	computeStemBudget,
-	createPathingContext,
-	generateFileName,
-	generateUniqueStem,
-	getSlugCacheSizes,
-	getFileNameWithoutExt,
-	isAncestor,
-	normalizeSystemPath,
-	normalizeWhitespace,
-	simplifySdrName,
-	stripDiacritics,
-	stripRootFromDevicePath,
-	toFileSafe,
-	toMatchKey,
-	toPathSegment,
-	toVaultPath,
-	truncateWithHash,
-	validateFileNameTemplate,
-	vaultBasenameOf,
-	vaultExtnameOf,
-	withPathing,
-	joinVaultPath,
-	vaultDirname: (vaultPath: VaultPath | string): VaultPath => {
+// Internal helper to join path segments into a single VaultPath.
+function joinVaultPath(...segments: string[]): VaultPath {
+	const joined = posixPath.join(...segments.map((s) => toVaultPath(s)));
+	return toVaultPath(joined);
+}
+
+/** Normalize an OS-native system path string to forward slashes and no trailing slash. */
+function normalizeSystemPath(p: string | null | undefined): SystemPath {
+	if (!p) return "" as SystemPath;
+	let s = String(p)
+		.replace(/\\/g, "/")
+		.replace(/\/{2,}/g, "/");
+	if (s.length > 1 && s.endsWith("/")) s = s.slice(0, -1);
+	return s as SystemPath;
+}
+
+/**
+ * Converts a path to a canonical, vault-relative format.
+ * Single source of truth for vault path normalization.
+ */
+function toVaultPath(rawPath: string | null | undefined): VaultPath {
+	if (!rawPath) return "" as VaultPath;
+	const p = normalizePath(String(rawPath).trim());
+	if (p === "/" || p === "." || p === "") return "" as VaultPath;
+	return p.replace(/^\/+/, "").replace(/\/+$/, "") as VaultPath;
+}
+
+/** Basename (final segment) of a vault path string. */
+function vaultBasenameOf(p: VaultPath | string): string {
+	const norm = typeof p === "string" ? toVaultPath(p) : p;
+	const parts = norm.split("/");
+	return parts[parts.length - 1] ?? "";
+}
+
+/** Extension (including dot) of a vault path's basename, or empty string. */
+function vaultExtnameOf(p: VaultPath | string): string {
+	const base = vaultBasenameOf(p as VaultPath);
+	const idx = base.lastIndexOf(".");
+	return idx >= 0 ? base.slice(idx) : "";
+}
+
+/** Returns true if ancestor is the same as or a parent of child (vault path semantics). */
+function isAncestor(
+	ancestor: VaultPath | string,
+	child: VaultPath | string,
+): boolean {
+	const ancestorNorm =
+		typeof ancestor === "string" ? toVaultPath(ancestor) : ancestor;
+	const childNorm = typeof child === "string" ? toVaultPath(child) : child;
+	if (ancestorNorm === "") return true; // vault root is ancestor of everything
+	if (ancestorNorm === childNorm) return true;
+	return childNorm.startsWith(`${ancestorNorm}/`);
+}
+
+/**
+ * Strips a Windows drive (e.g., "E:\\" or "E:/") or leading slash from a device path
+ * to make it relative to the mount root.
+ */
+function stripRootFromDevicePath(p: string): string {
+	// Windows drive like "E:\\" or "E:/"
+	const win = p.replace(/^[A-Za-z]:[\\/]+/, "");
+	if (win !== p) return win;
+	// POSIX root
+	return p.replace(/^\/+/, "");
+}
+
+// =====================================================================================
+// PATHING CLASS - The new singleton-based API
+// =====================================================================================
+
+export class PathingClass {
+	public static readonly INSTANCE: PathingClass = new PathingClass();
+
+	readonly #fileSafeCache: IterableCache<string, string>;
+	readonly #matchKeyCache: IterableCache<string, string>;
+
+	/**
+	 * Private constructor - use Pathing.INSTANCE or new Pathing() for testing.
+	 * Creates default caches if none provided.
+	 */
+	private constructor(
+		fileSafeCache?: IterableCache<string, string>,
+		matchKeyCache?: IterableCache<string, string>,
+	) {
+		this.#fileSafeCache = fileSafeCache ?? new SimpleCache<string, string>();
+		this.#matchKeyCache = matchKeyCache ?? new SimpleCache<string, string>();
+	}
+
+	// Public test/ops hooks
+	clearSlugCaches(): void {
+		this.#fileSafeCache.clear();
+		this.#matchKeyCache.clear();
+	}
+
+	getSlugCacheSizes(): { fileSafe: number; matchKey: number } {
+		return {
+			fileSafe: this.#fileSafeCache.size,
+			matchKey: this.#matchKeyCache.size,
+		};
+	}
+
+	toFileSafe(input: string | null | undefined, opts?: FileSafeOptions): string {
+		const o = normalizeFileSafeOpts(opts);
+		const s = String(input ?? "");
+
+		// Caching logic
+		let key: string | null = null;
+		if (s.length <= MAX_CACHEABLE_INPUT_LEN) {
+			key = `fs|${s}|${o.maxLength}|${o.lower ? 1 : 0}|${o.ascii ? 1 : 0}|${o.allowUnicode ? 1 : 0}|${o.fallback}`;
+			const cached = this.#fileSafeCache.get(key);
+			if (cached !== undefined) return cached;
+		}
+
+		// Pure computation
+		const result = computeToFileSafe(input, opts);
+
+		// Cache the result
+		if (key) this.#fileSafeCache.set(key, result);
+		return result;
+	}
+
+	toMatchKey(input: string | null | undefined, opts?: MatchKeyOptions): string {
+		const o = normalizeMatchKeyOpts(opts);
+		const s = String(input ?? "");
+
+		// Caching logic
+		let key: string | null = null;
+		if (s.length <= MAX_CACHEABLE_INPUT_LEN) {
+			key = `mk|${s}|${o.lower ? 1 : 0}|${o.ascii ? 1 : 0}|${o.collapse ? 1 : 0}`;
+			const cached = this.#matchKeyCache.get(key);
+			if (cached !== undefined) return cached;
+		}
+
+		// Pure computation
+		const result = computeMatchKey(input, opts);
+
+		// Cache the result
+		if (key) this.#matchKeyCache.set(key, result);
+		return result;
+	}
+
+	normalizeWhitespace(s: string): string {
+		return normalizeWhitespace(s);
+	}
+
+	toVaultPath(rawPath: string | null | undefined): VaultPath {
+		return toVaultPath(rawPath);
+	}
+
+	vaultBasenameOf(p: VaultPath | string): string {
+		return vaultBasenameOf(p);
+	}
+
+	vaultDirname(vaultPath: VaultPath | string): VaultPath {
 		const normalized =
 			typeof vaultPath === "string" ? toVaultPath(vaultPath) : vaultPath;
 		const parent = posixPath.dirname(normalized);
 		return (parent === "." ? "" : parent) as VaultPath;
-	},
-	joinSystemPath: (...segments: string[]): SystemPath => {
+	}
+
+	vaultExtnameOf(p: VaultPath | string): string {
+		return vaultExtnameOf(p);
+	}
+
+	isAncestor(ancestor: VaultPath | string, child: VaultPath | string): boolean {
+		return isAncestor(ancestor, child);
+	}
+
+	simplifySdrName(raw: string, delimiter = " - "): string {
+		return simplifySdrName(raw, delimiter);
+	}
+
+	generateFileName(
+		options: FileNameTemplateOptions,
+		docProps: DocProps,
+		originalSdrName?: string,
+	): string {
+		return generateFileName(options, docProps, originalSdrName);
+	}
+
+	validateFileNameTemplate(template: string): {
+		isValid: boolean;
+		errors: string[];
+		warnings: string[];
+	} {
+		return validateFileNameTemplate(template);
+	}
+
+	getFileNameWithoutExt(filePath: string | undefined): string {
+		return getFileNameWithoutExt(filePath);
+	}
+
+	generateUniqueStem(
+		desiredStem: string,
+		existsCheck: (candidatePath: VaultPath) => Promise<boolean>,
+		options: {
+			baseDir?: string;
+			ext?: string;
+			maxAttempts?: number;
+			absVaultBase?: string | null;
+			targetMaxPathLen?: number;
+			suffixReserve?: number;
+		} = {},
+	): Promise<{ stem: string; wasTruncated: boolean }> {
+		return generateUniqueStem(desiredStem, existsCheck, options);
+	}
+
+	computeStemBudget(
+		absVaultBase: string | null,
+		vaultFolder: string,
+		extensionWithDot: string,
+		targetMaxPathLen: number,
+		suffixReserve: number,
+	): number {
+		return computeStemBudget(
+			absVaultBase,
+			vaultFolder,
+			extensionWithDot,
+			targetMaxPathLen,
+			suffixReserve,
+		);
+	}
+
+	truncateWithHash(stem: string, budget: number, hashLength: number): string {
+		return truncateWithHash(stem, budget, hashLength);
+	}
+
+	normalizeSystemPath(p: string | null | undefined): SystemPath {
+		return normalizeSystemPath(p);
+	}
+
+	stripRootFromDevicePath(p: string): string {
+		return stripRootFromDevicePath(p);
+	}
+
+	joinVaultPath(...segments: string[]): VaultPath {
+		return joinVaultPath(...segments);
+	}
+
+	joinSystemPath(...segments: string[]): SystemPath {
 		return path.join(...segments) as SystemPath;
-	},
-	systemDirname: (systemPath: SystemPath | string): SystemPath => {
+	}
+
+	systemDirname(systemPath: SystemPath | string): SystemPath {
 		const normalized =
 			typeof systemPath === "string"
 				? normalizeSystemPath(systemPath)
 				: systemPath;
 		return path.dirname(normalized) as SystemPath;
-	},
-	systemBasename: (systemPath: SystemPath | string, ext?: string): string => {
+	}
+
+	systemBasename(systemPath: SystemPath | string, ext?: string): string {
 		const normalized =
 			typeof systemPath === "string"
 				? normalizeSystemPath(systemPath)
 				: systemPath;
 		return path.basename(normalized, ext);
-	},
-	systemRelative: (
-		from: SystemPath | string,
-		to: SystemPath | string,
-	): string => {
+	}
+
+	systemRelative(from: SystemPath | string, to: SystemPath | string): string {
 		const normalizedFrom =
 			typeof from === "string" ? normalizeSystemPath(from) : from;
 		const normalizedTo = typeof to === "string" ? normalizeSystemPath(to) : to;
 		return path.relative(normalizedFrom, normalizedTo);
-	},
-	systemResolve: (...pathSegments: string[]): SystemPath => {
+	}
+
+	systemResolve(...pathSegments: string[]): SystemPath {
 		return path.resolve(...pathSegments) as SystemPath;
-	},
-	// Branded type utilities
-	vaultPathToString,
-	systemPathToString,
-	isVaultPath,
-	isSystemPath,
-	generateScanCacheKey,
-	parseScanCacheKey,
-};
-
-/** Truncates a stem and appends a short hash to maintain uniqueness. */
-export function safeTruncateWithHash(stem: string, budget: number): string {
-	if (stem.length <= budget) return stem;
-	const HASH_LEN = FILENAME_TRUNCATION_HASH_LENGTH;
-	const SEP = "-";
-	if (budget <= HASH_LEN + 1) return `note-${Date.now().toString(36)}`;
-	const headLength = Math.max(1, budget - (HASH_LEN + 1));
-	const head = stem.substring(0, headLength).trim();
-	const h = sha1Hex(stem).slice(0, HASH_LEN);
-	return `${head}${SEP}${h}`;
-}
-
-/**
- * Calculates a safe stem length based on a target total path length. This is a pure function.
- * @param absVaultBase The absolute path to the vault's root. Can be null if unavailable.
- * @param vaultFolder The vault-relative folder where the file will be created.
- * @param extensionWithDot The file's extension, including the dot (e.g., ".md").
- * @param targetMaxPathLen The target maximum full path length (e.g., 255 for Windows).
- * @param suffixReserve The space to reserve for unique suffixes like " (999)".
- * @returns The calculated maximum number of characters for the filename stem.
- */
-export function computeStemBudget(
-	absVaultBase: string | null,
-	vaultFolder: string,
-	extensionWithDot: string,
-	targetMaxPathLen: number,
-	suffixReserve: number,
-): number {
-	const sep = absVaultBase && absVaultBase.includes("\\") ? "\\" : "/";
-	const folder = String(vaultFolder || "").replace(/^[/]+|[/]+$/g, "");
-	const fixedParts = [absVaultBase ?? "", folder].filter(Boolean).join(sep);
-
-	// Length of the folder path, the separator, the extension, and the reserved suffix space.
-	const fixedLen =
-		(fixedParts ? fixedParts.length + 1 : 0) +
-		extensionWithDot.length +
-		suffixReserve;
-
-	return Math.max(0, targetMaxPathLen - fixedLen);
-}
-
-/**
- * Truncates a filename stem and appends a short hash of the original stem to maintain uniqueness. Pure function.
- * @param stem The original, potentially oversized filename stem.
- * @param budget The maximum allowed length for the final stem.
- * @param hashLength The length of the hash to append.
- * @returns A new, shortened stem that fits within the budget.
- */
-export function truncateWithHash(
-	stem: string,
-	budget: number,
-	hashLength: number,
-): string {
-	if (stem.length <= budget) {
-		return stem;
 	}
 
-	const separator = "-";
-	// If the budget is too small to even hold a hash, return a timestamp-based fallback.
-	if (budget <= hashLength + separator.length) {
-		return `note-${Date.now().toString(36)}`;
+	generateScanCacheKey(key: ScanCacheKey): string {
+		return generateScanCacheKey(key);
 	}
 
-	// Truncate the head of the string, leaving space for the separator and hash.
-	const headLength = Math.max(1, budget - (hashLength + separator.length));
-	const head = stem.substring(0, headLength).trim();
+	parseScanCacheKey(raw: string): ScanCacheKey {
+		return parseScanCacheKey(raw);
+	}
 
-	const hash = sha1Hex(stem).slice(0, hashLength);
-	return `${head}${separator}${hash}`;
+	isVaultPath(path: string): path is VaultPath {
+		return isVaultPath(path);
+	}
+
+	isSystemPath(path: string): path is SystemPath {
+		return isSystemPath(path);
+	}
+
+	vaultPathToString(path: VaultPath): string {
+		return vaultPathToString(path);
+	}
+
+	systemPathToString(path: SystemPath): string {
+		return systemPathToString(path);
+	}
 }
 
-export interface ScanCacheKey {
-	rootPath: VaultPath;
-	extensions: string[];
-	recursive: boolean;
-}
-
-export function generateScanCacheKey(key: ScanCacheKey): string {
-	return `${key.rootPath}|${key.extensions.join(",")}|${key.recursive ? "R" : "NR"}`;
-}
-
-export function parseScanCacheKey(raw: string): ScanCacheKey {
-	const [root, exts, rflag] = raw.split("|");
-	return {
-		rootPath: toVaultPath(root ?? ""),
-		extensions: exts ? exts.split(",").filter(Boolean) : [],
-		recursive: rflag === "R",
-	};
-}
+// Export the singleton instance as the main API
+export const Pathing = PathingClass.INSTANCE;

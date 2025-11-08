@@ -1,25 +1,9 @@
 import type { SimpleCache } from "src/lib/cache";
 import { sha1Hex } from "src/lib/core/crypto";
 import { safeParse } from "src/lib/core/validationUtils";
+import { makeAnyKohlRegex } from "src/lib/kohlMarkers";
+import { stripHtml } from "src/lib/strings/stringUtils";
 import type { Annotation, CommentStyle, PositionObject } from "src/types";
-
-// Canonical KOHL marker pattern: matches HTML or MD markers and captures the JSON payload.
-// Use [\s\S]*? to match multiline JSON in a non-greedy way.
-export const ANY_KOHL_MARKER_PATTERN_SRC =
-	"(?:<!--|%%)\\s*KOHL\\s*({[\\s\\S]*?})\\s*(?:-->|%%)";
-
-// Global version for replace/find-all. Beware: global regexes are stateful.
-export const ANY_KOHL_MARKER_REGEX = new RegExp(
-	ANY_KOHL_MARKER_PATTERN_SRC,
-	"g",
-);
-
-// Non-global tester for safe presence checks when needed.
-export const ANY_KOHL_MARKER_TEST = new RegExp(ANY_KOHL_MARKER_PATTERN_SRC);
-
-// Utility for callers who want a fresh instance (avoids shared lastIndex).
-export const makeAnyKohlRegex = (flags = "g") =>
-	new RegExp(ANY_KOHL_MARKER_PATTERN_SRC, flags);
 
 // Infer style from a matched marker block.
 function inferStyleFromBlock(block: string): "html" | "md" {
@@ -129,7 +113,12 @@ export function extractHighlightsWithStyle(
 		const endPos =
 			i + 1 < allMarkers.length ? allMarkers[i + 1].index : content.length;
 
-		const visibleText = content.slice(startPos, endPos).trim();
+		let visibleText = content.slice(startPos, endPos).trim();
+		// For HTML-style markers, strip HTML tags to get back to raw text
+		// This ensures the parsed text matches what was used to compute the ID
+		if (usedStyle === "html") {
+			visibleText = stripHtml(visibleText);
+		}
 		const { text, note } = splitTextAndNote(visibleText);
 
 		annotations.push({
@@ -192,62 +181,6 @@ export function detectCommentStyle(content: string): CommentStyle | null {
 	if (hasMd && !hasHtml) return "md";
 	if (hasHtml && hasMd) return "html"; // legacy preference
 	return null;
-}
-
-/**
- * Removes all KOHL comment markers from content.
- * @param content - Content to clean
- * @returns Content with all KOHL markers removed
- */
-export function removeKohlComments(content: string): string {
-	const cleaned = content.replace(ANY_KOHL_MARKER_REGEX, "");
-	return cleaned.replace(/\n\s*\n(\s*\n)+/g, "\n\n");
-}
-
-/**
- * Converts all KOHL metadata comments within a note's body to the target style.
- * This function is pure, idempotent, and safe against malformed data.
- * It is the single source of truth for comment style conversion.
- *
- * @param content The raw string content of the note body.
- * @param targetStyle The desired comment style: 'html', 'md', or 'none'.
- * @returns The transformed body content.
- */
-export function convertKohlMarkers(
-	content: string,
-	targetStyle: CommentStyle,
-): string {
-	if (targetStyle === "none") {
-		// Delegate to the dedicated removal function for clarity.
-		return removeKohlComments(content);
-	}
-
-	if (targetStyle !== "html" && targetStyle !== "md") {
-		return content; // Return original content if target is invalid.
-	}
-
-	// Use a replacer function to process each match safely.
-	return content.replace(
-		ANY_KOHL_MARKER_REGEX,
-		(match, jsonPayload: string) => {
-			// Safely parse the captured JSON payload.
-			const meta = safeParse<Record<string, unknown>>(jsonPayload);
-
-			// If the JSON is malformed, return the original comment block verbatim.
-			// This is a critical data-preservation step.
-			if (!meta) {
-				return match;
-			}
-
-			// Re-stringify the parsed metadata to ensure it's clean and canonical.
-			const newJson = JSON.stringify(meta);
-
-			// Generate the new marker in the target style.
-			return targetStyle === "html"
-				? `<!-- KOHL ${newJson} -->`
-				: `%% KOHL ${newJson} %%`;
-		},
-	);
 }
 
 type ScanResult = { markers: Marker[]; styles: Set<Style> };

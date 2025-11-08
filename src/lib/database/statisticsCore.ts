@@ -176,3 +176,32 @@ export function getBookStatisticsBundle(
 	const derived = calculateDerivedStatistics(book, sessions);
 	return { book, readingSessions: sessions, derived };
 }
+
+/**
+ * Get the count of books with a specific MD5.
+ */
+export function getMd5OccurrenceCount(db: Database, md5: string): number {
+	const result = queryFirstRow<{ count: number }>(
+		db,
+		"SELECT COUNT(*) as count FROM book WHERE md5 = ?",
+		[md5],
+	);
+	return result?.count ?? 0;
+}
+
+/**
+ * Query books that match any of the given identifiers.
+ * Identifiers are scheme:value pairs like "uuid:123", "isbn:456", etc.
+ */
+export function queryBooksByIdentifiers(
+	db: Database,
+	identifiers: Array<{ scheme: string; value: string }>,
+): Array<{ id: number; md5: string; title: string; authors: string }> {
+	if (identifiers.length === 0) return [];
+
+	// Build a query that checks for any matching identifier in the book table
+	// Note: KOReader doesn't store identifiers in the book table, so this is a placeholder
+	// In practice, we'd need to extend the schema or find another way to match
+	// For now, return empty array since we can't match on identifiers in the current schema
+	return [];
+}

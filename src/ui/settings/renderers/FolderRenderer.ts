@@ -1,5 +1,5 @@
 import { Setting } from "obsidian";
-import { toVaultPath } from "src/lib/pathing";
+import { Pathing } from "src/lib/pathing";
 import type { FolderSpec, RenderCtx } from "../SettingsKit";
 import type { FieldRenderer } from "../SettingsRenderer";
 import { withSave } from "../SettingsRenderer";
@@ -23,7 +23,7 @@ export class FolderRenderer implements FieldRenderer<FolderSpec> {
 			if (spec.placeholder) search.setPlaceholder(spec.placeholder);
 			search.setValue(spec.get());
 			search.inputEl.addEventListener("blur", async () => {
-				const normalized = toVaultPath(search.getValue());
+				const normalized = Pathing.toVaultPath(search.getValue());
 				search.setValue(normalized);
 				await withSave(spec.set, ctx.onSave)(normalized);
 			});

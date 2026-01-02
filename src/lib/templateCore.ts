@@ -2,7 +2,12 @@ import { groupSuccessiveHighlights } from "src/lib/formatting/annotationGrouper"
 import { formatDate } from "src/lib/formatting/dateUtils";
 import { compareAnnotations } from "src/lib/formatting/formatUtils";
 import { styleHighlight } from "src/lib/formatting/highlightStyle";
-import { escapeHtml, stripHtml } from "src/lib/strings/stringUtils";
+import {
+	escapeHtml,
+	escapeMarkdown,
+	stripHtml,
+	unescapeHtml,
+} from "src/lib/strings/stringUtils";
 import type {
 	Annotation,
 	CommentStyle,
@@ -57,6 +62,18 @@ export const TEMPLATE_FILTERS = {
 	upper: {
 		description: "Convert to uppercase",
 		apply: (s: string): string => s.toUpperCase(),
+	},
+	escape: {
+		description: "Escape Markdown special characters",
+		apply: escapeMarkdown,
+	},
+	escapeHtml: {
+		description: "Escape HTML entities",
+		apply: escapeHtml,
+	},
+	unescapeHtml: {
+		description: "Unescape HTML entities",
+		apply: unescapeHtml,
 	},
 } as const;
 
@@ -178,8 +195,10 @@ export function renderGroup(
 	const head = group[0];
 	const color = normalizeKohlColor(head.color);
 	const data: TemplateData = {
-		pageno: head.pageno ?? 0,
+		pageno: head.pageref ?? head.pageno ?? 0,
+		pageref: head.pageref,
 		date: formatDate(head.datetime),
+
 		localeDate: formatDate(head.datetime, "locale"),
 		dailyNoteLink: formatDate(head.datetime, "daily-note"),
 		chapter: head.chapter?.trim() || "",

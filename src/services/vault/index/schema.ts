@@ -1,6 +1,6 @@
 import type { Database, Statement } from "sql.js";
-import { Validators, validateAndExtract } from "src/lib/core/validationUtils";
 import { formatError } from "src/lib/errors/types";
+import { z } from "zod";
 
 type SqlValue = string | number | null | Uint8Array;
 
@@ -304,48 +304,27 @@ export const RowMappers = {
 	sourcePath: (row: Record<string, unknown>) => row.source_path as string,
 
 	importSource: (row: Record<string, unknown>) => {
-		return {
-			source_path: validateAndExtract(
-				row,
-				"source_path",
-				Validators.isString,
-				"",
-			),
-			last_processed_mtime: validateAndExtract(
-				row,
-				"last_processed_mtime",
-				Validators.isNumber,
-				0,
-			),
-			last_processed_size: validateAndExtract(
-				row,
-				"last_processed_size",
-				Validators.isNumber,
-				0,
-			),
-			newest_annotation_ts: validateAndExtract(
-				row,
-				"newest_annotation_ts",
-				Validators.isString,
-				null,
-			),
-			last_success_ts: validateAndExtract(
-				row,
-				"last_success_ts",
-				Validators.isNumber,
-				null,
-			),
-			last_error: validateAndExtract(
-				row,
-				"last_error",
-				Validators.isString,
-				null,
-			),
-			book_key: validateAndExtract(row, "book_key", Validators.isString, null),
-			md5: validateAndExtract(row, "md5", Validators.isString, null),
-		};
+		return ImportSourceRowSchema.parse(row);
 	},
 } as const;
+
+// Robust schema with fallbacks for data resilience
+const ImportSourceRowSchema = z.object({
+	// Primary key must exist; if missing/invalid, the row is fundamentally broken.
+	// However, we coerce to string to be safe.
+	source_path: z.coerce.string(),
+
+	// Numbers: catch invalid/null and return 0
+	last_processed_mtime: z.coerce.number().catch(0),
+	last_processed_size: z.coerce.number().catch(0),
+
+	// Timestamps/Nullables: catch invalid and return null
+	newest_annotation_ts: z.string().nullable().catch(null),
+	last_success_ts: z.coerce.number().nullable().catch(null),
+	last_error: z.string().nullable().catch(null),
+	book_key: z.string().nullable().catch(null),
+	md5: z.string().nullable().catch(null),
+}); // Future: if new columns added, update schema explicitly
 
 function tableExists(db: Database, tableName: string): boolean {
 	try {

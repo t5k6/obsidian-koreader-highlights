@@ -1,4 +1,3 @@
-import type { Expression } from "luaparse";
 import type { TFile } from "obsidian";
 import type { ExecResult } from "src/services/import/types";
 import type { AppResult } from "./lib/errors/types";
@@ -141,6 +140,7 @@ export interface FrontmatterSettings {
 	disabledFields: string[];
 	customFields: string[];
 	useUnknownAuthor: boolean;
+	keywordsAsTags: "none" | "duplicate" | "replace";
 }
 
 export interface KoreaderTemplateSettings {
@@ -253,8 +253,10 @@ export interface TemplateData {
 	readonly highlight?: string;
 	readonly highlightPlain?: string;
 	readonly chapter?: string;
-	readonly pageno?: number;
+	readonly pageno?: number | string; // "19" or "iv"
+	readonly pageref?: string;
 	readonly isFirstInChapter?: boolean;
+
 	readonly note?: string;
 	readonly notes?: readonly string[];
 	readonly date?: string; // Stable "en-US" format

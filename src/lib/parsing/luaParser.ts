@@ -7,9 +7,9 @@ import type {
 } from "luaparse/lib/ast";
 import { err, ok, type Result } from "src/lib/core/result";
 import type { ParseFailure } from "src/lib/errors/types";
-import { fromLua as fromLuaField } from "src/lib/parsing/fieldMapping";
 import type { Annotation, DocProps, DrawerType, LuaMetadata } from "src/types";
 import { DRAWER_TYPES } from "src/types";
+import { normalizeFieldKey } from "../metadata/fieldMapping";
 
 // Pure utility functions
 const sliceQuotes = (s: string): string =>
@@ -147,16 +147,22 @@ const createAnnotationFromFields = (
 		}
 		if (!key) continue;
 		const origLower = key.toLowerCase();
-		const canonical = fromLuaField(origLower);
+		const canonical = normalizeFieldKey(origLower);
 		switch (canonical) {
-			case "page": {
+			case "page":
+			case "pageno": {
 				const n = valueExpr ? extractNumericValue(valueExpr) : null;
 				if (n != null) {
-					// Preserve priority: 'pageno' overrides 'page' if both present
-					if (pageNo === undefined || origLower === "pageno") pageNo = n;
+					pageNo = n;
 				}
 				break;
 			}
+			case "pageref": {
+				const s = valueExpr ? extractStringValue(valueExpr) : null;
+				if (s) ann.pageref = s;
+				break;
+			}
+
 			case "drawer": {
 				const s = valueExpr ? extractStringValue(valueExpr) : null;
 				const d = s ? toDrawerType(s) : null;
@@ -173,7 +179,8 @@ const createAnnotationFromFields = (
 				ann.text = s;
 				break;
 			}
-			case "note": {
+			case "note":
+			case "notes": {
 				const s = (valueExpr ? extractStringValue(valueExpr) : null) ?? "";
 				ann.note = s;
 				break;
@@ -364,10 +371,6 @@ function extractMetadataFromAst(ast: any): Result<ParseSuccess, ParseFailure> {
 const DEFAULT_DOC_PROPS: DocProps = {
 	authors: "",
 	title: "",
-	description: "",
-	keywords: "",
-	series: "",
-	language: "en",
 };
 
 export type Diagnostic = {

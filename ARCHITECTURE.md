@@ -1,4 +1,4 @@
-# KOReader Highlights Importer — Architecture (v1.4.1)
+# KOReader Highlights Importer — Architecture (v1.4.2)
 
 This document explains how the plugin is structured, why it is structured that way, and how to work within this architecture safely.
 
@@ -26,6 +26,7 @@ Every architectural decision is weighed against these non‑negotiable principle
    - The `kohl-uid` system
    - Atomic snapshotting
    - 3‑way merge logic
+   - **Strict Schema Validation**: Using `Zod` to enforce data invariants at the boundaries of Core and Shell.
    When unsure, we surface a clear conflict instead of guessing.
 
 2. **Graceful Degradation & Resilience**
@@ -140,11 +141,14 @@ The repository layout encodes the architecture.
   - `services/ui/` — Shell services focused on UI integration
 
 - `lib/` (**Functional Core**)
-  Framework‑agnostic, reusable logic.
-  - `lib/frontmatter.ts`, `lib/merge/*`, `lib/templateCore.ts`
-  - `lib/pathing.ts`, `lib/strings/*`
-  - `lib/concurrency/*`, `lib/cache/*`, `lib/errors/*`, `lib/core/*`
-  - `lib/obsidian/*` contains **types and adapters only**; no direct plugin wiring.
+  Framework‑agnostic, reusable logic, organized into semantic sub-packages.
+  - `lib/parsing/` — Lua AST processing and metadata extraction
+  - `lib/formatting/` — Date, highlight styling (Markdown escaping), and grouping logic
+  - `lib/merge/` — 3-way merge implementation
+  - `lib/core/` — Result types, object/string utilities
+  - `lib/errors/` — Discriminated union of application failure types
+  - `lib/concurrency/`, `lib/cache/`, `lib/database/` — Low-level primitives
+  - `lib/obsidian/` — Narrow adapters for Obsidian types
 
 - `ui/` (**Stateful Shell**)
   Obsidian-specific UI components:
@@ -455,7 +459,8 @@ Note file paths are volatile. Safe merging requires a stable identity and a know
 Persistent SQLite index (`index.db`) with two primary roles:
 
 1. **IndexDatabase (State Machine)**
-   - Manages physical DB file.
+   - Manages physical DB file using `ConcurrentDatabase` (sqlite.js).
+   - Uses `Zod` schemas (`src/services/vault/index/schema.ts`) to validate data before persistence.
    - Gracefully falls back to in‑memory DB if:
      - File is corrupt
      - File system is read‑only

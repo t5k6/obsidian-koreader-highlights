@@ -3,7 +3,7 @@ import {
 	ButtonComponent,
 	type EventRef,
 	Modal,
-	type Scope,
+	Scope,
 } from "obsidian";
 
 /**
@@ -52,6 +52,9 @@ export class BaseModal<T = void> extends Modal {
 
 	constructor(app: App, config: Partial<BaseModalConfig> = {}) {
 		super(app);
+
+		// Initialize scope for shortcut registration
+		this.scope = new Scope();
 
 		// Merge with defaults, preserving optional render function
 		this.config = {

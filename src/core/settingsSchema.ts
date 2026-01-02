@@ -46,6 +46,10 @@ export const FrontmatterSchema = z
 			.catch([] as string[])
 			.default([] as string[]),
 		useUnknownAuthor: z.coerce.boolean().catch(false).default(false),
+		keywordsAsTags: z
+			.enum(["none", "duplicate", "replace"])
+			.catch("none")
+			.default("none"),
 	})
 	.passthrough();
 
@@ -159,6 +163,7 @@ export const BASE_DEFAULTS: KoreaderHighlightImporterSettings = {
 		disabledFields: [],
 		customFields: [],
 		useUnknownAuthor: false,
+		keywordsAsTags: "none",
 	},
 };
 

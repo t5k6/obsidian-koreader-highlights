@@ -1,5 +1,10 @@
 {
 	"$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+	"vcs": {
+		"enabled": true,
+		"clientKind": "git",
+		"useIgnoreFile": true
+	},
 	"assist": {
 		"actions": {
 			"source": {
@@ -9,14 +14,7 @@
 	},
 	"files": {
 		"maxSize": 200000,
-		"includes": [
-			"**",
-			"!**/dist",
-			"!**/*.gen.ts",
-			"!./coverage.json",
-			"!./coverage",
-			"!**/.next"
-		]
+		"includes": ["**", "!**/node_modules", "!**/dist", "!**/coverage"]
 	},
 	"formatter": {
 		"enabled": true,

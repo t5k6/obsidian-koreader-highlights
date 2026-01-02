@@ -11,8 +11,8 @@ import {
 	writeBinaryWithRetry,
 } from "src/lib/concurrency";
 import { withFsRetry } from "src/lib/concurrency/retry";
+import { safeParse } from "src/lib/core/objectUtils";
 import { err, isErr, ok, type Result } from "src/lib/core/result";
-import { safeParse } from "src/lib/core/validationUtils";
 import { verifyWrittenFile } from "src/lib/data-integrity";
 import { toFailure } from "src/lib/errors/mapper";
 import type { AppFailure, FileSystemFailure } from "src/lib/errors/types";
@@ -74,7 +74,6 @@ export interface FolderScanResult {
 
 export class FileSystemService {
 	private readonly log;
-	private readonly folderExistsCache!: Cache<string, CacheEntry<boolean>>;
 	private readonly nodeStatsCache!: Cache<
 		string,
 		CacheEntry<Result<import("node:fs").Stats, FileSystemFailure>>
@@ -92,7 +91,6 @@ export class FileSystemService {
 		private readonly loggingService: LoggingService,
 	) {
 		this.log = this.loggingService.scoped("FileSystemService");
-		this.folderExistsCache = this.cacheManager.createMap("fs.folderExists");
 		this.nodeStatsCache = this.cacheManager.createMap("fs.nodeStats");
 		this.folderScanCache = this.cacheManager.createLru("fs.folderScan", 200);
 		this.adapter = this.vault.adapter as ObsidianAdapter;
@@ -832,19 +830,11 @@ export class FileSystemService {
 		// Use a keyed queue to prevent race conditions when this is called
 		// for the same path concurrently from different parts of the plugin.
 		return this.keyedQueue.run(`folder:${normalized}`, async () => {
-			// Check cache first for performance
-			const cached = this.folderExistsCache.get(normalized);
-			if (cached) return ok(void 0);
-
 			// 1. Explicitly check for an existing file/folder at the path.
 			const abstract = this.vault.getAbstractFileByPath(normalized);
 
 			// 2. If it's already a folder, our job is done. This is a success.
 			if (isTFolder(abstract)) {
-				this.folderExistsCache.set(normalized, {
-					value: true,
-					timestamp: Date.now(),
-				});
 				return ok(void 0);
 			}
 
@@ -857,13 +847,9 @@ export class FileSystemService {
 			// 4. Only if the path is clear, we attempt to create the folder.
 			try {
 				await this.vault.createFolder(normalized);
-				this.folderExistsCache.set(normalized, {
-					value: true,
-					timestamp: Date.now(),
-				});
 				return ok(void 0);
 			} catch (error: unknown) {
-				// This catch block now only handles genuine creation errors (like permissions)
+				// This catch block only handles genuine creation errors (like permissions)
 				// or rare race conditions where the folder was created between our check and now.
 				return this.handleMkdirError(error, normalized);
 			}

@@ -1,4 +1,7 @@
 import { type App, Component, Notice, setIcon, type TFile } from "obsidian";
+
+import { CacheManager } from "src/lib/cache/CacheManager";
+import type { IterableCache } from "src/lib/cache/types";
 import { isErr } from "src/lib/core/result";
 import type KoreaderImporterPlugin from "src/main";
 import type { CommandManager } from "src/services/command/CommandManager";
@@ -9,8 +12,13 @@ import { runAsyncAction } from "src/ui/utils/actionUtils";
  * Manages the status bar item to refresh the current KOReader note.
  * The item is only visible when the active file is a tracked KOReader note.
  */
+
 export class StatusBarManager extends Component {
 	private statusBarItem!: HTMLElement;
+	private refreshableCache:
+		| IterableCache<string, boolean>
+		| Map<string, boolean>
+		| null = null;
 
 	constructor(
 		private readonly app: App,
@@ -22,6 +30,22 @@ export class StatusBarManager extends Component {
 	}
 
 	override onload(): void {
+		// Initialize LRU cache for refreshable status (max 500 entries to prevent unbounded growth)
+		const diContainer = (this.plugin as unknown as { diContainer?: any })
+			.diContainer;
+		const cacheManager = diContainer?.resolve?.(CacheManager) as
+			| CacheManager
+			| undefined;
+		if (cacheManager) {
+			this.refreshableCache = cacheManager.createLru(
+				"statusBarRefreshable",
+				500,
+			);
+		} else {
+			// Fallback to a simple map if CacheManager unavailable
+			this.refreshableCache = new Map<string, boolean>();
+		}
+
 		// Create status bar item via plugin API (correct surface for Obsidian)
 		this.statusBarItem = this.plugin.addStatusBarItem();
 		this.statusBarItem.addClass("koreader-statusbar-item", "mod-clickable");
@@ -57,12 +81,32 @@ export class StatusBarManager extends Component {
 
 	private async isRefreshable(file: TFile): Promise<boolean> {
 		if (file.extension !== "md") return false;
+
+		// Check cache first to avoid expensive async calls
+		if (this.refreshableCache) {
+			const cachedResult = this.refreshableCache.get(file.path);
+			if (cachedResult !== undefined && cachedResult !== null) {
+				return cachedResult as boolean;
+			}
+		}
+
+		// Not in cache, compute and store
 		try {
 			const key = await this.localIndex.findKeyByVaultPath(file.path);
-			return !!key;
+			const result = !!key;
+			this.refreshableCache?.set(file.path, result);
+			return result;
 		} catch {
+			this.refreshableCache?.set(file.path, false);
 			return false;
 		}
+	}
+
+	/**
+	 * Clear the refreshable cache when the index is updated or plugin data changes
+	 */
+	public clearCache(): void {
+		this.refreshableCache?.clear();
 	}
 
 	private async handleStatusBarClick(): Promise<void> {

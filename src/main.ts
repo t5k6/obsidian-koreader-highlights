@@ -31,7 +31,7 @@ export default class KoreaderImporterPlugin extends Plugin {
 	private dataStore!: PluginDataStore;
 	public templateManager!: TemplateManager;
 	public localIndexService!: IndexCoordinator;
-	private statusBarManager!: StatusBarManager;
+	public statusBarManager!: StatusBarManager;
 
 	get isServicesInitialized(): boolean {
 		return this.servicesInitialized;

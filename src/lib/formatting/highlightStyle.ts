@@ -3,7 +3,7 @@
  * Guarantees at least 4.5:1 contrast for any generated mark element.  *
  ***********************************************************************/
 
-import { escapeHtml } from "src/lib/strings/stringUtils";
+import { escapeHtml, escapeMarkdown } from "src/lib/strings/stringUtils";
 import type { Annotation } from "src/types";
 
 /* ------------------------------------------------------------------ */
@@ -92,7 +92,7 @@ export function styleHighlight(
 
 	const paragraphs = text
 		.split("\\")
-		.map((p) => escapeHtml(p.trim()))
+		.map((p) => escapeMarkdown(escapeHtml(p.trim())))
 		.filter(Boolean);
 
 	const processedText = paragraphs.join("<br><br>");

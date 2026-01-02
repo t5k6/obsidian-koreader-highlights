@@ -33,7 +33,7 @@ import { notifyOnFsError } from "src/services/ui/notificationUtils";
 import type { NoteUpdater } from "src/types";
 import type { FileSystemService, FolderScanResult } from "../FileSystemService";
 import type { LoggingService } from "../LoggingService";
-import { VaultBookScanner } from "./VaultBookScanner";
+import type { VaultBookScanner } from "./VaultBookScanner";
 
 // consolidated error type for all persistence operations.
 type NotePersistenceFailure = AppFailure;

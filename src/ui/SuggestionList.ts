@@ -188,15 +188,27 @@ export class SuggestionList<T> extends Component {
 			this.itemEls.push(itemEl);
 		}
 
-		// Apply max height if configured
-		if (this.config.maxVisibleItems) {
-			const firstItem = this.itemEls[0];
-			if (firstItem) {
-				const h = firstItem.offsetHeight || 24; // fallback line-height
-				const maxHeight = h * this.config.maxVisibleItems;
-				this.config.containerEl.style.maxHeight = `${maxHeight}px`;
-				this.config.containerEl.style.overflowY = "auto";
+		// Apply max height if configured - calculate based on multiple items for better accuracy
+		if (this.config.maxVisibleItems && this.itemEls.length > 0) {
+			// Sample first few items to estimate average height (more reliable than just first item)
+			const sampleSize = Math.min(5, this.itemEls.length);
+			let totalHeight = 0;
+			let validSamples = 0;
+
+			for (let i = 0; i < sampleSize; i++) {
+				const height = this.itemEls[i].offsetHeight;
+				if (height > 0) {
+					totalHeight += height;
+					validSamples++;
+				}
 			}
+
+			const avgHeight = validSamples > 0 ? totalHeight / validSamples : 32; // fallback height
+			const maxHeight = avgHeight * this.config.maxVisibleItems;
+
+			this.config.containerEl.style.maxHeight = `${maxHeight}px`;
+			this.config.containerEl.style.overflowY = "auto";
+			this.config.containerEl.style.overflowX = "hidden"; // Prevent horizontal scroll
 		}
 	}
 

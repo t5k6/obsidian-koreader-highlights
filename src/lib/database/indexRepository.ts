@@ -1,4 +1,5 @@
 import type { Database } from "sql.js";
+import type { ConcurrentDatabase } from "src/lib/concurrency/ConcurrentDatabase";
 import type { IndexDatabase } from "src/services/vault/index/IndexDatabase";
 import {
 	executeTyped,
@@ -7,8 +8,6 @@ import {
 	RowMappers,
 } from "src/services/vault/index/schema";
 import { formatError } from "../errors/types";
-import type { IndexDbExecutor } from "./IndexDbExecutor";
-import { ConcurrentDbExecutor } from "./IndexDbExecutor";
 import type { BookRow, ImportSourceRow } from "./types";
 
 /**
@@ -17,16 +16,16 @@ import type { BookRow, ImportSourceRow } from "./types";
  * Sole repository for all index database interactions.
  */
 export class IndexRepository {
-	private db: IndexDbExecutor | null = null;
+	private concurrentDb: ConcurrentDatabase | null = null;
 
 	constructor(private readonly indexDb: IndexDatabase) {}
 
-	private async getDb(): Promise<IndexDbExecutor> {
+	private async getConcurrentDb(): Promise<ConcurrentDatabase> {
 		await this.indexDb.whenReady();
-		if (!this.db) {
-			this.db = new ConcurrentDbExecutor(this.indexDb.getConcurrent());
+		if (!this.concurrentDb) {
+			this.concurrentDb = this.indexDb.getConcurrent();
 		}
-		return this.db;
+		return this.concurrentDb;
 	}
 
 	/**
@@ -36,8 +35,8 @@ export class IndexRepository {
 	 * so callers can log or react without knowing DB details.
 	 */
 	async deleteNoteAndResetSource(notePath: string): Promise<string | null> {
-		const db = await this.getDb();
-		return db.write((d: Database) => {
+		const concurrentDb = await this.getConcurrentDb();
+		return concurrentDb.writeTx((d: Database) => {
 			// Find the book key for this note instance
 			const findKeyQuery = QueryBuilders.selectBookKeyByPath(notePath);
 			const [bookKey] = executeTyped(d, findKeyQuery, RowMappers.bookKey);
@@ -75,8 +74,8 @@ export class IndexRepository {
 	 * Returns the number of rows affected.
 	 */
 	async deleteInstancesInFolder(folderPath: string): Promise<number> {
-		const db = await this.getDb();
-		return db.write((d: Database) => {
+		const concurrentDb = await this.getConcurrentDb();
+		return concurrentDb.writeTx((d: Database) => {
 			executeWrite(d, {
 				sql: "DELETE FROM book_instances WHERE vault_path LIKE ?",
 				params: [`${folderPath}/%`] as const,
@@ -98,8 +97,8 @@ export class IndexRepository {
 		oldKey: string | null;
 		newKey: string | null;
 	}> {
-		const db = await this.getDb();
-		return db.write((d: Database) => {
+		const concurrentDb = await this.getConcurrentDb();
+		return concurrentDb.writeTx((d: Database) => {
 			const findKeyQuery = QueryBuilders.selectBookKeyByPath(filePath);
 			const bookKeys = executeTyped(d, findKeyQuery, RowMappers.bookKey);
 			const oldKey = bookKeys[0] ?? null;
@@ -133,8 +132,8 @@ export class IndexRepository {
 	async deleteInstanceForFile(
 		filePath: string,
 	): Promise<{ changed: boolean; oldKey: string | null }> {
-		const db = await this.getDb();
-		return db.write((d: Database) => {
+		const concurrentDb = await this.getConcurrentDb();
+		return concurrentDb.writeTx((d: Database) => {
 			const findKeyQuery = QueryBuilders.selectBookKeyByPath(filePath);
 			const bookKeys = executeTyped(d, findKeyQuery, RowMappers.bookKey);
 			const oldKey = bookKeys[0] ?? null;
@@ -166,8 +165,8 @@ export class IndexRepository {
 		title?: string;
 		authors?: string;
 	}): Promise<void> {
-		const db = await this.getDb();
-		await db.write((d: Database) => {
+		const concurrentDb = await this.getConcurrentDb();
+		await concurrentDb.writeTx((d: Database) => {
 			const upsertSource = QueryBuilders.upsertImportSourceSuccess(
 				params.path,
 				params.mtime,
@@ -208,8 +207,8 @@ export class IndexRepository {
 	 * Record import failure.
 	 */
 	async recordImportFailure(path: string, error: unknown): Promise<void> {
-		const db = await this.getDb();
-		await db.write((d: Database) => {
+		const concurrentDb = await this.getConcurrentDb();
+		await concurrentDb.writeTx((d: Database) => {
 			const msg = formatError(error);
 			const upsert = QueryBuilders.upsertImportSourceFailure(path, 0, 0, msg);
 			executeWrite(d, upsert);
@@ -222,8 +221,8 @@ export class IndexRepository {
 	 * Resolve book key for a given note path.
 	 */
 	async findKeyByPath(vaultPath: string): Promise<string | null> {
-		const db = await this.getDb();
-		return db.read((d: Database) => {
+		const concurrentDb = await this.getConcurrentDb();
+		return concurrentDb.execute((d: Database) => {
 			const q = QueryBuilders.selectBookKeyByPath(vaultPath);
 			const rows = executeTyped(d, q, RowMappers.bookKey);
 			return rows[0] ?? null;
@@ -234,8 +233,8 @@ export class IndexRepository {
 	 * Resolve all note paths for a given book key.
 	 */
 	async findPathsByKey(bookKey: string): Promise<string[]> {
-		const db = await this.getDb();
-		return db.read((d: Database) => {
+		const concurrentDb = await this.getConcurrentDb();
+		return concurrentDb.execute((d: Database) => {
 			const q = QueryBuilders.selectPathsByBookKey(bookKey);
 			return executeTyped(d, q, RowMappers.vaultPath);
 		});
@@ -248,8 +247,8 @@ export class IndexRepository {
 		book: BookRow,
 		vaultPath?: string,
 	): Promise<void> {
-		const db = await this.getDb();
-		await db.write((d: Database) => {
+		const concurrentDb = await this.getConcurrentDb();
+		await concurrentDb.writeTx((d: Database) => {
 			const queries = [
 				QueryBuilders.upsertBook(book.key, book.id, book.title, book.authors),
 				...(vaultPath
@@ -266,8 +265,8 @@ export class IndexRepository {
 	 * Ensure a book exists by key.
 	 */
 	async ensureBookExists(key: string): Promise<void> {
-		const db = await this.getDb();
-		await db.write((d: Database) => {
+		const concurrentDb = await this.getConcurrentDb();
+		await concurrentDb.writeTx((d: Database) => {
 			const q = QueryBuilders.insertBookIfNotExists(key);
 			executeWrite(d, q);
 		});
@@ -278,8 +277,8 @@ export class IndexRepository {
 	 * Returns true if something was removed.
 	 */
 	async deleteInstanceByPath(vaultPath: string): Promise<boolean> {
-		const db = await this.getDb();
-		return db.write((d: Database) => {
+		const concurrentDb = await this.getConcurrentDb();
+		return concurrentDb.writeTx((d: Database) => {
 			const q = QueryBuilders.deleteInstanceByPath(vaultPath);
 			executeWrite(d, q);
 			return d.getRowsModified() > 0;
@@ -290,8 +289,8 @@ export class IndexRepository {
 	 * Handle folder rename for all instances.
 	 */
 	async handleRenameFolder(oldPath: string, newPath: string): Promise<void> {
-		const db = await this.getDb();
-		await db.write((d: Database) => {
+		const concurrentDb = await this.getConcurrentDb();
+		await concurrentDb.writeTx((d: Database) => {
 			const q = QueryBuilders.renameFolder(
 				`${oldPath}/`,
 				`${newPath}/`,
@@ -305,8 +304,8 @@ export class IndexRepository {
 	 * Handle file rename for a single instance.
 	 */
 	async handleRenameFile(oldPath: string, newPath: string): Promise<void> {
-		const db = await this.getDb();
-		await db.write((d: Database) => {
+		const concurrentDb = await this.getConcurrentDb();
+		await concurrentDb.writeTx((d: Database) => {
 			const q = QueryBuilders.renameFile(newPath, oldPath);
 			executeWrite(d, q);
 		});
@@ -318,8 +317,8 @@ export class IndexRepository {
 	 * Get import source by path.
 	 */
 	async getByPath(sourcePath: string): Promise<ImportSourceRow | null> {
-		const db = await this.getDb();
-		return db.read((d: Database) => {
+		const concurrentDb = await this.getConcurrentDb();
+		return concurrentDb.execute((d: Database) => {
 			const q = QueryBuilders.getImportSourceByPath(sourcePath);
 			const rows = executeTyped(d, q, RowMappers.importSource);
 			return rows[0] ?? null;
@@ -337,8 +336,8 @@ export class IndexRepository {
 		bookKey?: string | null,
 		md5?: string | null,
 	): Promise<void> {
-		const db = await this.getDb();
-		await db.write((d: Database) => {
+		const concurrentDb = await this.getConcurrentDb();
+		await concurrentDb.writeTx((d: Database) => {
 			const q = QueryBuilders.upsertImportSourceSuccess(
 				sourcePath,
 				mtime,
@@ -357,8 +356,8 @@ export class IndexRepository {
 	 */
 	async upsertFailure(sourcePath: string, error: unknown): Promise<void> {
 		const msg = formatError(error);
-		const db = await this.getDb();
-		await db.write((d: Database) => {
+		const concurrentDb = await this.getConcurrentDb();
+		await concurrentDb.writeTx((d: Database) => {
 			const q = QueryBuilders.upsertImportSourceFailure(sourcePath, 0, 0, msg);
 			executeWrite(d, q);
 		});
@@ -368,8 +367,8 @@ export class IndexRepository {
 	 * Delete an import source by path.
 	 */
 	async deleteByPath(sourcePath: string): Promise<void> {
-		const db = await this.getDb();
-		await db.write((d: Database) => {
+		const concurrentDb = await this.getConcurrentDb();
+		await concurrentDb.writeTx((d: Database) => {
 			const q = QueryBuilders.deleteImportSourceByPath(sourcePath);
 			executeWrite(d, q);
 		});
@@ -379,8 +378,8 @@ export class IndexRepository {
 	 * Clear all import sources.
 	 */
 	async clearAll(): Promise<void> {
-		const db = await this.getDb();
-		await db.write((d: Database) => {
+		const concurrentDb = await this.getConcurrentDb();
+		await concurrentDb.writeTx((d: Database) => {
 			const q = QueryBuilders.clearAllImportSources();
 			executeWrite(d, q);
 		});
@@ -390,8 +389,8 @@ export class IndexRepository {
 	 * Find the latest source path for a given book key.
 	 */
 	async latestSourceForBook(bookKey: string): Promise<string | null> {
-		const db = await this.getDb();
-		return db.read((d: Database) => {
+		const concurrentDb = await this.getConcurrentDb();
+		return concurrentDb.execute((d: Database) => {
 			const q = QueryBuilders.latestSourceForBook(bookKey);
 			const rows = executeTyped(d, q, RowMappers.sourcePath);
 			return rows[0] ?? null;
@@ -406,8 +405,8 @@ export class IndexRepository {
 	): Promise<
 		Array<{ source_path: string; book_key: string | null; md5: string | null }>
 	> {
-		const db = await this.getDb();
-		return db.read((d: Database) => {
+		const concurrentDb = await this.getConcurrentDb();
+		return concurrentDb.execute((d: Database) => {
 			const q = {
 				sql: "SELECT source_path, book_key, md5 FROM import_source WHERE md5 = ?",
 				params: [md5] as const,

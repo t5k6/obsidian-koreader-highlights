@@ -1,235 +1,207 @@
-import { Notice } from "obsidian";
+import { Notice, Setting, setIcon } from "obsidian";
 import { DEFAULT_LOGS_FOLDER } from "src/constants";
 import { LogLevel } from "src/services/LoggingService";
 import type { KoreaderHighlightImporterSettings } from "src/types";
 import { runAsyncAction } from "src/ui/utils/actionUtils";
-import { renderSettingsSection } from "../SettingsKit";
 import { SettingsSection } from "../SettingsSection";
 
 export class AdvancedSettingsSection extends SettingsSection {
 	protected renderContent(containerEl: HTMLElement): void {
-		renderSettingsSection(
-			containerEl,
-			[
-				{
-					key: "logLevel",
-					type: "dropdown",
-					name: "Debug log level",
-					desc: "Controls verbosity of logs. 'None' is off, 'Info' is most verbose.",
-					options: {
-						[String(LogLevel.NONE)]: "None",
-						[String(LogLevel.ERROR)]: "Errors",
-						[String(LogLevel.WARN)]: "Warnings",
-						[String(LogLevel.INFO)]: "Info",
-					},
-					get: () => String(this.plugin.settings.logLevel),
-					set: async (value: string) => {
-						const level = Number.parseInt(
-							value,
-							10,
-						) as KoreaderHighlightImporterSettings["logLevel"];
-						this.plugin.settings.logLevel = level;
-					},
-				},
-				{
-					key: "logToFile",
-					type: "toggle",
-					name: "Log to file",
-					desc: "On top of writing to the Developer Tools Console, write debug logs to a file in your vault.",
-					get: () => this.plugin.settings.logToFile,
-					set: async (value: boolean) => {
-						this.plugin.settings.logToFile = value;
-					},
-				},
-				{
-					key: "logsFolder",
-					type: "folder",
-					name: "Log folder",
-					desc: "Debug logs will be written to this folder.",
-					placeholder: `Default: ${DEFAULT_LOGS_FOLDER}`,
-					get: () => this.plugin.settings.logsFolder,
-					set: (value: string) => {
-						this.plugin.settings.logsFolder = value;
-					},
-					disabled: () => !this.plugin.settings.logToFile,
-					tooltip: "Enable 'Log to file' to edit this.",
-				},
+		const settings = this.plugin.settings;
 
-				{ type: "header", text: "Troubleshooting" },
+		new Setting(containerEl)
+			.setName("Debug log level")
+			.setDesc(
+				"Controls verbosity of logs. 'None' is off, 'Info' is most verbose.",
+			)
+			.addDropdown((dd) => {
+				dd.addOption(String(LogLevel.NONE), "None");
+				dd.addOption(String(LogLevel.ERROR), "Errors");
+				dd.addOption(String(LogLevel.WARN), "Warnings");
+				dd.addOption(String(LogLevel.INFO), "Info");
+				dd.setValue(String(settings.logLevel)).onChange(async (v) => {
+					settings.logLevel = parseInt(
+						v,
+						10,
+					) as KoreaderHighlightImporterSettings["logLevel"];
+					this.debouncedSave();
+				});
+			});
 
-				{
-					key: "resetImportStatus",
-					type: "buttons",
-					name: "Reset Import Status",
-					desc: "Makes the plugin forget which books have been imported. Notes are NOT deleted.",
-					buttons: [
-						{
-							text: "Reset Status",
-							warning: true,
-							onClick: async (btn) => {
-								await runAsyncAction(
-									btn,
-									() => this.plugin.triggerClearCaches(),
-									{
-										inProgress: "Resetting…",
-										original: "Reset Status",
-									},
-								);
-								new Notice(
-									"Import status has been reset. Run an import to re-process all books.",
-								);
-							},
-						},
-					],
-				},
-				{
-					key: "forceReimport",
-					type: "buttons",
-					name: "Force Re-import All Books",
-					desc: "Resets import status and immediately starts a new import.",
-					buttons: [
-						{
-							text: "Force Re-import",
-							warning: true,
-							onClick: async (btn) => {
-								await runAsyncAction(
-									btn,
-									() => this.plugin.triggerForceImport(),
-									{
-										inProgress: "Importing...",
-										original: "Force Re-import",
-									},
-								);
-							},
-						},
-					],
-				},
-				{
-					key: "factoryReset",
-					type: "buttons",
-					name: "Factory Reset Plugin",
-					desc: "Deletes the plugin's data (not your notes) and reloads it.",
-					buttons: [
-						{
-							text: "Reset and Reload",
-							warning: true,
-							onClick: async () => {
-								await this.plugin.triggerFullReset();
-							},
-						},
-					],
-				},
-				{
-					key: "diagnose",
-					type: "buttons",
-					name: "Diagnose Environment Issues",
-					desc: "Re-check for things like vault write permissions.",
-					buttons: [
-						{
-							text: "Re-check",
-							onClick: async (btn) => {
-								await runAsyncAction(
-									btn,
-									() => this.plugin.triggerRecheckCapabilities(),
-									{
-										inProgress: "Checking…",
-										original: "Re-check",
-									},
-								);
-							},
-						},
-					],
-				},
+		new Setting(containerEl)
+			.setName("Log to file")
+			.setDesc("Write debug logs to a file in your vault.")
+			.addToggle((t) =>
+				t.setValue(settings.logToFile).onChange(async (v) => {
+					settings.logToFile = v;
+					// Reload to enable/disable folder input
+					await this.saveAndReload();
+				}),
+			);
 
-				{ type: "header", text: "Data Management" },
+		new Setting(containerEl)
+			.setName("Log folder")
+			.setDesc("Debug logs will be written to this folder.")
+			.setDisabled(!settings.logToFile)
+			.setTooltip("Enable 'Log to file' to edit this.")
+			.addText((t) => {
+				t.setPlaceholder(`Default: ${DEFAULT_LOGS_FOLDER}`)
+					.setValue(settings.logsFolder)
+					.onChange((v) => {
+						settings.logsFolder = v;
+						this.debouncedSave();
+					});
+			});
 
-				{
-					key: "commentStyle",
-					type: "dropdown",
-					name: "Comment Style",
-					desc: "Choose between HTML or MD style comments for tracking imported highlights.",
-					options: {
-						html: "HTML Style Comments",
-						md: "MD Style Comments",
-						none: "None",
-					},
-					get: () => this.plugin.settings.commentStyle,
-					set: (value) => {
-						this.plugin.settings.commentStyle =
-							value as KoreaderHighlightImporterSettings["commentStyle"];
-					},
-				},
-				{
-					type: "callout",
-					id: "comment-style-warning",
-					calloutType: "warning",
-					title: "Warning",
-					text: "Without comment markers, the plugin cannot track imported highlights and cannot dynamically merge new ones.",
-					if: () => this.plugin.settings.commentStyle === "none",
-				},
-				{
-					key: "convertExisting",
-					type: "buttons",
-					name: "Convert Existing Files",
-					desc: "Convert highlight files to use the selected comment style.",
-					buttons: [
-						{
-							text: "Convert All Files",
-							warning: true,
-							onClick: async (btn) => {
-								await runAsyncAction(
-									btn,
-									() => this.plugin.triggerConvertCommentStyle(),
-									{
-										inProgress: "Converting...",
-										original: "Convert All Files",
-									},
-								);
+		containerEl.createEl("h3", { text: "Troubleshooting" });
+
+		new Setting(containerEl)
+			.setName("Reset Import Status")
+			.setDesc(
+				"Makes the plugin forget which books have been imported. Notes are NOT deleted.",
+			)
+			.addButton((btn) =>
+				btn
+					.setButtonText("Reset Status")
+					.setWarning()
+					.onClick(async () => {
+						await runAsyncAction(btn, () => this.plugin.triggerClearCaches(), {
+							inProgress: "Resetting…",
+							original: "Reset Status",
+						});
+						new Notice(
+							"Import status has been reset. Run an import to re-process all books.",
+						);
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Force Re-import All Books")
+			.setDesc("Resets import status and immediately starts a new import.")
+			.addButton((btn) =>
+				btn
+					.setButtonText("Force Re-import")
+					.setWarning()
+					.onClick(async () =>
+						runAsyncAction(btn, () => this.plugin.triggerForceImport(), {
+							inProgress: "Importing...",
+							original: "Force Re-import",
+						}),
+					),
+			);
+
+		new Setting(containerEl)
+			.setName("Factory Reset Plugin")
+			.setDesc("Deletes the plugin's data and reloads it.")
+			.addButton((btn) =>
+				btn
+					.setButtonText("Reset and Reload")
+					.setWarning()
+					.onClick(async () => this.plugin.triggerFullReset()),
+			);
+
+		new Setting(containerEl)
+			.setName("Diagnose Environment Issues")
+			.setDesc("Re-check for things like vault write permissions.")
+			.addButton((btn) =>
+				btn.setButtonText("Re-check").onClick(async () =>
+					runAsyncAction(btn, () => this.plugin.triggerRecheckCapabilities(), {
+						inProgress: "Checking…",
+						original: "Re-check",
+					}),
+				),
+			);
+
+		containerEl.createEl("h3", { text: "Data Management" });
+
+		new Setting(containerEl)
+			.setName("Comment Style")
+			.setDesc(
+				"Choose between HTML or MD style comments for tracking imported highlights.",
+			)
+			.addDropdown((dd) => {
+				dd.addOption("html", "HTML Style Comments");
+				dd.addOption("md", "MD Style Comments");
+				dd.addOption("none", "None");
+				dd.setValue(settings.commentStyle).onChange(async (v) => {
+					settings.commentStyle =
+						v as KoreaderHighlightImporterSettings["commentStyle"];
+					await this.saveAndReload();
+				});
+			});
+
+		if (settings.commentStyle === "none") {
+			const callout = containerEl.createDiv({ cls: "callout" });
+			callout.setAttr("data-callout", "warning");
+			const title = callout.createDiv({ cls: "callout-title" });
+			const icon = title.createDiv({ cls: "callout-icon" });
+			setIcon(icon, "alert-triangle");
+			title.createDiv({ cls: "callout-title-inner", text: "Warning" });
+			callout.createDiv({
+				cls: "callout-content",
+				text: "Without comment markers, the plugin cannot track imported highlights and cannot dynamically merge new ones.",
+			});
+		}
+
+		new Setting(containerEl)
+			.setName("Convert Existing Files")
+			.setDesc("Convert highlight files to use the selected comment style.")
+			.addButton((btn) =>
+				btn
+					.setButtonText("Convert All Files")
+					.setWarning()
+					.onClick(async () =>
+						runAsyncAction(
+							btn,
+							() => this.plugin.triggerConvertCommentStyle(),
+							{
+								inProgress: "Converting...",
+								original: "Convert All Files",
 							},
-						},
-					],
-				},
-				{
-					key: "cleanupCompletedBooks",
-					type: "buttons",
-					name: "Clean up comments from completed books",
-					desc: "Remove tracking comments from notes marked as 'completed' (readingStatus: completed).",
-					buttons: [
-						{
-							text: "Clean up completed books",
-							warning: true,
-							onClick: async (btn) => {
-								await runAsyncAction(
-									btn,
-									() => this.plugin.triggerCleanupCompletedBooks(),
-									{
-										inProgress: "Scanning and cleaning...",
-										original: "Clean up completed books",
-									},
-								);
+						),
+					),
+			);
+
+		new Setting(containerEl)
+			.setName("Clean up comments from completed books")
+			.setDesc(
+				"Remove tracking comments from notes marked as 'completed' (readingStatus: completed).",
+			)
+			.addButton((btn) =>
+				btn
+					.setButtonText("Clean up completed books")
+					.setWarning()
+					.onClick(async () =>
+						runAsyncAction(
+							btn,
+							() => this.plugin.triggerCleanupCompletedBooks(),
+							{
+								inProgress: "Scanning and cleaning...",
+								original: "Clean up completed books",
 							},
-						},
-					],
-				},
-				{
-					key: "maxBackupsPerNote",
-					type: "number",
-					name: "Maximum backups per note",
-					desc: "The maximum number of backups to keep for each note. Set to 0 to disable the limit.",
-					min: 0,
-					max: 20,
-					step: 1,
-					get: () => this.plugin.settings.maxBackupsPerNote,
-					set: async (value: number) => {
-						this.plugin.settings.maxBackupsPerNote = value;
-					},
-				},
-			],
-			{
-				app: this.app,
-				parent: this,
-				onSave: async () => this.plugin.saveSettings(true),
-			},
-		);
+						),
+					),
+			);
+
+		new Setting(containerEl)
+			.setName("Maximum backups per note")
+			.setDesc(
+				"The maximum number of backups to keep for each note. Set to 0 to disable the limit.",
+			)
+			.addText((text) => {
+				text.inputEl.type = "number";
+				text.inputEl.min = "0";
+				text.inputEl.max = "20";
+				text.inputEl.step = "1";
+				text
+					.setValue(String(settings.maxBackupsPerNote))
+					.onChange(async (v) => {
+						const val = parseInt(v, 10);
+						if (!isNaN(val) && val >= 0 && val <= 20) {
+							settings.maxBackupsPerNote = val;
+							this.debouncedSave();
+						}
+					});
+			});
 	}
 }

@@ -1,28 +1,50 @@
-// Minimal interface so callers can provide a ButtonComponent or a lightweight shim
-// import type { ButtonComponent } from "obsidian";
-
 import type { ButtonComponent } from "obsidian";
 
 type LabelSet = { inProgress: string; original?: string };
 
-function isButtonComponent(x: unknown): x is ButtonComponent {
+/**
+ * Interface for components that can be disabled and have button text
+ */
+interface ButtonLike {
+	setDisabled(disabled: boolean): void;
+	setButtonText(text: string): void;
+	buttonEl?: { innerText?: string };
+}
+
+/**
+ * Type guard for ButtonComponent with safer property checking
+ */
+function isButtonComponent(x: unknown): x is ButtonComponent & ButtonLike {
 	return (
 		!!x &&
 		typeof x === "object" &&
-		"setDisabled" in (x as any) &&
-		"setButtonText" in (x as any)
+		x !== null &&
+		typeof (x as ButtonLike).setDisabled === "function" &&
+		typeof (x as ButtonLike).setButtonText === "function"
 	);
+}
+
+/**
+ * Type guard for HTMLElement
+ */
+function isHTMLElement(x: unknown): x is HTMLElement {
+	return x instanceof HTMLElement;
 }
 
 /**
  * Simplified async UI helper. Disables the component and updates its label while the action runs,
  * then restores the original state.
+ * Supports both ButtonComponent and HTMLElement with proper error handling.
  */
 export async function runAsyncAction<T>(
 	component: ButtonComponent | HTMLElement,
 	action: () => Promise<T>,
 	labels: LabelSet,
 ): Promise<T> {
+	if (!component) {
+		throw new Error("Component is required for runAsyncAction");
+	}
+
 	if (isButtonComponent(component)) {
 		const originalText = component.buttonEl?.innerText ?? "";
 		// Avoid chaining to support simple mocks that return void
@@ -34,8 +56,8 @@ export async function runAsyncAction<T>(
 			component.setDisabled(false);
 			component.setButtonText(labels.original ?? originalText);
 		}
-	} else {
-		const el = component as HTMLElement;
+	} else if (isHTMLElement(component)) {
+		const el = component;
 		const originalAria = el.ariaLabel ?? "";
 		el.classList.add("is-disabled");
 		el.style.pointerEvents = "none";
@@ -47,5 +69,10 @@ export async function runAsyncAction<T>(
 			el.style.pointerEvents = "";
 			el.ariaLabel = labels.original ?? originalAria;
 		}
+	} else {
+		// Handle unsupported component types gracefully
+		console.warn("runAsyncAction: Unsupported component type", component);
+		// Fallback: just run the action without UI state management
+		return await action();
 	}
 }

@@ -1,7 +1,6 @@
 import type { Database } from "sql.js";
 import { ConcurrentDatabase } from "src/lib/concurrency/ConcurrentDatabase";
 import { isErr } from "src/lib/core/result";
-import { ConcurrentDbExecutor } from "src/lib/database/IndexDbExecutor";
 import type { FileSystemService } from "src/services/FileSystemService";
 import type { LoggingService } from "src/services/LoggingService";
 import type { SqlJsManager } from "src/services/SqlJsManager";
@@ -63,14 +62,6 @@ export class IndexDatabase {
 	public getConcurrent(): ConcurrentDatabase {
 		if (!this.concurrent) throw new Error("IndexDatabase not ready");
 		return this.concurrent;
-	}
-
-	/**
-	 * Create an executor that repositories can use for typed read/write operations.
-	 * This keeps tx/locking details encapsulated in ConcurrentDatabase.
-	 */
-	public getExecutor(): ConcurrentDbExecutor {
-		return new ConcurrentDbExecutor(this.getConcurrent());
 	}
 
 	public onRebuildStatus(

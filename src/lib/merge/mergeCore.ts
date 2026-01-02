@@ -3,6 +3,7 @@ import type {
 	DuplicateMatch,
 	KoreaderHighlightImporterSettings,
 } from "src/types";
+import { formatConflictRegions, performDiff3 } from "./diffCore";
 
 export type MergeStrategy =
 	| "auto-merge"
@@ -68,4 +69,46 @@ export function buildPromptMessage(
 	} catch (e) {
 		return err(e as Error);
 	}
+}
+
+/**
+ * Pure 3-way text merge.
+ * @param baseBody The content of the common ancestor (snapshot).
+ * @param currentBody The content currently in the vault (local).
+ * @param incomingBody The new content from KOReader (remote).
+ */
+export function mergeNoteBodies(
+	baseBody: string,
+	currentBody: string,
+	incomingBody: string,
+): { mergedBody: string; hasConflict: boolean } {
+	const regions = performDiff3(currentBody, baseBody, incomingBody);
+	const result = formatConflictRegions(regions);
+
+	// Safety Heuristic: Force conflict if incoming is empty but local has grown,
+	// preventing accidental deletion of user content if parsing failed silently upstream.
+	if (
+		!result.hasConflict &&
+		incomingBody.trim() === "" &&
+		currentBody.trim() !== "" &&
+		currentBody.length > baseBody.length
+	) {
+		// Synthesize a full-file conflict to force user review
+		const globalConflict = [
+			{
+				conflict: {
+					a: currentBody.split("\n"),
+					aIndex: 0,
+					b: [],
+					bIndex: 0,
+					o: baseBody.split("\n"),
+					oIndex: 0,
+				},
+			},
+		];
+		const safetyResult = formatConflictRegions(globalConflict);
+		return { mergedBody: safetyResult.mergedBody, hasConflict: true };
+	}
+
+	return result;
 }

@@ -1,143 +1,183 @@
+import { Setting } from "obsidian";
 import { Pathing } from "src/lib/pathing";
 import { FrontmatterFieldModal } from "src/ui/FrontmatterFieldModal";
 import { renderValidationError } from "src/ui/utils/modalComponents";
-import { renderSettingsSection, type SettingSpec } from "../SettingsKit";
 import { SettingsSection } from "../SettingsSection";
 
 export class FormattingSettingsSection extends SettingsSection {
 	protected renderContent(containerEl: HTMLElement): void {
-		const specs: SettingSpec[] = [
-			// --- Filtering Settings (from FilteringSettingsSection) ---
-			{
-				key: "excludedFolders",
-				type: "string-list",
-				name: "Excluded folders",
-				desc: "Comma-separated list of folder names to ignore during scans.",
-				placeholder: ".git, .stfolder",
-				get: () => this.plugin.settings.excludedFolders,
-				set: (value) => {
-					this.plugin.settings.excludedFolders = value;
-				},
-			},
-			{
-				key: "allowedFileTypes",
-				type: "string-list",
-				name: "Allowed file types",
-				desc: "Process highlights for these book types only.",
-				placeholder: "epub, pdf, mobi",
-				get: () => this.plugin.settings.allowedFileTypes,
-				set: (value) => {
-					this.plugin.settings.allowedFileTypes = value.map((v) =>
-						v.toLowerCase(),
-					);
-				},
-			},
+		const settings = this.plugin.settings;
 
-			// --- Formatting Settings (Original) ---
-			{ type: "header", text: "Note Formatting", level: 4 },
-			{
-				key: "useCustomFileNameTemplate",
-				type: "toggle",
-				name: "Use custom file name template",
-				desc: "Define a custom naming scheme for imported highlight notes.",
-				get: () => this.plugin.settings.useCustomFileNameTemplate,
-				set: async (value) => {
-					this.plugin.settings.useCustomFileNameTemplate = value;
-				},
-			},
-			{
-				key: "fileNameTemplate",
-				type: "custom",
-				name: "File name template",
-				desc: "Placeholders: {{title}}, {{authors}}, {{importDate}}.",
-				if: () => this.plugin.settings.useCustomFileNameTemplate,
-				render: (s) => {
-					const validationEl = s.descEl.createDiv({
-						cls: "setting-item-description koreader-setting-validation",
-					});
-
-					const update = (value: string) => {
-						const { errors, warnings } =
-							Pathing.validateFileNameTemplate(value);
-						const allMessages = [...errors, ...warnings];
-						renderValidationError(validationEl, allMessages);
-						validationEl.style.color =
-							errors.length > 0 ? "var(--text-error)" : "var(--text-muted)";
-					};
-
-					s.addText((text) => {
-						text
-							.setPlaceholder("{{title}} - {{authors}}")
-							.setValue(this.plugin.settings.fileNameTemplate)
-							.onChange(async (value) => {
-								this.plugin.settings.fileNameTemplate = value;
-								update(value);
+		// Helper for string lists
+		const addListSetting = (
+			name: string,
+			desc: string,
+			placeholder: string,
+			get: () => string[],
+			set: (v: string[]) => void,
+		) => {
+			let timer: NodeJS.Timeout;
+			new Setting(containerEl)
+				.setName(name)
+				.setDesc(desc)
+				.addTextArea((text) => {
+					text
+						.setPlaceholder(placeholder)
+						.setValue(get().join(", "))
+						.onChange((v) => {
+							clearTimeout(timer);
+							timer = setTimeout(() => {
+								const list = v
+									.split(",")
+									.map((s) => s.trim())
+									.filter(Boolean);
+								set(list);
 								this.debouncedSave();
-							});
+							}, 500);
+						});
+				});
+		};
+
+		addListSetting(
+			"Excluded folders",
+			"Comma-separated list of folder names to ignore during scans.",
+			".git, .stfolder",
+			() => settings.excludedFolders,
+			(v) => {
+				settings.excludedFolders = v;
+			},
+		);
+
+		addListSetting(
+			"Allowed file types",
+			"Process highlights for these book types only.",
+			"epub, pdf, mobi",
+			() => settings.allowedFileTypes,
+			(v) => {
+				settings.allowedFileTypes = v.map((x) => x.toLowerCase());
+			},
+		);
+
+		containerEl.createEl("h4", { text: "Note Formatting" });
+
+		new Setting(containerEl)
+			.setName("Use custom file name template")
+			.setDesc("Define a custom naming scheme for imported highlight notes.")
+			.addToggle((toggle) => {
+				toggle
+					.setValue(settings.useCustomFileNameTemplate)
+					.onChange(async (value) => {
+						settings.useCustomFileNameTemplate = value;
+						// Trigger reload to show/hide the dependent setting below
+						await this.saveAndReload();
 					});
-					update(this.plugin.settings.fileNameTemplate); // Initial validation
-				},
-			},
-			{
-				key: "frontmatterModal",
-				type: "buttons",
-				name: "Frontmatter fields",
-				desc: "Choose which fields to include or exclude from frontmatter.",
-				buttons: [
-					{
-						text: "Manage Fields",
-						onClick: async () => {
-							const result = await new FrontmatterFieldModal(
-								this.app,
-								this.plugin.settings.frontmatter,
-							).openAndAwaitResult();
-							if (result) {
-								this.plugin.settings.frontmatter = result;
-								await this.plugin.saveSettings();
-							}
-						},
-					},
-				],
-			},
-			{
-				key: "useUnknownAuthor",
-				type: "toggle",
-				name: "Use 'Unknown Author' placeholder",
-				desc: "When an author is not found, use 'Unknown Author' instead of omitting the field.",
-				get: () => this.plugin.settings.frontmatter.useUnknownAuthor,
-				set: async (value) => {
-					this.plugin.settings.frontmatter.useUnknownAuthor = value;
-				},
-			},
+			});
 
-			// --- Duplicate Handling Settings (Original) ---
-			{ type: "header", text: "Duplicate Handling", level: 4 },
-			{
-				key: "autoMergeOnAddition",
-				type: "toggle",
-				name: "Auto-merge on addition",
-				desc: "Automatically merge imports if they only add new highlights, without showing a dialog.",
-				get: () => this.plugin.settings.autoMergeOnAddition,
-				set: async (value) => {
-					this.plugin.settings.autoMergeOnAddition = value;
-				},
-			},
-			{
-				key: "enableFullDuplicateCheck",
-				type: "toggle",
-				name: "Enable full vault duplicate check",
-				desc: "Checks the entire vault for duplicates (slower). When off, only the highlights folder is scanned (faster).",
-				get: () => this.plugin.settings.enableFullDuplicateCheck,
-				set: async (value) => {
-					this.plugin.settings.enableFullDuplicateCheck = value;
-				},
-			},
-		];
+		// Conditional rendering: imperative if statement!
+		if (settings.useCustomFileNameTemplate) {
+			const templateSetting = new Setting(containerEl)
+				.setName("File name template")
+				// Custom description rendering logic
+				.setDesc("Placeholders: {{title}}, {{authors}}, {{importDate}}.");
 
-		renderSettingsSection(containerEl, specs, {
-			app: this.app,
-			parent: this,
-			onSave: async () => this.plugin.saveSettings(true),
-		});
+			const validationEl = templateSetting.descEl.createDiv({
+				cls: "setting-item-description koreader-setting-validation",
+			});
+
+			const validate = (val: string) => {
+				const { errors, warnings } = Pathing.validateFileNameTemplate(val);
+				renderValidationError(validationEl, [...errors, ...warnings]);
+				validationEl.style.color =
+					errors.length > 0 ? "var(--text-error)" : "var(--text-muted)";
+			};
+
+			templateSetting.addText((text) => {
+				text
+					.setPlaceholder("{{title}} - {{authors}}")
+					.setValue(settings.fileNameTemplate)
+					.onChange(async (value) => {
+						settings.fileNameTemplate = value;
+						validate(value);
+						this.debouncedSave();
+					});
+			});
+			validate(settings.fileNameTemplate);
+		}
+
+		new Setting(containerEl)
+			.setName("Frontmatter fields")
+			.setDesc("Choose which fields to include or exclude from frontmatter.")
+			.addButton((btn) => {
+				btn.setButtonText("Manage Fields").onClick(async () => {
+					const result = await new FrontmatterFieldModal(
+						this.app,
+						settings.frontmatter,
+					).openAndAwaitResult();
+					if (result) {
+						settings.frontmatter = result;
+						this.debouncedSave();
+					}
+				});
+			});
+
+		new Setting(containerEl)
+			.setName("Convert Keywords to Tags")
+			.setDesc(
+				"Choose how to handle Keywords: 'None', 'Duplicate' (add Tags), or 'Replace' (convert to Tags).",
+			)
+			.addDropdown((dropdown) => {
+				dropdown
+					.addOption("none", "None")
+					.addOption("duplicate", "Duplicate")
+					.addOption("replace", "Replace")
+					.setValue(settings.frontmatter.keywordsAsTags)
+					.onChange(async (value) => {
+						settings.frontmatter.keywordsAsTags = value as
+							| "none"
+							| "duplicate"
+							| "replace";
+						this.debouncedSave();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Use 'Unknown Author' placeholder")
+			.setDesc(
+				"When an author is not found, use 'Unknown Author' instead of omitting the field.",
+			)
+			.addToggle((t) =>
+				t
+					.setValue(settings.frontmatter.useUnknownAuthor)
+					.onChange(async (v) => {
+						settings.frontmatter.useUnknownAuthor = v;
+						this.debouncedSave();
+					}),
+			);
+
+		containerEl.createEl("h4", { text: "Duplicate Handling" });
+
+		new Setting(containerEl)
+			.setName("Auto-merge on addition")
+			.setDesc(
+				"Automatically merge imports if they only add new highlights, without showing a dialog.",
+			)
+			.addToggle((t) =>
+				t.setValue(settings.autoMergeOnAddition).onChange((v) => {
+					settings.autoMergeOnAddition = v;
+					this.debouncedSave();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Enable full vault duplicate check")
+			.setDesc(
+				"Checks the entire vault for duplicates (slower). When off, only the highlights folder is scanned (faster).",
+			)
+			.addToggle((t) =>
+				t.setValue(settings.enableFullDuplicateCheck).onChange((v) => {
+					settings.enableFullDuplicateCheck = v;
+					this.debouncedSave();
+				}),
+			);
 	}
 }

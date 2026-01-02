@@ -250,11 +250,12 @@ export function isWithinGap(
  * @returns 16-character hex string ID
  */
 export function computeAnnotationId(annotation: Annotation): string {
-	const { pageno, pos0, pos1, text, note } = annotation;
+	const { pageno, pageref, pos0, pos1, text, note } = annotation;
 	// Use the canonical normalizeWhitespace function for text and note normalization
 	const normalizedText = normalizeWhitespace(text || "").toLowerCase();
 	const normalizedNote = normalizeWhitespace(note || "").toLowerCase();
-	const input = `${pageno}|${pos0}|${pos1}|${normalizedText}|${normalizedNote}`;
+	const input = `${pageno}|${pageref ?? ""}|${pos0}|${pos1}|${normalizedText}|${normalizedNote}`;
+
 	return sha1Hex(input, { normalizeEol: true }).slice(0, 16);
 }
 

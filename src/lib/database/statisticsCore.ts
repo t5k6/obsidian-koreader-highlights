@@ -115,8 +115,8 @@ export function calculateDerivedStatistics(
 	return {
 		percentComplete,
 		averageTimePerPage:
-			totalReadPages > 0 && totalReadTime > 0
-				? totalReadTime / totalReadPages
+			percentComplete > 0 && totalReadTime > 0
+				? Math.round(totalReadTime / (pages * (percentComplete / 100)))
 				: 0,
 		firstReadDate,
 		lastReadDate,

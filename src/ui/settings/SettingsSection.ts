@@ -1,4 +1,4 @@
-import { type App, Component } from "obsidian";
+import { type App, Component, Notice } from "obsidian";
 import type KoreaderImporterPlugin from "src/main";
 import type { DebouncedFn } from "src/types";
 
@@ -37,4 +37,22 @@ export abstract class SettingsSection extends Component {
 	}
 
 	protected abstract renderContent(containerEl: HTMLElement): void;
+
+	// Helper to trigger a save and optional UI refresh
+	protected async saveAndReload(): Promise<void> {
+		await this.plugin.saveSettings(true);
+	}
+
+	// Helper for consistent error handling in setting changes
+	protected async settingChanged(
+		callback: () => void | Promise<void>,
+	): Promise<void> {
+		try {
+			await callback();
+			this.debouncedSave();
+		} catch (err) {
+			console.error("Failed to save setting:", err);
+			new Notice("Failed to save setting.");
+		}
+	}
 }

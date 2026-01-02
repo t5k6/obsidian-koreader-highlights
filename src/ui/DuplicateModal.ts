@@ -159,7 +159,22 @@ export class DuplicateHandlingModal
 	}
 
 	protected registerShortcuts(): void {
-		super.registerShortcuts(); // Handles Enter and Escape
+		super.registerShortcuts();
+
+		// Custom behavior for this modal
+		this.registerShortcut([], "Escape", () => this.handleChoice("skip"));
+		this.registerShortcut([], "Enter", () => {
+			// Primary action: Merge if enabled, otherwise Skip
+			const primaryButton = this.contentEl.querySelector<HTMLButtonElement>(
+				".cta:not([disabled])",
+			);
+			if (primaryButton) {
+				primaryButton.click();
+			} else {
+				this.handleChoice("skip");
+			}
+		});
+
 		this.registerShortcut(["Mod"], "m", () => this.handleChoice("merge"));
 		this.registerShortcut(["Mod"], "r", () => this.handleChoice("replace"));
 		this.registerShortcut(["Mod"], "k", () => this.handleChoice("keep-both"));

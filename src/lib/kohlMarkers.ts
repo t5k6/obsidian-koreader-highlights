@@ -1,4 +1,4 @@
-import { safeParse } from "src/lib/core/validationUtils";
+import { safeParse } from "src/lib/core/objectUtils";
 import { computeAnnotationId } from "src/lib/formatting/formatUtils";
 import type { Annotation, CommentStyle } from "src/types";
 
@@ -47,7 +47,9 @@ export function createKohlMarker(
 		v: 1,
 		id: annotation.id ?? computeAnnotationId(annotation),
 		p: annotation.pageno,
+		pr: annotation.pageref,
 		pos0: annotation.pos0,
+
 		pos1: annotation.pos1,
 		t: annotation.datetime,
 		c: annotation.color,

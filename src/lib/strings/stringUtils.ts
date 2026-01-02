@@ -15,6 +15,14 @@ export const htmlEntities: Record<string, string> = {
 	">": "&gt;",
 };
 
+const UNESCAPE_MAP: Record<string, string> = {
+	"&amp;": "&",
+	"&lt;": "<",
+	"&gt;": ">",
+	"&quot;": '"',
+	"&#39;": "'",
+};
+
 /**
  * Escapes HTML special characters in a string.
  * Converts characters that have special meaning in HTML to their entity equivalents.
@@ -27,6 +35,35 @@ export function escapeHtml(s: string): string {
 }
 
 /**
+ * Unescapes common HTML entities back to their literal characters.
+ * Reverses the most common HTML entity encoding for improved readability.
+ *
+ * @param s - The string to unescape
+ * @returns The HTML-unescaped string
+ */
+export function unescapeHtml(s: string): string {
+	return s.replace(
+		/&(?:amp|lt|gt|quot|#39);/g,
+		(match) => UNESCAPE_MAP[match] ?? match,
+	);
+}
+
+/**
+ * Escapes Markdown special characters to prevent unwanted formatting.
+ * Only escapes : \ ` * _ [ ]
+ * Does not escape < > to allow HTML tags in templates.
+ *
+ * @param s - The string to escape
+ * @returns The Markdown-escaped string
+ */
+export function escapeMarkdown(s: string): string {
+	// 1. Escape backslashes first to prevent double-escaping subsequent chars
+	// 2. Escape formatting chars that cause issues in normal text: ` * _ [ ]
+	// HTML tags are allowed, as highlight text is HTML-escaped.
+	return s.replace(/\\/g, "\\\\").replace(/([`*_[\]])/g, "\\$1");
+}
+
+/**
  * Removes HTML tags from a string after decoding common entities.
  * First decodes entity-encoded tags like &lt;h1&gt; to prevent reintroduction,
  * then strips all HTML tags.
@@ -35,22 +72,7 @@ export function escapeHtml(s: string): string {
  * @returns The string with HTML tags removed
  */
 export function stripHtml(s: string): string {
-	const decoded = s.replace(/&(?:amp|lt|gt|quot|#39);/g, (match) => {
-		switch (match) {
-			case "&amp;":
-				return "&";
-			case "&lt;":
-				return "<";
-			case "&gt;":
-				return ">";
-			case "&quot;":
-				return '"';
-			case "&#39;":
-				return "'";
-			default:
-				return match;
-		}
-	});
+	const decoded = unescapeHtml(s);
 	return decoded.replace(/<[^>]*>/g, "");
 }
 

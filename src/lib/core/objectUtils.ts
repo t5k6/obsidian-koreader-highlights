@@ -70,6 +70,28 @@ export function deepEqual(a: unknown, b: unknown): boolean {
 }
 
 /**
+ * Safely parse JSON without throwing. Returns the provided fallback on failure.
+ */
+export function safeParse<T>(raw: string, fallback: T | null = null): T | null {
+	try {
+		return JSON.parse(raw) as T;
+	} catch {
+		return fallback;
+	}
+}
+
+/**
+ * Checks if a value is non-null, a non-empty string, or a non-empty array.
+ * This is a generic "presence" check for data processing.
+ */
+export function hasValue(v: unknown): boolean {
+	if (v === undefined || v === null) return false;
+	if (typeof v === "string" && v.trim() === "") return false;
+	if (Array.isArray(v) && v.length === 0) return false;
+	return true;
+}
+
+/**
  * Type guard to check if a value is a plain object (not null, not array).
  * @param obj The value to check.
  * @returns True if the value is an object, false otherwise.

@@ -1,6 +1,6 @@
 import type { SimpleCache } from "src/lib/cache";
 import { sha1Hex } from "src/lib/core/crypto";
-import { safeParse } from "src/lib/core/validationUtils";
+import { safeParse } from "src/lib/core/objectUtils";
 import { makeAnyKohlRegex } from "src/lib/kohlMarkers";
 import { stripHtml } from "src/lib/strings/stringUtils";
 import type { Annotation, CommentStyle, PositionObject } from "src/types";

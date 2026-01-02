@@ -1,5 +1,5 @@
-import path from "node:path";
 import type { App } from "obsidian";
+import { Pathing } from "src/lib/pathing";
 import { BaseModal } from "./BaseModal";
 
 export class ProgressModal extends BaseModal<void> {
@@ -140,7 +140,7 @@ export class ProgressModal extends BaseModal<void> {
 		if (currentFileOrMessage) {
 			// If it's a path, show basename; otherwise show the message as-is
 			const maybeBasename = /[\\/]/.test(currentFileOrMessage)
-				? path.basename(currentFileOrMessage)
+				? Pathing.systemBasename(currentFileOrMessage)
 				: currentFileOrMessage;
 			this.setStatus(`Processing: ${maybeBasename}`);
 		}

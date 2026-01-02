@@ -342,6 +342,7 @@ export class CommandManager {
 	 */
 	async executeForceImport(): Promise<AppResult<void>> {
 		this.device.clearCache();
+		this.plugin.statusBarManager?.clearCache();
 		this.localIndexService.invalidateIndexCaches();
 		await this.localIndexService.clearImportSource();
 		return this.executeImport({ forceReimportAll: true });
@@ -413,6 +414,7 @@ export class CommandManager {
 		this.log.info("Clearing caches on user request.");
 		this.cacheManager.clear();
 		this.device.clearCache();
+		this.plugin.statusBarManager?.clearCache();
 		// Use centralized cache invalidation for index-related caches
 		this.localIndexService.invalidateIndexCaches();
 		await this.localIndexService.clearImportSource();
@@ -572,6 +574,7 @@ export class CommandManager {
 		// 1) Clear in-memory caches and import source index so next import is fresh
 		this.cacheManager.clear();
 		this.device.clearCache();
+		this.plugin.statusBarManager?.clearCache();
 		// Use centralized cache invalidation for index-related caches
 		this.localIndexService.invalidateIndexCaches();
 		await this.localIndexService.clearImportSource();

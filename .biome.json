@@ -14,7 +14,7 @@
 	},
 	"files": {
 		"maxSize": 200000,
-		"includes": ["**", "!**/node_modules", "!**/dist", "!**/coverage"]
+		"ignoreUnknown": false
 	},
 	"formatter": {
 		"enabled": true,

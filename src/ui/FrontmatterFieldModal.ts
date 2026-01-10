@@ -11,12 +11,17 @@ export class FrontmatterFieldModal extends BaseModal<FrontmatterSettings> {
 		{ id: "series", name: "Series" },
 		{ id: "language", name: "Language" },
 		{ id: "pages", name: "Page Count" },
+		{ id: "rating", name: "Rating (Stars)" },
 		{ id: "lastRead", name: "Last Read Date" },
 		{ id: "firstRead", name: "First Read Date" },
-		{ id: "totalReadTime", name: "Total Reading Time" },
+		{ id: "readTime", name: "Read Time" },
 		{ id: "progress", name: "Reading Progress (%)" },
 		{ id: "readingStatus", name: "Reading Status" },
+		{ id: "readingStreak", name: "Reading Streak" },
 		{ id: "averageTimePerPage", name: "Avg. Time Per Page" },
+		{ id: "avgSessionDuration", name: "Avg. Session Duration" },
+		{ id: "highlightCount", name: "Highlight Count" },
+		{ id: "noteCount", name: "Note Count" },
 	];
 
 	constructor(

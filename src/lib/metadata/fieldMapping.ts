@@ -15,10 +15,14 @@ export const CANONICAL_TO_FRIENDLY: Record<string, string> = {
 	noteCount: "Note Count",
 	lastRead: "Last Read Date",
 	firstRead: "First Read Date",
-	totalReadTime: "Total Read Duration",
+	readTime: "Read Time",
 	progress: "Reading Progress",
 	readingStatus: "Status",
 	averageTimePerPage: "Avg. Time Per Page",
+	rating: "Rating",
+	sessionCount: "Session Count",
+	readingStreak: "Reading Streak",
+	avgSessionDuration: "Avg. Session Duration",
 };
 
 export const FRIENDLY_TO_CANONICAL: Record<string, string> = Object.entries(
@@ -49,12 +53,16 @@ export const DISPLAY_KEY_ORDER: (keyof import("src/types").FrontmatterData)[] =
 		"series",
 		"language",
 		"pages",
+		"rating",
 		"readingStatus",
 		"progress",
+		"readingStreak",
 		"firstRead",
 		"lastRead",
-		"totalReadTime",
+		"readTime",
 		"averageTimePerPage",
+		"avgSessionDuration",
 		"highlightCount",
 		"noteCount",
+		"sessionCount",
 	];

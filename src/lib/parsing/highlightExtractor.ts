@@ -1,7 +1,7 @@
 import type { SimpleCache } from "src/lib/cache";
 import { sha1Hex } from "src/lib/core/crypto";
 import { safeParse } from "src/lib/core/objectUtils";
-import { makeAnyKohlRegex } from "src/lib/kohlMarkers";
+import { ANY_KOHL_MARKER_PATTERN_SRC } from "src/lib/kohlMarkers";
 import { stripHtml } from "src/lib/strings/stringUtils";
 import type { Annotation, CommentStyle, PositionObject } from "src/types";
 
@@ -165,7 +165,7 @@ export function extractHighlightsAuto(
  * @returns Detected comment style or null if none found
  */
 export function detectCommentStyle(content: string): CommentStyle | null {
-	const re = makeAnyKohlRegex("g");
+	const re = new RegExp(ANY_KOHL_MARKER_PATTERN_SRC, "g");
 	let hasHtml = false;
 	let hasMd = false;
 
@@ -200,7 +200,7 @@ export function scanAllCached(
 		if (cached) return cached;
 	}
 
-	const re = makeAnyKohlRegex("g");
+	const re = new RegExp(ANY_KOHL_MARKER_PATTERN_SRC, "g");
 	const markers: Marker[] = [];
 	for (const m of content.matchAll(re)) {
 		const index = (m as RegExpMatchArray).index!;

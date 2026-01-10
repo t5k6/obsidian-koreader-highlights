@@ -29,6 +29,7 @@ import type {
 	KoreaderHighlightImporterSettings,
 	SettingsObserver,
 } from "src/types";
+import type { NotePersistenceService } from "../NotePersistenceService";
 import type { VaultBookScanner } from "../VaultBookScanner";
 import type { IndexDatabase } from "./IndexDatabase";
 
@@ -56,6 +57,7 @@ export class IndexCoordinator implements SettingsObserver {
 		cacheManager: CacheManager,
 		private readonly vaultBookScanner: VaultBookScanner,
 		private readonly indexRepo: IndexRepository,
+		private readonly persistence: NotePersistenceService,
 	) {
 		this.log = logging.scoped("IndexCoordinator");
 		this.settings = this.plugin.settings;
@@ -221,6 +223,29 @@ export class IndexCoordinator implements SettingsObserver {
 	public async handleDelete(file: TAbstractFile): Promise<void> {
 		if (isTFile(file)) {
 			const pathToDelete = file.path;
+
+			// Check if this file is in the highlights folder and has a UID
+			if (
+				this.settings.highlightsFolder &&
+				pathToDelete.startsWith(this.settings.highlightsFolder)
+			) {
+				// Try to get UID from metadata cache (fast, no file I/O)
+				const cache = this.app.metadataCache.getFileCache(file);
+				const uid = cache?.frontmatter?.["kohl-uid"];
+
+				if (uid && typeof uid === "string") {
+					// Record deletion for threshold tracking
+					this.persistence.recordDeletion();
+
+					// Fire-and-forget: Eagerly attempt to delete snapshot if orphaned
+					// This doesn't block the vault event
+					void this.persistence.deleteSnapshotIfOrphaned(
+						uid,
+						this.settings.highlightsFolder,
+					);
+				}
+			}
+
 			const key = await this.findKeyByVaultPath(pathToDelete);
 			const sourcePath =
 				await this.indexRepo.deleteNoteAndResetSource(pathToDelete);

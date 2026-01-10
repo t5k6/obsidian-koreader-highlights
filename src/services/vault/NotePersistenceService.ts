@@ -48,6 +48,7 @@ export class NotePersistenceService {
 	private readonly backupDir: string;
 	private readonly queue = new KeyedQueue();
 	private isGCRunning = false;
+	private deletionsSinceLastGC = 0;
 
 	constructor(
 		private readonly app: App,
@@ -148,8 +149,9 @@ export class NotePersistenceService {
 	public async createSnapshotFromContent(
 		uid: string,
 		content: string,
+		vaultPath?: string,
 	): Promise<Result<void, NotePersistenceFailure>> {
-		return this.createSnapshotCore(null, uid, async () => content);
+		return this.createSnapshotCore(null, uid, async () => content, vaultPath);
 	}
 
 	public async readSnapshotById(
@@ -374,6 +376,7 @@ export class NotePersistenceService {
 		targetFile: TFile | null,
 		uid: string,
 		contentProvider: () => Promise<string>,
+		vaultPath?: string,
 	): Promise<Result<void, NotePersistenceFailure>> {
 		if (!uid) {
 			return err(
@@ -384,7 +387,8 @@ export class NotePersistenceService {
 		return this.withSnapshotLock(uid, async () => {
 			try {
 				const content = await contentProvider();
-				return this.writeSnapshot(uid, content);
+				const path = vaultPath ?? targetFile?.path;
+				return this.writeSnapshot(uid, content, path);
 			} catch (e) {
 				const path = targetFile?.path ?? `UID ${uid}`;
 				this.log.error(`Failed to get content for snapshot of ${path}`, e);
@@ -440,10 +444,15 @@ export class NotePersistenceService {
 	private async writeSnapshot(
 		uid: string,
 		body: string,
+		vaultPath?: string,
 	): Promise<Result<void, NotePersistenceFailure>> {
 		const path = snapshotPathForUid(this.snapshotDir, uid).fullPath;
 		const hash = computeSnapshotHash(body);
-		const content = composeSnapshotContent(hash, body);
+		const content = composeSnapshotContent(hash, body, {
+			uid,
+			vaultPath,
+			createdAt: Date.now(),
+		});
 		const writeResult = await notifyOnFsError(
 			this.fs.writeVaultTextAtomic(path, content),
 			{ onceKey: "snapshotsWritable" },
@@ -561,7 +570,11 @@ export class NotePersistenceService {
 				});
 			}
 
-			const snapRes = await this.createSnapshotFromContent(uid, content);
+			const snapRes = await this.createSnapshotFromContent(
+				uid,
+				content,
+				targetFile.path,
+			);
 			if (isErr(snapRes)) {
 				warnings.push({
 					code: "SNAPSHOT_FAILED",
@@ -626,6 +639,7 @@ export class NotePersistenceService {
 						const snapRes = await this.createSnapshotFromContent(
 							uid,
 							ctx.newContent,
+							targetFile.path,
 						);
 						if (isErr(snapRes)) {
 							warnings.push({
@@ -666,9 +680,89 @@ export class NotePersistenceService {
 		this.isGCRunning = true;
 		try {
 			// Delegate to the private core implementation
-			return await this._collectOrphanedSnapshotsCore(highlightsFolder);
+			const result = await this._collectOrphanedSnapshotsCore(highlightsFolder);
+			// Reset deletion counter after successful GC
+			this.deletionsSinceLastGC = 0;
+			return result;
 		} finally {
 			this.isGCRunning = false;
+		}
+	}
+
+	/**
+	 * Get the number of deletions since the last GC run.
+	 * Used to determine if an immediate GC should be triggered.
+	 */
+	public getDeletionsSinceLastGC(): number {
+		return this.deletionsSinceLastGC;
+	}
+
+	/**
+	 * Increment the deletion counter. Called when a note is deleted.
+	 * This helps trigger GC more frequently when many deletions occur.
+	 */
+	public recordDeletion(): void {
+		this.deletionsSinceLastGC++;
+	}
+
+	/**
+	 * Eagerly delete a snapshot if it's confirmed to be orphaned.
+	 * This is an optimization for the common case of single-note deletions.
+	 *
+	 * Strategy:
+	 * 1. Quick scan of highlights folder using metadata cache (fast, no file I/O)
+	 * 2. If UID not found in any note, delete the snapshot
+	 * 3. Fire-and-forget: errors are logged but don't block the caller
+	 *
+	 * @param uid - The UID to check and potentially delete
+	 * @param highlightsFolder - The folder to scan for active notes
+	 */
+	public async deleteSnapshotIfOrphaned(
+		uid: string,
+		highlightsFolder: string,
+	): Promise<void> {
+		try {
+			// Quick check: Does this UID still exist in the vault?
+			// Use metadata cache for speed (no file I/O)
+			const allFiles = this.app.vault.getMarkdownFiles();
+			const highlightFiles = allFiles.filter((f) =>
+				f.path.startsWith(highlightsFolder),
+			);
+
+			for (const file of highlightFiles) {
+				const cache = this.app.metadataCache.getFileCache(file);
+				if (!cache?.frontmatter) continue;
+
+				const fileUid = extractUidFromFrontmatter(cache.frontmatter);
+				if (fileUid === uid) {
+					// UID is still in use, not orphaned
+					this.log.info(
+						`Snapshot ${uid} is not orphaned (found in ${file.path})`,
+					);
+					return;
+				}
+			}
+
+			// UID not found in any note, it's orphaned
+			this.log.info(
+				`Eagerly deleting orphaned snapshot for UID ${uid} (not found in vault)`,
+			);
+
+			const deleteResult = await this.removeSnapshot(uid);
+			if (isErr(deleteResult)) {
+				this.log.warn(
+					`Failed to eagerly delete orphaned snapshot ${uid}`,
+					deleteResult.error,
+				);
+			} else {
+				this.log.info(`Successfully deleted orphaned snapshot ${uid}`);
+			}
+		} catch (error) {
+			// Don't throw - this is a best-effort optimization
+			this.log.warn(
+				`Error during eager snapshot deletion for UID ${uid}`,
+				error,
+			);
 		}
 	}
 

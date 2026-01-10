@@ -50,6 +50,10 @@ export const FrontmatterSchema = z
 			.enum(["none", "duplicate", "replace"])
 			.catch("none")
 			.default("none"),
+		durationFormat: z
+			.enum(["formatted", "seconds"])
+			.catch("formatted")
+			.default("formatted"),
 	})
 	.passthrough();
 
@@ -79,6 +83,14 @@ export const RawSettingsSchema = z
 		autoMergeOnAddition: z.coerce
 			.boolean()
 			.catch(() => BASE_DEFAULTS.autoMergeOnAddition)
+			.optional(),
+		silentImport: z.coerce
+			.boolean()
+			.catch(() => BASE_DEFAULTS.silentImport)
+			.optional(),
+		defaultMergeStrategy: z
+			.enum(["merge", "replace", "skip"])
+			.catch(() => BASE_DEFAULTS.defaultMergeStrategy)
 			.optional(),
 		maxHighlightGap: z.coerce
 			.number()
@@ -146,6 +158,8 @@ export const BASE_DEFAULTS: KoreaderHighlightImporterSettings = {
 	fileNameTemplate: "{{title}} - {{authors}}",
 	useCustomFileNameTemplate: false,
 	autoMergeOnAddition: true,
+	silentImport: false,
+	defaultMergeStrategy: "merge" as const,
 	maxHighlightGap: 5,
 	maxTimeGapMinutes: 10,
 	mergeOverlappingHighlights: true,
@@ -164,17 +178,17 @@ export const BASE_DEFAULTS: KoreaderHighlightImporterSettings = {
 		customFields: [],
 		useUnknownAuthor: false,
 		keywordsAsTags: "none",
+		durationFormat: "formatted",
 	},
 };
 
 export function normalizeSettings(
 	raw: unknown,
 ): KoreaderHighlightImporterSettings {
-	// 1. Parse raw data using Zod schema. Fallback to an empty object on failure.
+	// Parse raw data using Zod schema. Fallback to an empty object on failure.
 	const parsedRes = RawSettingsSchema.safeParse(raw ?? {});
 	const parsedData = parsedRes.success ? parsedRes.data : {};
 
-	// 2. Create a mutable copy and handle legacy key migration.
 	// We use a type assertion here because Zod's inferred type from a partial & optional schema
 	// is more complex than our target Partial type.
 	const migratedData = {
@@ -192,10 +206,7 @@ export function normalizeSettings(
 	// Always remove the legacy key to prevent it from being saved.
 	delete migratedData.koreaderMountPoint;
 
-	// 3. Deep-merge the validated & migrated data onto the base defaults.
 	const merged = deepMerge(BASE_DEFAULTS, migratedData);
-
-	// 4. Perform all post-merge normalizations (path handling, boolean coercion, array cleanup).
 	merged.koreaderScanPath = Pathing.normalizeSystemPath(
 		merged.koreaderScanPath,
 	);

@@ -8,7 +8,6 @@ export class FormattingSettingsSection extends SettingsSection {
 	protected renderContent(containerEl: HTMLElement): void {
 		const settings = this.plugin.settings;
 
-		// Helper for string lists
 		const addListSetting = (
 			name: string,
 			desc: string,
@@ -167,6 +166,49 @@ export class FormattingSettingsSection extends SettingsSection {
 					this.debouncedSave();
 				}),
 			);
+
+		new Setting(containerEl)
+			.setName("Silent import mode")
+			.setDesc(
+				"Automatically handle all duplicates without showing dialogs. Useful for automated imports via Cron or scheduled tasks.",
+			)
+			.addToggle((t) =>
+				t.setValue(settings.silentImport).onChange(async (v) => {
+					settings.silentImport = v;
+					await this.saveAndReload();
+				}),
+			);
+
+		// Conditional rendering: show strategy dropdown only when silent import is enabled
+		if (settings.silentImport) {
+			const strategySetting = new Setting(containerEl)
+				.setName("Default merge strategy")
+				.setDesc(
+					"Action to take for all duplicates when running in silent mode.",
+				)
+				.addDropdown((d) =>
+					d
+						.addOption("merge", "Merge (safe, preserves local edits)")
+						.addOption("replace", "Replace (overwrites local changes)")
+						.addOption("skip", "Skip (no action)")
+						.setValue(settings.defaultMergeStrategy)
+						.onChange((v) => {
+							settings.defaultMergeStrategy = v as "merge" | "replace" | "skip";
+							this.debouncedSave();
+						}),
+				);
+
+			// Add warning for dangerous "replace" strategy
+			if (settings.defaultMergeStrategy === "replace") {
+				const warningEl = strategySetting.descEl.createDiv({
+					cls: "setting-item-description koreader-setting-validation",
+				});
+				warningEl.style.color = "var(--text-error)";
+				warningEl.setText(
+					"⚠️ Warning: 'Replace' will overwrite any local edits you've made to notes.",
+				);
+			}
+		}
 
 		new Setting(containerEl)
 			.setName("Enable full vault duplicate check")

@@ -150,6 +150,7 @@ export function registerServices(
 		CacheManager,
 		VaultBookScanner,
 		IndexRepository,
+		NotePersistenceService,
 	]);
 
 	// --- Level 2.5: Duplicate Finding

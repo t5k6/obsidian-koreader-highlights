@@ -14,10 +14,10 @@ import {
 	sortDuplicateMatches,
 } from "src/lib/duplicatesCore";
 import {
+	buildBookKey,
 	getStrongIdentifiers,
 	isUniqueMd5,
-} from "src/lib/formatting/bookIdentity";
-import { bookKeyFromDocProps } from "src/lib/formatting/formatUtils";
+} from "src/lib/metadata/identity";
 import { isTFile, isTFolder } from "src/lib/obsidian/typeguards";
 import { extractHighlightsAuto } from "src/lib/parsing/highlightExtractor";
 import { Pathing } from "src/lib/pathing";
@@ -71,7 +71,7 @@ export class DuplicateFinder implements SettingsObserver {
 		luaMetadata: LuaMetadata,
 		degradedScanCache?: Map<string, TFile[]> | null,
 	): Promise<DuplicateScanResult> {
-		const bookKey = bookKeyFromDocProps(luaMetadata.docProps);
+		const bookKey = buildBookKey(luaMetadata.docProps);
 
 		// Priority 1: Direct filename probe (fastest, most specific)
 		const directCandidates = await this._findViaDirectProbe(luaMetadata);
@@ -386,7 +386,7 @@ export class DuplicateFinder implements SettingsObserver {
 	 * then finds existing notes that correspond to those books.
 	 */
 	private async _findViaStrongIdentifiers(
-		strongIds: import("src/lib/formatting/bookIdentity").ParsedIdentifier[],
+		strongIds: import("src/lib/metadata/identity").ParsedIdentifier[],
 	): Promise<TFile[]> {
 		try {
 			// Filter to only identifiers with valid schemes

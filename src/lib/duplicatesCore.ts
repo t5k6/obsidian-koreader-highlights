@@ -5,7 +5,8 @@ import type {
 	DuplicateMatch,
 	LuaMetadata,
 } from "src/types";
-import { bookKeyFromDocProps, getHighlightKey } from "./formatting";
+import { getHighlightKey } from "./formatting";
+import { buildBookKey } from "./metadata/identity";
 import { Pathing } from "./pathing";
 
 export type DuplicateCounts = {
@@ -62,7 +63,7 @@ export function isPotentialMatch(
 	// A file is a potential match if its frontmatter matches OR its filename matches.
 	// Ensure frontmatter is checked first as it's more reliable.
 	if (frontmatter) {
-		const fmBookKey = bookKeyFromDocProps({
+		const fmBookKey = buildBookKey({
 			title: frontmatter.title ?? "",
 			authors: Array.isArray(frontmatter.authors)
 				? frontmatter.authors.join(", ")

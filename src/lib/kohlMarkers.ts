@@ -16,10 +16,6 @@ export const ANY_KOHL_MARKER_REGEX = new RegExp(
 // Non-global tester for safe presence checks when needed.
 export const ANY_KOHL_MARKER_TEST = new RegExp(ANY_KOHL_MARKER_PATTERN_SRC);
 
-// Utility for callers who want a fresh instance (avoids shared lastIndex).
-export const makeAnyKohlRegex = (flags = "g") =>
-	new RegExp(ANY_KOHL_MARKER_PATTERN_SRC, flags);
-
 /**
  * Creates KOHL markers for multiple annotations.
  * @param annotations - Array of annotations

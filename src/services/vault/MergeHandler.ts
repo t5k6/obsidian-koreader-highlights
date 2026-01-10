@@ -70,7 +70,6 @@ export class MergeHandler {
 		});
 		const strategy = determineMergeStrategy(context);
 
-		// Shell handles execution based on pure strategy
 		switch (strategy) {
 			case "auto-merge":
 				return this.executeAutoMerge(analysis, bodyProvider);
@@ -177,9 +176,21 @@ export class MergeHandler {
 		message: string,
 	): Promise<DuplicateChoice> {
 		return this.modalQueue.run("duplicate-modal", async () => {
+			// Check session-level "apply to all" first (existing behavior)
 			if (session.applyToAll && session.choice) {
 				return session.choice;
 			}
+
+			// Check global silent import setting
+			if (this.plugin.settings.silentImport) {
+				const strategy = this.plugin.settings.defaultMergeStrategy;
+				this.log.info(
+					`Silent import mode: applying '${strategy}' strategy to ${analysis.file.path}`,
+				);
+				return strategy;
+			}
+
+			// Fallback to modal (existing behavior)
 			const modal = this.modalFactory(this.app, analysis, message, session);
 			const res = await modal.openAndGetChoice();
 			const choice = res.choice ?? "skip";
@@ -201,7 +212,6 @@ export class MergeHandler {
 		opts?: { signal?: AbortSignal },
 	): Promise<Result<MergeSuccessResult, AppFailure>> {
 		return this.mergeQueue.run(`merge:${file.path}`, async () => {
-			// 1. [SHELL] Gather all necessary state from I/O
 			const idResult = await this.persistence.ensureId(file);
 			if (isErr(idResult)) {
 				return err({
@@ -221,7 +231,6 @@ export class MergeHandler {
 				await this.templateManager.getCompiledTemplateResult();
 			if (isErr(compiledResult)) return err(compiledResult.error);
 
-			// 2. [CORE] Call the pure preparer function with all gathered state
 			let prepResult: noteCore.MergePreparation;
 			if (mode === "replace") {
 				prepResult = noteCore.prepareForReplace(
@@ -247,18 +256,15 @@ export class MergeHandler {
 				prepResult = mergePrepResult.value;
 			}
 
-			// Handle diagnostics if snapshot was missing
 			if (!prepResult.snapshotUsed && prepResult.kind === "conflicted") {
 				this.log.info(
 					`Merge for ${file.path} used fallback strategy: ${prepResult.diagnostics.reason}`,
 				);
-				// Show user notice if there's a user message
 				if (prepResult.diagnostics.userMessage) {
 					new Notice(prepResult.diagnostics.userMessage);
 				}
 			}
 
-			// 3. [SHELL] Commit the result using the atomic persistence service
 			const atomicRes = await this.persistence.updateNoteAtomically({
 				file,
 				updater: prepResult.updater,

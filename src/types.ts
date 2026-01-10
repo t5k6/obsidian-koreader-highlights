@@ -20,6 +20,7 @@ export interface BaseMetadata {
 	keywords?: string;
 	series?: string;
 	language?: string;
+	identifiers?: string;
 }
 
 export interface DocProps extends BaseMetadata {}
@@ -62,6 +63,10 @@ export interface ReadingProgress {
 	firstReadDate: Date | null;
 	lastReadDate: Date | null;
 	readingStatus: ReadingStatus;
+	totalReadSeconds: number;
+	sessionCount: number;
+	readingStreak: number; // Consecutive days with reading activity
+	avgSessionDuration: number; // Average session duration in seconds
 }
 
 // Represents data directly from the 'book' table joined with base metadata needs
@@ -102,6 +107,16 @@ export interface LuaMetadata {
 	};
 	originalFilePath?: string;
 	md5?: string;
+	percentFinished?: number; // 0.0 to 1.0
+	luaSummary?: {
+		rating?: number;
+		status?: string;
+		modified?: string;
+	};
+	luaStats?: {
+		pages?: number;
+		language?: string;
+	};
 }
 
 // --- Frontmatter Data Structure ---
@@ -117,10 +132,10 @@ export interface FrontmatterData {
 	highlightCount?: number;
 	noteCount?: number;
 	readingStatus?: ReadingStatus;
-	progress?: string;
+	progress?: string; // Formatted as percentage
 	lastRead?: string;
 	firstRead?: string;
-	totalReadTime?: string;
+	readTime?: string | number; // Output field, format depends on settings
 	averageTimePerPage?: string;
 	[key: string]: string | string[] | number | undefined;
 }
@@ -141,6 +156,7 @@ export interface FrontmatterSettings {
 	customFields: string[];
 	useUnknownAuthor: boolean;
 	keywordsAsTags: "none" | "duplicate" | "replace";
+	durationFormat: "formatted" | "seconds";
 }
 
 export interface KoreaderTemplateSettings {
@@ -168,6 +184,8 @@ export interface KoreaderHighlightImporterSettings {
 	fileNameTemplate: string;
 	useCustomFileNameTemplate: boolean;
 	autoMergeOnAddition: boolean;
+	silentImport: boolean;
+	defaultMergeStrategy: "merge" | "replace" | "skip";
 	frontmatter: FrontmatterSettings;
 	maxHighlightGap: number;
 	maxTimeGapMinutes: number;

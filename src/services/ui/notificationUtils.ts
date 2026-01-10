@@ -8,7 +8,7 @@ import type {
 import { formatAppFailure } from "src/lib/errors/types";
 
 /**
- * Shell-level helper: awaits an AppResult-returning promise and shows a Notice on Err.
+ * Awaits an AppResult-returning promise and shows a Notice on Err.
  * Keeps core services free of UI concerns.
  */
 // Overloads to support both AppResult and generic Result-based call sites
@@ -27,30 +27,35 @@ export async function notifyOnError<T, E = AppFailure>(
 ): Promise<Result<T, E>> {
 	const res = await operation;
 	if (isErr(res)) {
-		const msg = ops?.message
-			? typeof ops.message === "function"
-				? ops.message(res.error as any)
-				: ops.message
-			: hasKind(res.error)
-				? formatAppFailure(res.error as unknown as AppFailure)
-				: formatFallback(res.error);
+		let msg: string;
+		if (ops?.message) {
+			msg =
+				typeof ops.message === "function"
+					? ops.message(res.error as any)
+					: ops.message;
+		} else if (
+			!!res.error &&
+			typeof res.error === "object" &&
+			"kind" in (res.error as any)
+		) {
+			msg = formatAppFailure(res.error as unknown as AppFailure);
+		} else {
+			const err = res.error;
+			if (typeof err === "string") {
+				msg = err;
+			} else if (err instanceof Error) {
+				msg = err.message;
+			} else {
+				try {
+					msg = JSON.stringify(err);
+				} catch {
+					msg = "Operation failed";
+				}
+			}
+		}
 		new Notice(msg, ops?.timeout ?? 7000);
 	}
 	return res;
-}
-
-function hasKind(x: unknown): x is { kind: string } {
-	return !!x && typeof x === "object" && "kind" in (x as any);
-}
-
-function formatFallback(err: unknown): string {
-	if (typeof err === "string") return err;
-	if (err instanceof Error) return err.message;
-	try {
-		return JSON.stringify(err);
-	} catch {
-		return "Operation failed";
-	}
 }
 
 /**
@@ -88,17 +93,17 @@ export async function notifyOnFsError<T>(
 	return res;
 }
 
-// Helper guard to identify filesystem-related failures
+const FS_KINDS = new Set([
+	"NotFound",
+	"PermissionDenied",
+	"NotADirectory",
+	"IsADirectory",
+	"AlreadyExists",
+	"NameTooLong",
+	"WriteFailed",
+	"ReadFailed",
+]);
+
 function isFileSystemFailure(e: AppFailure): e is FileSystemFailure {
-	const fsKinds = new Set([
-		"NotFound",
-		"PermissionDenied",
-		"NotADirectory",
-		"IsADirectory",
-		"AlreadyExists",
-		"NameTooLong",
-		"WriteFailed",
-		"ReadFailed",
-	]);
-	return fsKinds.has(e.kind);
+	return FS_KINDS.has(e.kind);
 }

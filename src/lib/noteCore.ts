@@ -28,7 +28,7 @@ import type { ParseFailure } from "./errors/types";
 import { FRONTMATTER_REGEX, parseFrontmatter } from "./frontmatter";
 import { mergeNoteBodies } from "./merge/mergeCore";
 import { formatForDisplay } from "./metadata/formatter";
-import { computeBookKey } from "./metadata/identity";
+import { buildBookKey } from "./metadata/identity";
 import {
 	mergeNormalizedMetadata,
 	normalizeBookMetadata,
@@ -131,7 +131,7 @@ export function extractBookMetadata(
 
 	if (!normalized.title && normalized.authors.length === 0) return null;
 
-	const key = computeBookKey(normalized);
+	const key = buildBookKey(normalized);
 
 	return {
 		title: normalized.title,
@@ -242,21 +242,16 @@ export function prepareForReplace(
 	fmSettings: FrontmatterSettings,
 ): MergePreparation {
 	const updater: NoteUpdater = (currentDoc: NoteDoc) => {
-		// 1. Normalize inputs
 		const currentMeta = normalizeFrontmatter(currentDoc.frontmatter);
 		const newMeta = normalizeBookMetadata(lua);
 
-		// 2. Merge logically
 		const mergedMeta = mergeNormalizedMetadata(
 			currentMeta,
 			newMeta,
 			fmSettings,
 		);
 
-		// 3. Format for display
 		const displayFm = formatForDisplay(mergedMeta, fmSettings);
-
-		// 4. Preserve Critical Identity (UID)
 		if (currentDoc.frontmatter[KOHL_UID_KEY]) {
 			(displayFm as any)[KOHL_UID_KEY] = currentDoc.frontmatter[
 				KOHL_UID_KEY
@@ -319,14 +314,12 @@ export function prepareForMerge(params: {
 	}
 
 	const updater: NoteUpdater = (currentDoc: NoteDoc) => {
-		// 1. Text Merge
 		const { mergedBody, hasConflict } = mergeNoteBodies(
 			baseDoc.value.body,
 			currentDoc.body,
 			incomingBody,
 		);
 
-		// 2. Metadata Merge
 		const currentMeta = normalizeFrontmatter(currentDoc.frontmatter);
 		const newMeta = normalizeBookMetadata(lua);
 		const mergedMeta = mergeNormalizedMetadata(
@@ -335,8 +328,6 @@ export function prepareForMerge(params: {
 			settings.frontmatter,
 		);
 		const displayFm = formatForDisplay(mergedMeta, settings.frontmatter);
-
-		// 3. Metadata Housekeeping
 		(displayFm as any)["last-merged"] = new Date().toISOString().slice(0, 10);
 		if (hasConflict || !snapshotUsedForMerge) {
 			(displayFm as any)["conflicts"] = "unresolved";

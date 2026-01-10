@@ -1,6 +1,22 @@
 import { Pathing } from "../pathing";
 import type { NormalizedMetadata } from "./types";
 
+export type BookKeyInput = {
+	// allow both normalized and raw doc_props-like inputs
+	title?: string | null | undefined;
+	authors?: string[] | string | null | undefined;
+};
+
+function normalizeAuthors(authors: BookKeyInput["authors"]): string[] {
+	if (!authors) return [];
+	if (Array.isArray(authors)) return authors.filter(Boolean);
+	// DocProps-style string; treat commas/newlines as separators (best-effort)
+	return String(authors)
+		.split(/\r?\n|,/)
+		.map((a) => a.trim())
+		.filter(Boolean);
+}
+
 /**
  * Known strong identifier schemes that are stable across exports/devices.
  * These can safely be used as primary keys when present.
@@ -79,28 +95,28 @@ export function parseIdentifiers(
  * Helper to determine if an authors string is clearly URL-like, which should not be
  * treated as a strong identity signal.
  */
-export function isUrlLikeAuthor(authors: string[] | undefined): boolean {
-	if (!authors || authors.length === 0) return false;
-	const combined = authors.join(" ").trim().toLowerCase();
+export function isUrlLikeAuthor(authors: BookKeyInput["authors"]): boolean {
+	const normalized = normalizeAuthors(authors);
+	if (normalized.length === 0) return false;
+	const combined = normalized.join(" ").trim().toLowerCase();
 	return combined.startsWith("http://") || combined.startsWith("https://");
 }
 
 /**
- * Builds a normalized book key from normalized metadata.
+ * Builds a normalized book key from either normalized metadata or raw doc props.
  * This creates a stable textual identifier for deduplication and indexing.
  *
- * Unlike the old buildNormalizedBookKey, this operates on already normalized data
- * to eliminate inverse formatting bugs between display and identity generation.
+ * Handles both array and comma/newline-separated author formats, and normalizes
+ * both title and authors to create a consistent key for matching and deduplication.
  */
-export function computeBookKey(meta: NormalizedMetadata): string {
-	const authors = meta.authors || [];
-	const title = meta.title || "";
+export function buildBookKey(input: BookKeyInput): string {
+	const authors = normalizeAuthors(input.authors);
+	const title = input.title ?? "";
 
 	const titleSlug = Pathing.toMatchKey(title);
 
 	let authorsSlug = "";
 	if (!isUrlLikeAuthor(authors)) {
-		// Join normalized authors with space, then normalize
 		const authorsText = authors.join(" ");
 		authorsSlug = Pathing.toMatchKey(authorsText);
 	}
@@ -112,12 +128,27 @@ export function computeBookKey(meta: NormalizedMetadata): string {
  * Select the best strong identifiers (if any) from normalized metadata.
  * Callers can use these to join with KOReader stats DB or their own index.
  */
-export function getStrongIdentifiers(
-	meta: NormalizedMetadata,
-): ParsedIdentifier[] {
-	// Note: identifiers field may be in meta as a custom field, but typically comes from raw doc_props
-	// For now, return empty array - this may need expansion if identifiers are stored in normalized metadata
-	return [];
+/**
+ * Select the best strong identifiers (if any) from a doc_props-like object.
+ *
+ * Note: `DocProps` does not currently declare an `identifiers` field in its type,
+ * but KOReader provides it in practice. We therefore accept any object with an
+ * optional `identifiers` string and read it dynamically.
+ */
+export function getStrongIdentifiers(input: unknown): ParsedIdentifier[] {
+	const identifiers = (input as any)?.identifiers as
+		| string
+		| string[]
+		| null
+		| undefined;
+
+	const raw = Array.isArray(identifiers)
+		? identifiers.join("\n")
+		: (identifiers as string | null | undefined);
+
+	return parseIdentifiers(raw).filter(
+		(id) => id.strength === "strong" && !!id.value,
+	);
 }
 
 /**

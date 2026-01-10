@@ -12,6 +12,9 @@ main.js
 *.map
 src/binaries/sql-wasm-base64.ts
 
+# Test coverage
+coverage
+
 # Saved settings and output from use
 data.json
 backups

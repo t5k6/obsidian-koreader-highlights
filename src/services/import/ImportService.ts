@@ -4,7 +4,7 @@ import { isAbortError, throwIfAborted } from "src/lib/concurrency/cancellation";
 import { KeyedQueue } from "src/lib/concurrency/concurrency";
 import { isErr } from "src/lib/core/result";
 import { formatAppFailure } from "src/lib/errors/types";
-import { bookKeyFromDocProps } from "src/lib/formatting/formatUtils";
+import { buildBookKey } from "src/lib/metadata/identity";
 import { parse as parseMetadata } from "src/lib/parsing/luaParser";
 import { Pathing } from "src/lib/pathing";
 import type KoreaderImporterPlugin from "src/main";
@@ -157,7 +157,7 @@ export class ImportService {
 				size: ctx.stats?.size ?? 0,
 				newestAnnotationTs: ctx.latestTs,
 				bookKey: ctx.luaMetadata
-					? bookKeyFromDocProps(ctx.luaMetadata.docProps)
+					? buildBookKey(ctx.luaMetadata.docProps)
 					: null,
 				md5: ctx.luaMetadata?.md5 ?? null,
 				vaultPath: exec.file?.path ?? null,
@@ -326,11 +326,23 @@ export class ImportService {
 					const now = Date.now();
 					const data = await this.plugin.pluginDataStore.load();
 					const lastRun = data.lastSnapshotGCRunAt ?? 0;
-					const rateLimitMs = 24 * 60 * 60 * 1000; // 24 hours
+					const rateLimitMs = 6 * 60 * 60 * 1000; // 6 hours (reduced from 24h)
+					const deletionThreshold = 20; // Bypass rate limit if 20+ deletions
+					const deletionsSinceLastGC =
+						this.persistence.getDeletionsSinceLastGC();
 
-					if (now - lastRun >= rateLimitMs) {
+					// Run GC if: 6 hours passed OR many deletions occurred
+					const shouldRunGC =
+						now - lastRun >= rateLimitMs ||
+						deletionsSinceLastGC >= deletionThreshold;
+
+					if (shouldRunGC) {
+						const reason =
+							deletionsSinceLastGC >= deletionThreshold
+								? `${deletionsSinceLastGC} deletions threshold reached`
+								: "6-hour interval elapsed";
 						this.log.info(
-							"Automatic snapshot garbage collection is due. Starting...",
+							`Automatic snapshot garbage collection triggered (${reason}). Starting...`,
 						);
 						const gcResult = await this.persistence.collectOrphanedSnapshots(
 							this.plugin.settings.highlightsFolder,
@@ -342,7 +354,7 @@ export class ImportService {
 							await this.plugin.pluginDataStore.save(updatedData);
 
 							this.log.info(
-								`Automatic snapshot GC finished. Next run will be eligible after ${new Date(now + rateLimitMs).toISOString()}`,
+								`Automatic snapshot GC finished (${reason}). Scanned: ${gcResult.scanned}, Deleted: ${gcResult.deleted}, Failed: ${gcResult.failed}`,
 							);
 						}
 					}
@@ -400,13 +412,11 @@ export class ImportService {
 	): Promise<ExecResult> {
 		throwIfAborted(signal);
 
-		// 1. Read content (I/O)
 		const luaContent = await this.device.readMetadataFileContent(
 			initialCtx.sdrPath,
 		);
 		if (!luaContent) return { status: "skipped", file: null, warnings: [] };
 
-		// 2. Parse metadata (pure function)
 		const parseResult = parseLuaMetadata(luaContent, initialCtx.sdrPath);
 		if (isErr(parseResult)) {
 			this.log.warn(
@@ -417,7 +427,6 @@ export class ImportService {
 
 		const { meta, diagnostics: parseDiagnostics } = parseResult.value;
 
-		// 3. Get book statistics (I/O)
 		const stats = await this.device.findBookStatistics(
 			meta.docProps.title,
 			meta.docProps.authors,
@@ -425,10 +434,7 @@ export class ImportService {
 			signal,
 		);
 
-		// 4. Enrich with statistics (pure function)
 		const enrichedMeta = enrichWithStatistics(meta, stats);
-
-		// 5. Construct enriched context
 		const enrichedCtx: EnrichedImportContext = {
 			...initialCtx,
 			luaMetadata: enrichedMeta,
@@ -440,7 +446,7 @@ export class ImportService {
 				) ?? null,
 		};
 
-		const bookKey = bookKeyFromDocProps(enrichedMeta.docProps);
+		const bookKey = buildBookKey(enrichedMeta.docProps);
 
 		// Log diagnostics
 		parseDiagnostics.forEach(
@@ -451,7 +457,6 @@ export class ImportService {
 			},
 		);
 
-		// 3. Queue the rest of the pipeline
 		return this.bookPipelineQueue.run(bookKey, async () => {
 			try {
 				throwIfAborted(signal);

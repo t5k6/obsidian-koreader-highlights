@@ -80,6 +80,146 @@ export function mapBookRow(raw: Record<string, unknown>): BookStatistics {
 }
 
 /**
+ * Calculates reading streak (consecutive days with reading activity).
+ * Returns the current streak count (0 if no recent activity or streak broken).
+ */
+export function calculateReadingStreak(sessions: PageStatData[]): number {
+	if (sessions.length === 0) return 0;
+
+	// Helper to get local date string (YYYY-MM-DD) from timestamp
+	const getLocalDateKey = (timestamp: number): string => {
+		const date = new Date(timestamp * 1000);
+		const year = date.getFullYear();
+		const month = String(date.getMonth() + 1).padStart(2, "0");
+		const day = String(date.getDate()).padStart(2, "0");
+		return `${year}-${month}-${day}`;
+	};
+
+	// Get unique days (as YYYY-MM-DD strings) from sessions
+	const readingDays = new Set<string>();
+	for (const session of sessions) {
+		const dayKey = getLocalDateKey(session.start_time);
+		readingDays.add(dayKey);
+	}
+
+	// Convert to sorted array (most recent first)
+	const uniqueDays = Array.from(readingDays).sort((a, b) => b.localeCompare(a));
+
+	if (uniqueDays.length === 0) return 0;
+
+	// Get today and yesterday in local time
+	const now = new Date();
+	const todayKey = getLocalDateKey(Math.floor(now.getTime() / 1000));
+
+	const yesterday = new Date(now);
+	yesterday.setDate(yesterday.getDate() - 1);
+	const yesterdayKey = getLocalDateKey(Math.floor(yesterday.getTime() / 1000));
+
+	const mostRecentDay = uniqueDays[0];
+
+	// Streak is broken if the most recent reading was more than 1 day ago
+	if (mostRecentDay !== todayKey && mostRecentDay !== yesterdayKey) {
+		return 0;
+	}
+
+	// Count consecutive days backwards from the most recent day
+	let streak = 1;
+
+	// Parse the most recent day to start counting backwards
+	const [year, month, day] = mostRecentDay.split("-").map(Number);
+	const currentDate = new Date(year, month - 1, day);
+
+	for (let i = 1; i < uniqueDays.length; i++) {
+		// Move back one day
+		currentDate.setDate(currentDate.getDate() - 1);
+		const expectedDay = getLocalDateKey(
+			Math.floor(currentDate.getTime() / 1000),
+		);
+
+		if (uniqueDays[i] === expectedDay) {
+			streak++;
+		} else {
+			// Streak is broken
+			break;
+		}
+	}
+
+	return streak;
+}
+
+/**
+ * Session grouping threshold: if more than 30 minutes pass between page reads,
+ * consider it a new reading session.
+ */
+const SESSION_GAP_THRESHOLD_SECONDS = 30 * 60; // 30 minutes
+
+/**
+ * Groups page reads into reading sessions based on time gaps.
+ * A new session starts when the gap between consecutive page reads exceeds the threshold.
+ */
+export function groupPageReadsIntoSessions(
+	pageReads: PageStatData[],
+): Array<{ startTime: number; endTime: number; duration: number }> {
+	if (pageReads.length === 0) return [];
+
+	// Sort by start_time to ensure chronological order
+	const sorted = [...pageReads].sort((a, b) => a.start_time - b.start_time);
+
+	const sessions: Array<{
+		startTime: number;
+		endTime: number;
+		duration: number;
+	}> = [];
+
+	let sessionStart = sorted[0].start_time;
+	let sessionEnd = sorted[0].start_time + (sorted[0].duration || 0);
+
+	for (let i = 1; i < sorted.length; i++) {
+		const currentPageStart = sorted[i].start_time;
+		const currentPageEnd = currentPageStart + (sorted[i].duration || 0);
+		const gapFromPreviousPage = currentPageStart - sessionEnd;
+
+		if (gapFromPreviousPage > SESSION_GAP_THRESHOLD_SECONDS) {
+			// Gap is too large - finish current session and start a new one
+			sessions.push({
+				startTime: sessionStart,
+				endTime: sessionEnd,
+				duration: sessionEnd - sessionStart,
+			});
+			sessionStart = currentPageStart;
+			sessionEnd = currentPageEnd;
+		} else {
+			// Continue current session
+			sessionEnd = currentPageEnd;
+		}
+	}
+
+	// Don't forget the last session
+	sessions.push({
+		startTime: sessionStart,
+		endTime: sessionEnd,
+		duration: sessionEnd - sessionStart,
+	});
+
+	return sessions;
+}
+
+/**
+ * Calculates average reading session duration in seconds.
+ * Groups page reads into sessions (gap > 30 min = new session), then averages session lengths.
+ * Returns 0 if no sessions or invalid data.
+ */
+export function calculateAverageSessionDuration(
+	pageReads: PageStatData[],
+): number {
+	const sessions = groupPageReadsIntoSessions(pageReads);
+	if (sessions.length === 0) return 0;
+
+	const totalDuration = sessions.reduce((sum, s) => sum + s.duration, 0);
+	return Math.round(totalDuration / sessions.length);
+}
+
+/**
  * Calculates derived reading progress.
  */
 export function calculateDerivedStatistics(
@@ -121,6 +261,10 @@ export function calculateDerivedStatistics(
 		firstReadDate,
 		lastReadDate,
 		readingStatus,
+		totalReadSeconds: totalReadTime,
+		sessionCount: sessions.length,
+		readingStreak: calculateReadingStreak(sessions),
+		avgSessionDuration: calculateAverageSessionDuration(sessions),
 	};
 }
 

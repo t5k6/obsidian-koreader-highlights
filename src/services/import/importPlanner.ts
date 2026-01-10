@@ -4,7 +4,7 @@ import { isErr, ok, type Result } from "src/lib/core/result";
 import { timed } from "src/lib/core/timing";
 import { IndexRepository } from "src/lib/database/indexRepository";
 import type { ParseFailure } from "src/lib/errors/types";
-import { bookKeyFromDocProps } from "src/lib/formatting";
+import { buildBookKey } from "src/lib/metadata/identity";
 import type { Diagnostic } from "src/lib/parsing/luaParser";
 import { parse as parseMetadata } from "src/lib/parsing/luaParser";
 import { Pathing } from "src/lib/pathing";
@@ -123,7 +123,7 @@ export function preFlight(
 			) ?? null,
 	};
 
-	const bookKey = bookKeyFromDocProps(ctx.luaMetadata.docProps);
+	const bookKey = buildBookKey(ctx.luaMetadata.docProps);
 
 	return ok({ ctx, diagnostics, bookKey });
 }
@@ -314,7 +314,7 @@ export async function planImport(
 		);
 
 		if (!shouldProcess) {
-			const key = bookKeyFromDocProps(ctx.luaMetadata.docProps);
+			const key = buildBookKey(ctx.luaMetadata.docProps);
 			const targetPaths = await io.index.findExistingBookFiles(key);
 			const { missingPaths, diagnostics: missingTargetDiagnostics } =
 				await collectMissingTargets(targetPaths, io.fs, opts?.signal);

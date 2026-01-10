@@ -169,34 +169,6 @@ export function formatUnixTimestamp(timestamp: number): string {
 }
 
 /**
- * Converts seconds to human-readable time format.
- * @param totalSeconds - Number of seconds to convert
- * @returns Formatted string like "2h 30m 45s" or "45s"
- */
-export function secondsToHoursMinutesSeconds(totalSeconds: number): string {
-	if (totalSeconds < 0) totalSeconds = 0;
-
-	const hours = Math.floor(totalSeconds / 3600);
-	const minutes = Math.floor((totalSeconds % 3600) / 60);
-	const seconds = Math.floor(totalSeconds % 60);
-
-	let result = "";
-	if (hours > 0) {
-		result += `${hours}h `;
-	}
-	if (minutes > 0 || hours > 0) {
-		result += `${minutes}m `;
-	}
-	if (seconds > 0 || result === "") {
-		result += `${seconds}s`;
-	}
-
-	result = result.trim();
-
-	return result === "" ? "0s" : result;
-}
-
-/**
  * Formats a duration in seconds as a compact "Xh Ym Zs" style string.
  * Rules:
  * - No leading 0h.
@@ -248,15 +220,4 @@ export function formatShortDuration(totalSeconds: number): string {
 	}
 
 	return `${minutes}m ${seconds}s`;
-}
-
-/**
- * Converts seconds to hours and minutes format.
- * @param seconds - Number of seconds to convert
- * @returns Formatted string like "2h 30m"
- */
-export function secondsToHoursMinutes(seconds: number): string {
-	const hours = Math.floor(seconds / 3600);
-	const minutes = Math.floor((seconds % 3600) / 60);
-	return `${hours}h ${minutes}m`;
 }

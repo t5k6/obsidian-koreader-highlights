@@ -2,20 +2,7 @@ import { sha1Hex } from "src/lib/core/crypto";
 import { err, ok, type Result } from "src/lib/core/result";
 import type { CfiParseError } from "src/lib/errors/types";
 import { normalizeWhitespace } from "src/lib/strings/stringUtils";
-import type { Annotation, DocProps, PositionObject } from "src/types";
-import { buildNormalizedBookKey } from "./bookIdentity";
-
-/**
- * Generates a deterministic key from document properties.
- * Used for consistent book identification across imports.
- * @param props - Document properties containing title and authors
- * @returns Normalized key in format "author::title"
- *
- * NOTE: Kept for backward compatibility. New code should use buildNormalizedBookKey.
- */
-export function bookKeyFromDocProps(props: DocProps): string {
-	return buildNormalizedBookKey(props);
-}
+import type { Annotation, PositionObject } from "src/types";
 
 interface CfiParts {
 	fullPath: string; // e.g., /6/14[id6]!/4/2/6/2,/1
@@ -146,11 +133,6 @@ export function areHighlightsSuccessive(
 	return pos2_start.offset - pos1_end.offset <= maxGap;
 }
 
-// Helper function to extract numbers from a string for sorting
-function getNumericSortKey(s: string): number[] {
-	return (s.match(/\d+/g) || []).map(Number);
-}
-
 /**
  * Comparison function for sorting annotations.
  * Sorts by: page number, position on page, then datetime.
@@ -173,8 +155,8 @@ export function compareAnnotations(a: Annotation, b: Annotation): number {
 	if (posA && posB) {
 		if (posA.node !== posB.node) {
 			// Compare node paths numerically first
-			const keyA = getNumericSortKey(posA.node);
-			const keyB = getNumericSortKey(posB.node);
+			const keyA = (posA.node.match(/\d+/g) || []).map(Number);
+			const keyB = (posB.node.match(/\d+/g) || []).map(Number);
 			for (let i = 0; i < Math.min(keyA.length, keyB.length); i++) {
 				if (keyA[i] !== keyB[i]) {
 					return keyA[i] - keyB[i];

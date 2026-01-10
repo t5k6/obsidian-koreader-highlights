@@ -37,13 +37,13 @@ const FIELD_FORMATTERS: Record<
 		);
 		return r.ok ? r.value : "";
 	},
-	totalReadTime: (rawValue) => {
-		if (typeof rawValue === "number") return formatDurationHms(rawValue);
-		if (typeof rawValue === "string" && /^\d+$/.test(rawValue.trim())) {
-			const n = Number(rawValue.trim());
-			return Number.isFinite(n) ? formatDurationHms(n) : rawValue;
-		}
-		return String(rawValue);
+	readTime: (rawValue, opts) => {
+		const seconds = typeof rawValue === "number" ? rawValue : null;
+		if (seconds === null) return rawValue;
+
+		return opts.durationFormat === "seconds"
+			? seconds
+			: formatDurationHms(seconds);
 	},
 	averageTimePerPage: (rawValue) => {
 		if (typeof rawValue === "number") return formatShortDuration(rawValue);
@@ -100,6 +100,25 @@ const FIELD_FORMATTERS: Record<
 		});
 	},
 	description: (rawValue) => stripHtml(String(rawValue ?? "")),
+	rating: (rawValue) => {
+		// Clamp rating between 1-5
+		if (typeof rawValue === "number") {
+			return Math.max(1, Math.min(5, rawValue));
+		}
+		return rawValue;
+	},
+	sessionCount: undefined, // Simple integer, pass through
+	readingStreak: (rawValue) => {
+		const n = Number(rawValue);
+		if (!Number.isFinite(n) || n <= 0) return undefined;
+		return n === 1 ? "1 day" : `${n} days`;
+	},
+	avgSessionDuration: (rawValue) => {
+		if (typeof rawValue === "number" && rawValue > 0) {
+			return formatShortDuration(rawValue);
+		}
+		return undefined;
+	},
 	// Other fields: undefined for pass-through
 	title: undefined,
 	series: undefined,
@@ -113,16 +132,42 @@ const FIELD_FORMATTERS: Record<
 /**
  * Checks if a field value should be included in the display frontmatter.
  * Hides empty/null values and zero counts by default.
+ *
+ * Applies contextual filtering based on reading status to keep frontmatter clean:
+ * - Progress is only shown for actively reading books (ongoing status)
  */
 function shouldIncludeField(
 	key: keyof FrontmatterData,
 	value: unknown,
+	data: NormalizedMetadata,
 ): boolean {
 	if (value == null) return false;
 	if (typeof value === "string" && value.trim() === "") return false;
 
 	// Restore the empty array check that was present in the original hasValue()
 	if (Array.isArray(value) && value.length === 0) return false;
+
+	// CONTEXTUAL FILTERING: Hide progress for completed books
+	// Progress is process state, not archive state - only show while actively reading
+	// Note: unstarted books are never imported (filtered at import stage), so we don't handle them here
+	if (key === "progress" && data.readingStatus === "completed") {
+		return false;
+	}
+
+	// CONTEXTUAL FILTERING: Hide raw session count (replaced by streak/avgSession for ongoing)
+	// sessionCount is internal metadata, not user-facing insight
+	if (key === "sessionCount") {
+		return false;
+	}
+
+	// CONTEXTUAL FILTERING: Show reading momentum metrics only for ongoing books
+	// Streak and average session duration are "process metrics" for active reading
+	if (
+		(key === "readingStreak" || key === "avgSessionDuration") &&
+		data.readingStatus !== "ongoing"
+	) {
+		return false;
+	}
 
 	// Don't include zero values for counts/statistics, except pages which is meaningful to show
 	if ((key === "highlightCount" || key === "noteCount") && value === 0)
@@ -145,16 +190,22 @@ export function formatForDisplay(
 	const result: Partial<FrontmatterData> = {};
 	const processedKeys = new Set<string>();
 
+	// Map totalReadSeconds to readTime for formatting
+	const dataWithReadTime = { ...data };
+	if (data.totalReadSeconds !== undefined) {
+		(dataWithReadTime as any).readTime = data.totalReadSeconds;
+		delete (dataWithReadTime as any).totalReadSeconds;
+	}
+
 	// --- Handle Keywords to Tags Logic ---
 	const { keywordsAsTags } = opts;
 	let keywordsToProcess: string[] = [];
 
-	// Extract keywords if available (from data.keywords)
-	if (data.keywords && Array.isArray(data.keywords)) {
-		keywordsToProcess = data.keywords;
-	} else if (typeof data.keywords === "string") {
-		// Fallback if somehow it's a string, split by comma
-		keywordsToProcess = splitAndTrim(data.keywords, ",");
+	// Extract keywords if available (from dataWithReadTime.keywords)
+	if (dataWithReadTime.keywords && Array.isArray(dataWithReadTime.keywords)) {
+		keywordsToProcess = dataWithReadTime.keywords;
+	} else if (typeof dataWithReadTime.keywords === "string") {
+		keywordsToProcess = splitAndTrim(dataWithReadTime.keywords, ",");
 	}
 
 	if (keywordsAsTags !== "none" && keywordsToProcess.length > 0) {
@@ -167,22 +218,22 @@ export function formatForDisplay(
 					.replace(/\s+/g, "-") // Spaces to dashes
 					.replace(/[^a-zA-Z0-9\-_/]/g, ""), // Remove any remaining invalid chars (Obsidian tags: alphanum, -, _, /)
 		);
-		// Inject tags into data so it gets processed
-		(data as any).tags = tags;
+		(dataWithReadTime as any).tags = tags;
 	}
 
 	if (keywordsAsTags === "replace") {
-		// Remove keywords from data so it doesn't get processed
-		delete data.keywords;
+		delete (dataWithReadTime as any).keywords;
 	}
 	// -------------------------------------
 
-	// Helper to format and add a single field
 	const processField = (key: string, rawValue: unknown) => {
 		const canonicalKey = key as keyof FrontmatterData;
 
 		if (disabledFields.has(key)) return;
-		if (processedKeys.has(key)) return; // Prevent duplicates
+		if (processedKeys.has(key)) return;
+
+		// Skip internal metadata fields that should not appear in frontmatter
+		if (key === "identifiers" || key === "sessionCount") return;
 
 		let displayValue: unknown = rawValue;
 		const formatter = FIELD_FORMATTERS[canonicalKey];
@@ -190,24 +241,21 @@ export function formatForDisplay(
 			displayValue = formatter(rawValue, opts);
 		}
 
-		if (shouldIncludeField(canonicalKey, displayValue)) {
+		if (shouldIncludeField(canonicalKey, displayValue, dataWithReadTime)) {
 			const friendlyKey = toFriendlyFieldKey(key);
 			(result as any)[friendlyKey] = displayValue;
 		}
 		processedKeys.add(key);
 	};
 
-	// 1. Process keys in the defined display order (Bibliographic -> Stats)
 	for (const key of DISPLAY_KEY_ORDER) {
-		// Only process if the data object actually has this key
-		if (Object.hasOwn(data, key as string)) {
-			processField(key as string, data[key as string]);
+		if (Object.hasOwn(dataWithReadTime, key as string)) {
+			processField(key as string, (dataWithReadTime as any)[key as string]);
 		}
 	}
 
-	// 2. Process any remaining keys (Custom fields, internal flags)
-	for (const key of Object.keys(data)) {
-		processField(key, data[key]);
+	for (const key of Object.keys(dataWithReadTime)) {
+		processField(key, (dataWithReadTime as any)[key]);
 	}
 
 	return result as FrontmatterData;

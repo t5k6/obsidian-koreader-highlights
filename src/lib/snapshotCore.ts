@@ -219,9 +219,52 @@ export function verifySnapshotIntegrity(
 /**
  * Compose snapshot content with frontmatter header containing integrity hash.
  * Uses shared frontmatter composition for consistency.
+ *
+ * @param hash - The SHA-256 hash of the body content
+ * @param body - The note content to store in the snapshot
+ * @param metadata - Optional metadata for debugging and tracking
  */
-export function composeSnapshotContent(hash: string, body: string): string {
-	return composeFrontmatter({ sha256: hash }, body);
+export function composeSnapshotContent(
+	hash: string,
+	body: string,
+	metadata?: {
+		uid?: string;
+		vaultPath?: string;
+		createdAt?: number;
+	},
+): string {
+	// Build the frontmatter with hash and optional metadata
+	const frontmatter: Record<string, unknown> = { sha256: hash };
+
+	// Add metadata comments after frontmatter for debugging
+	// These are HTML comments, so they won't appear in reading mode
+	let metadataComment = "";
+	if (metadata) {
+		const lines = ["<!-- KOHL SNAPSHOT METADATA"];
+		if (metadata.uid) lines.push(`  uid: ${metadata.uid}`);
+		if (metadata.vaultPath) lines.push(`  source: ${metadata.vaultPath}`);
+		if (metadata.createdAt) {
+			const date = new Date(metadata.createdAt).toISOString();
+			lines.push(`  created: ${date}`);
+		}
+		lines.push("-->");
+		metadataComment = lines.join("\n") + "\n\n";
+	}
+
+	const contentWithFrontmatter = composeFrontmatter(frontmatter, body);
+
+	// Insert metadata comment after frontmatter but before body
+	// Frontmatter ends with "---\n\n", so insert after that
+	const frontmatterEnd = contentWithFrontmatter.indexOf("---\n\n") + 5; // "---\n\n".length
+	if (frontmatterEnd > 4 && metadata) {
+		return (
+			contentWithFrontmatter.slice(0, frontmatterEnd) +
+			metadataComment +
+			contentWithFrontmatter.slice(frontmatterEnd)
+		);
+	}
+
+	return contentWithFrontmatter;
 }
 
 /**

@@ -218,9 +218,16 @@ export function toMatchKey(
 	let s = String(input ?? "").trim();
 	if (!s) return "";
 
+	// Default to NOT stripping non-ASCII characters for matching keys, 
+	// unless explicitly requested. This supports multi-language titles (Chinese, Japanese, etc).
+	const ascii = opts?.ascii ?? false;
+
 	if (o.collapse) s = stringNormalizeWhitespace(s);
-	if (o.ascii) s = stringStripDiacritics(s);
-	s = s.replace(/[^a-zA-Z0-9]+/g, " ");
+	if (ascii) s = stringStripDiacritics(s);
+
+	// Use Unicode property escapes to keep letters and numbers from any language
+	s = s.replace(/[^\p{L}\p{N}]+/gu, " ");
+
 	if (o.collapse) s = s.replace(/\s+/g, " ").trim();
 	if (o.lower) s = s.toLowerCase();
 	return s || "untitled";

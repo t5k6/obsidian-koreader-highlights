@@ -109,7 +109,7 @@ function normalizeFileSafeOpts(opts?: FileSafeOptions) {
 function normalizeMatchKeyOpts(opts?: MatchKeyOptions) {
 	return {
 		lower: opts?.lower ?? true,
-		ascii: opts?.ascii ?? true,
+		ascii: opts?.ascii ?? false, // Default to false to support multi-language keys
 		collapse: opts?.collapse ?? true,
 	};
 }
@@ -218,12 +218,9 @@ export function toMatchKey(
 	let s = String(input ?? "").trim();
 	if (!s) return "";
 
-	// Default to NOT stripping non-ASCII characters for matching keys, 
-	// unless explicitly requested. This supports multi-language titles (Chinese, Japanese, etc).
-	const ascii = opts?.ascii ?? false;
-
 	if (o.collapse) s = stringNormalizeWhitespace(s);
-	if (ascii) s = stringStripDiacritics(s);
+	// Use normalized option: defaults to false now
+	if (o.ascii) s = stringStripDiacritics(s);
 
 	// Use Unicode property escapes to keep letters and numbers from any language
 	s = s.replace(/[^\p{L}\p{N}]+/gu, " ");

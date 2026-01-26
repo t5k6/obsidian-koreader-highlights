@@ -75,6 +75,11 @@ export const TEMPLATE_FILTERS = {
 		description: "Unescape HTML entities",
 		apply: unescapeHtml,
 	},
+	dateFormat: {
+		description: "Format date string (e.g. YYYYMMDDHHmmss)",
+		requiresArg: true,
+		apply: (s: string, arg?: string): string => formatDate(s, arg),
+	},
 } as const;
 
 export type FilterName = keyof typeof TEMPLATE_FILTERS;
@@ -198,6 +203,8 @@ export function renderGroup(
 		pageno: head.pageref ?? head.pageno ?? 0,
 		pageref: head.pageref,
 		date: formatDate(head.datetime),
+		time: formatDate(head.datetime, "{YYYY}/{MM}/{DD} {HH}:{mm}:{ss}"),
+		randomHex: Math.random().toString(16).slice(2, 6).padEnd(4, "0"),
 
 		localeDate: formatDate(head.datetime, "locale"),
 		dailyNoteLink: formatDate(head.datetime, "daily-note"),
@@ -289,6 +296,7 @@ export function tokenize(
 		parentTokens: TemplateToken[];
 		parentLen: number;
 		openStart: number;
+		condKey?: string;
 	};
 
 	let current = root;
@@ -316,7 +324,14 @@ export function tokenize(
 		const rawTag = template.slice(open + 2, end).trim();
 
 		if (rawTag.startsWith("#")) {
-			const key = rawTag.slice(1).trim();
+			let key = rawTag.slice(1).trim();
+			// Handle {{#if var}} syntax
+			let expectedClose = key;
+			if (key.startsWith("if ")) {
+				expectedClose = "if";
+				key = key.slice(3).trim();
+			}
+
 			if (!key || stack.length >= maxDepth) {
 				// treat as text
 				pushText(template.slice(open, end + 2));
@@ -325,11 +340,12 @@ export function tokenize(
 			}
 			// Open a new frame
 			stack.push({
-				key,
+				key: expectedClose, // Store what we expect to close with (e.g. "if" or "note")
 				tokens: [],
 				parentTokens: current,
 				parentLen: current.length,
 				openStart: open,
+				condKey: key, // Store the actual condition variable
 			});
 			current = stack[stack.length - 1].tokens;
 			i = end + 2;
@@ -341,7 +357,7 @@ export function tokenize(
 			const top = stack[stack.length - 1];
 			if (top && top.key === key) {
 				const frame = stack.pop()!;
-				const cond: TemplateToken = { type: "cond", key, body: frame.tokens };
+				const cond: TemplateToken = { type: "cond", key: frame.condKey ?? frame.key, body: frame.tokens };
 				current = frame.parentTokens;
 				current.push(cond);
 			} else {

@@ -278,8 +278,9 @@ export interface TemplateData {
 	readonly note?: string;
 	readonly notes?: readonly string[];
 	readonly date?: string; // Stable "en-US" format
-	readonly time?: string; // Stable "YYYY/MM/DD HH:mm:ss" format
-	readonly randomHex?: string; // 4-char random hex string
+	readonly time?: string; // Stable "{YYYY}/{MM}/{DD} {HH}:{mm}:{ss}" format
+	/** 4-char random hex string (e.g. "a1b2") for generating unique IDs */
+	readonly randomHex?: string;
 	readonly localeDate?: string; // system locale format
 	readonly dailyNoteLink?: string; // daily note link format
 

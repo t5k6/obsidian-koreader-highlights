@@ -76,9 +76,9 @@ export const TEMPLATE_FILTERS = {
 		apply: unescapeHtml,
 	},
 	dateFormat: {
-		description: "Format date string (e.g. YYYYMMDDHHmmss)",
+		description: "Format date string (e.g. {YYYY}{MM}{DD}{HH}{mm}{ss})",
 		requiresArg: true,
-		apply: (s: string, arg?: string): string => formatDate(s, arg),
+		apply: (s: string, mask?: string): string => formatDate(s, mask),
 	},
 } as const;
 
@@ -204,7 +204,13 @@ export function renderGroup(
 		pageref: head.pageref,
 		date: formatDate(head.datetime),
 		time: formatDate(head.datetime, "{YYYY}/{MM}/{DD} {HH}:{mm}:{ss}"),
-		randomHex: Math.random().toString(16).slice(2, 6).padEnd(4, "0"),
+		randomHex: (() => {
+			const arr = new Uint8Array(2);
+			window.crypto.getRandomValues(arr);
+			return Array.from(arr)
+				.map((b) => b.toString(16).padStart(2, "0"))
+				.join("");
+		})(),
 
 		localeDate: formatDate(head.datetime, "locale"),
 		dailyNoteLink: formatDate(head.datetime, "daily-note"),

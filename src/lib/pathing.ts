@@ -109,7 +109,7 @@ function normalizeFileSafeOpts(opts?: FileSafeOptions) {
 function normalizeMatchKeyOpts(opts?: MatchKeyOptions) {
 	return {
 		lower: opts?.lower ?? true,
-		ascii: opts?.ascii ?? true,
+		ascii: opts?.ascii ?? false, // Default to false to support multi-language keys
 		collapse: opts?.collapse ?? true,
 	};
 }
@@ -219,8 +219,12 @@ export function toMatchKey(
 	if (!s) return "";
 
 	if (o.collapse) s = stringNormalizeWhitespace(s);
+	// Use normalized option: defaults to false now
 	if (o.ascii) s = stringStripDiacritics(s);
-	s = s.replace(/[^a-zA-Z0-9]+/g, " ");
+
+	// Use Unicode property escapes to keep letters and numbers from any language
+	s = s.replace(/[^\p{L}\p{N}]+/gu, " ");
+
 	if (o.collapse) s = s.replace(/\s+/g, " ").trim();
 	if (o.lower) s = s.toLowerCase();
 	return s || "untitled";

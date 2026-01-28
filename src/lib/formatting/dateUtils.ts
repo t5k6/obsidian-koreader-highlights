@@ -5,11 +5,27 @@ import type { ParseFailure } from "../errors/types";
 const MASK_CACHE = new SimpleCache<string, (d: Date) => string>(64);
 
 function compileMask(mask: string): (date: Date) => string {
-	return (date) =>
-		mask
+	const useLoose = !mask.includes("{");
+	return (date) => {
+		let output = mask
 			.replace(/\{YYYY\}/g, String(date.getFullYear()))
 			.replace(/\{MM\}/g, String(date.getMonth() + 1).padStart(2, "0"))
-			.replace(/\{DD\}/g, String(date.getDate()).padStart(2, "0"));
+			.replace(/\{DD\}/g, String(date.getDate()).padStart(2, "0"))
+			.replace(/\{HH\}/g, String(date.getHours()).padStart(2, "0"))
+			.replace(/\{mm\}/g, String(date.getMinutes()).padStart(2, "0"))
+			.replace(/\{ss\}/g, String(date.getSeconds()).padStart(2, "0"));
+
+		if (useLoose) {
+			output = output
+				.replace(/YYYY/g, String(date.getFullYear()))
+				.replace(/MM/g, String(date.getMonth() + 1).padStart(2, "0"))
+				.replace(/DD/g, String(date.getDate()).padStart(2, "0"))
+				.replace(/HH/g, String(date.getHours()).padStart(2, "0"))
+				.replace(/mm/g, String(date.getMinutes()).padStart(2, "0"))
+				.replace(/ss/g, String(date.getSeconds()).padStart(2, "0"));
+		}
+		return output;
+	};
 }
 
 function isValidCustomFormat(format: string): boolean {
@@ -17,7 +33,15 @@ function isValidCustomFormat(format: string): boolean {
 	let match = tokenRegex.exec(format);
 	while (match !== null) {
 		const token = match[1];
-		if (token !== "YYYY" && token !== "MM" && token !== "DD") return false;
+		if (
+			token !== "YYYY" &&
+			token !== "MM" &&
+			token !== "DD" &&
+			token !== "HH" &&
+			token !== "mm" &&
+			token !== "ss"
+		)
+			return false;
 		match = tokenRegex.exec(format);
 	}
 	return true;

@@ -23,7 +23,7 @@ export interface BaseMetadata {
 	identifiers?: string;
 }
 
-export interface DocProps extends BaseMetadata {}
+export interface DocProps extends BaseMetadata { }
 
 export interface PositionObject {
 	x: number;
@@ -278,6 +278,9 @@ export interface TemplateData {
 	readonly note?: string;
 	readonly notes?: readonly string[];
 	readonly date?: string; // Stable "en-US" format
+	readonly time?: string; // Stable "{YYYY}/{MM}/{DD} {HH}:{mm}:{ss}" format
+	/** 4-char random hex string (e.g. "a1b2") for generating unique IDs */
+	readonly randomHex?: string;
 	readonly localeDate?: string; // system locale format
 	readonly dailyNoteLink?: string; // daily note link format
 
@@ -385,10 +388,10 @@ export interface FileMetadataExtractor {
 export type FileOperationResult =
 	| { success: true; file: TFile }
 	| {
-			success: false;
-			reason: "user_skipped" | "collision" | "error";
-			error?: Error;
-	  };
+		success: false;
+		reason: "user_skipped" | "collision" | "error";
+		error?: Error;
+	};
 
 // --- Persisted Plugin Data Shape ---
 

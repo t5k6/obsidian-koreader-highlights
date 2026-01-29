@@ -446,54 +446,72 @@ export class CommandManager {
 
 				if (!sdrFilePaths || sdrFilePaths.length === 0) {
 					this.log.info("Scan complete. No SDR files found.");
-					const r = await this.createOrUpdateScanNote([]);
-					if (isErr(r)) return r; // Return the error Result
+					const r = await this.createOrUpdateScanNote([], []);
+					if (isErr(r)) return r;
 					return ok(undefined);
 				}
 
-				// Filter out books with no annotations
+				this.log.info(
+					`Scan found ${sdrFilePaths.length} metadata files. Analyzing contents...`,
+				);
 				tick.setStatus(
-					`Checking ${sdrFilePaths.length} files for annotations...`,
+					`Found ${sdrFilePaths.length} files. Analyzing contents for highlights...`,
 				);
 				tick.setTotal(sdrFilePaths.length);
 
-				const validatedPaths: string[] = [];
-				let processed = 0;
-
-				const pool = runPool(
+				const filesWithHighlights: string[] = [];
+				const filesWithoutHighlights: string[] = [];
+				const scanStream = runPool(
 					sdrFilePaths,
 					async (path) => {
-						const readRes = await this.fs.readNodeFileText(path);
-						if (!isErr(readRes)) {
-							const parseRes = parseMetadata(readRes.value);
-							if (!isErr(parseRes)) {
-								// Only include if we have annotations
-								if (parseRes.value.meta.annotations.length > 0) {
-									validatedPaths.push(path);
-								}
-							}
+						// Read file content
+						const contentRes = await this.fs.readNodeFileText(path);
+						if (isErr(contentRes)) {
+							this.log.warn(`Failed to read content for scan: ${path}`);
+							filesWithoutHighlights.push(path); // Treat error as no highlights for now
+							return;
 						}
-						processed++;
+
+						// Parse Lua
+						const parseRes = parseMetadata(contentRes.value);
+						if (isErr(parseRes)) {
+							this.log.warn(`Failed to parse content for scan: ${path}`);
+							filesWithoutHighlights.push(path);
+							return;
+						}
+
+						// Check for annotations
+						const { meta } = parseRes.value;
+						if (meta.annotations && meta.annotations.length > 0) {
+							filesWithHighlights.push(path);
+						} else {
+							filesWithoutHighlights.push(path);
+						}
 						tick();
 					},
-					{ concurrency: 10, signal },
+					{ concurrency: 16, signal },
 				);
 
-				for await (const _ of pool) {
-					// Consume the stream to drive execution
+				for await (const res of scanStream) {
+					// Check for worker errors (unexpected throws)
+					if (!res.ok && !isAbortError(res.error)) {
+						this.log.warn("Error during scan analysis worker", res.error);
+					}
 				}
 
-				count = validatedPaths.length;
-				validatedPaths.sort(); // Consistent output order
-
+				count = filesWithHighlights.length;
 				this.log.info(
-					`Scan found ${count} files with annotations (out of ${sdrFilePaths.length} total SDRs).`,
+					`Scan analysis complete. Found ${count} files with annotations (out of ${sdrFilePaths.length} total SDRs).`,
 				);
+
 				tick.setStatus(
-					`Found ${count} files with content. Generating report...`,
+					`Found ${count} books with highlights (${filesWithoutHighlights.length} without). Generating report...`,
 				);
-				const r = await this.createOrUpdateScanNote(validatedPaths);
-				if (isErr(r)) return r; // Return the error Result
+				const r = await this.createOrUpdateScanNote(
+					filesWithHighlights,
+					filesWithoutHighlights,
+				);
+				if (isErr(r)) return r;
 				return ok(undefined);
 			},
 			{
@@ -516,10 +534,12 @@ export class CommandManager {
 
 	/**
 	 * Creates or updates the scan report file in the vault.
-	 * @param sdrFilePaths - Array of metadata file paths found
+	 * @param filesWithHighlights - Array of metadata file paths with highlights
+	 * @param filesWithoutHighlights - Array of metadata file paths without highlights
 	 */
 	private async createOrUpdateScanNote(
-		sdrFilePaths: string[],
+		filesWithHighlights: string[],
+		filesWithoutHighlights: string[],
 	): Promise<AppResult<void>> {
 		const reportFilename = CommandManager.SCAN_REPORT_FILENAME;
 		const reportFolderPath = this.plugin.settings.highlightsFolder;
@@ -527,7 +547,8 @@ export class CommandManager {
 
 		const mountPoint = await this.device.getActiveScanPath();
 		const reportContent = this.generateReportContent(
-			sdrFilePaths,
+			filesWithHighlights,
+			filesWithoutHighlights,
 			mountPoint ?? "",
 		);
 
@@ -547,30 +568,44 @@ export class CommandManager {
 	 * Generates the markdown content for the scan report note.
 	 */
 	private generateReportContent(
-		sdrFilePaths: string[],
+		filesWithHighlights: string[],
+		filesWithoutHighlights: string[],
 		usedMountPoint: string,
 	): string {
 		const usedMount = usedMountPoint || this.plugin.settings.koreaderScanPath;
 		let content = `# KOReader SDR Scan Report\n\n`;
 		content += `Scan path: ${usedMount || "<unknown>"}\n\n`;
-		if (!sdrFilePaths.length) {
+		content += `Scan time: ${new Date().toLocaleString()}\n\n`;
+
+		if (filesWithHighlights.length === 0 && filesWithoutHighlights.length === 0) {
 			content += `No KOReader highlight metadata files (SDR) were found.\n`;
 			return content;
 		}
 
-		content += `Found ${sdrFilePaths.length} KOReader metadata files:\n`;
-		content += sdrFilePaths
-			.map((metadataFilePath) => {
-				const relativePath = usedMount
-					? Pathing.systemRelative(usedMount, metadataFilePath).replace(
-							/\\/g,
-							"/",
-						)
-					: metadataFilePath;
-				return `- \`${relativePath}\``;
-			})
-			.join("\n");
-		content += "\n";
+		// Helper to format list
+		const formatList = (paths: string[]) => {
+			if (paths.length === 0) return "_None_\n";
+			return (
+				paths
+					.map((metadataFilePath) => {
+						const relativePath = usedMount
+							? Pathing.systemRelative(usedMount, metadataFilePath).replace(
+								/\\/g,
+								"/",
+							)
+							: metadataFilePath;
+						return `- \`${relativePath}\``;
+					})
+					.join("\n") + "\n"
+			);
+		};
+
+		content += `## Books with Highlights (${filesWithHighlights.length})\n\n`;
+		content += formatList(filesWithHighlights);
+
+		content += `\n## Books without Highlights (${filesWithoutHighlights.length})\n\n`;
+		content += formatList(filesWithoutHighlights);
+
 		return content;
 	}
 

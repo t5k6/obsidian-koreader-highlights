@@ -2,7 +2,11 @@ import { type App, type Command, Notice, type TFile } from "obsidian";
 import type { CacheManager } from "src/lib/cache/CacheManager";
 import { isAbortError, runPool } from "src/lib/concurrency";
 import { err, isErr, ok } from "src/lib/core/result";
-import type { AppFailure, AppResult } from "src/lib/errors/types";
+import {
+	type AppFailure,
+	type AppResult,
+	formatAppFailure,
+} from "src/lib/errors/types";
 import { convertKohlMarkers } from "src/lib/kohlMarkers";
 import { parse as parseMetadata } from "src/lib/parsing/luaParser";
 import { Pathing } from "src/lib/pathing";
@@ -30,6 +34,13 @@ type ConversionSummary = {
 export class CommandManager {
 	private readonly log;
 	private static readonly SCAN_REPORT_FILENAME = "KOReader SDR Scan Report.md";
+
+	private static readonly SCAN_REPORT_FOOTER = `
+> [!NOTE]
+> - **Books with Highlights**: Books that contain actual annotations.
+> - **Books without Highlights**: Books that have been opened (metadata exists) but have no highlights.
+> - **Scan Errors**: Files that could not be read or parsed.
+`;
 
 	constructor(
 		private readonly app: App,
@@ -446,7 +457,7 @@ export class CommandManager {
 
 				if (!sdrFilePaths || sdrFilePaths.length === 0) {
 					this.log.info("Scan complete. No SDR files found.");
-					const r = await this.createOrUpdateScanNote([], []);
+					const r = await this.createOrUpdateScanNote([], [], []);
 					if (isErr(r)) return r;
 					return ok(undefined);
 				}
@@ -461,42 +472,93 @@ export class CommandManager {
 
 				const filesWithHighlights: string[] = [];
 				const filesWithoutHighlights: string[] = [];
+				const scanErrors: { path: string; error: string }[] = [];
+
+				type ScanResult =
+					| { type: "found"; path: string }
+					| { type: "empty"; path: string }
+					| { type: "error"; path: string; error: string };
+
 				const scanStream = runPool(
 					sdrFilePaths,
-					async (path) => {
+					async (path): Promise<AppResult<ScanResult>> => {
 						// Read file content
 						const contentRes = await this.fs.readNodeFileText(path);
 						if (isErr(contentRes)) {
-							this.log.warn(`Failed to read content for scan: ${path}`);
-							filesWithoutHighlights.push(path); // Treat error as no highlights for now
-							return;
+							// Return as a successful worker execution, but with an error result payload
+							return ok({
+								type: "error",
+								path,
+								error: `Read failed: ${contentRes.error.kind}`,
+							});
 						}
 
 						// Parse Lua
 						const parseRes = parseMetadata(contentRes.value);
 						if (isErr(parseRes)) {
-							this.log.warn(`Failed to parse content for scan: ${path}`);
-							filesWithoutHighlights.push(path);
-							return;
+							return ok({
+								type: "error",
+								path,
+								error: `Parse failed: ${formatAppFailure(parseRes.error)}`,
+							});
 						}
 
 						// Check for annotations
 						const { meta } = parseRes.value;
 						if (meta.annotations && meta.annotations.length > 0) {
-							filesWithHighlights.push(path);
-						} else {
-							filesWithoutHighlights.push(path);
+							return ok({ type: "found", path });
 						}
-						tick();
+						return ok({ type: "empty", path });
 					},
 					{ concurrency: 16, signal },
 				);
 
 				for await (const res of scanStream) {
-					// Check for worker errors (unexpected throws)
-					if (!res.ok && !isAbortError(res.error)) {
-						this.log.warn("Error during scan analysis worker", res.error);
+					// Check for worker execution errors (unexpected throws or pool errors)
+					if (!res.ok) {
+						if (!isAbortError(res.error)) {
+							this.log.warn("Error during scan analysis worker", res.error);
+							scanErrors.push({
+								path: "<unknown>",
+								error: "Internal worker error",
+							});
+						}
+						continue;
 					}
+
+					// Unwrap the worker's result (AppResult<ScanResult>)
+					const workerResult = res.value;
+					if (isErr(workerResult)) {
+						// Should not happen as we catch known errors and return ok({type: 'error'})
+						// But handle it for safety
+						this.log.warn("Worker returned error result", workerResult.error);
+						scanErrors.push({
+							path: "<unknown>",
+							error: formatAppFailure(workerResult.error),
+						});
+						continue;
+					}
+
+					// Handle the validated ScanResult
+					const scanItem = workerResult.value;
+					switch (scanItem.type) {
+						case "found":
+							filesWithHighlights.push(scanItem.path);
+							break;
+						case "empty":
+							filesWithoutHighlights.push(scanItem.path);
+							break;
+						case "error":
+							this.log.warn(
+								`Scan failure for ${scanItem.path}: ${scanItem.error}`,
+							);
+							scanErrors.push({
+								path: scanItem.path,
+								error: scanItem.error,
+							});
+							break;
+					}
+					tick();
 				}
 
 				count = filesWithHighlights.length;
@@ -505,11 +567,12 @@ export class CommandManager {
 				);
 
 				tick.setStatus(
-					`Found ${count} books with highlights (${filesWithoutHighlights.length} without). Generating report...`,
+					`Found ${count} books with highlights (${filesWithoutHighlights.length} empty, ${scanErrors.length} errors). Generating report...`,
 				);
 				const r = await this.createOrUpdateScanNote(
 					filesWithHighlights,
 					filesWithoutHighlights,
+					scanErrors,
 				);
 				if (isErr(r)) return r;
 				return ok(undefined);
@@ -536,10 +599,12 @@ export class CommandManager {
 	 * Creates or updates the scan report file in the vault.
 	 * @param filesWithHighlights - Array of metadata file paths with highlights
 	 * @param filesWithoutHighlights - Array of metadata file paths without highlights
+	 * @param scanErrors - Array of files that failed to read or parse
 	 */
 	private async createOrUpdateScanNote(
 		filesWithHighlights: string[],
 		filesWithoutHighlights: string[],
+		scanErrors: { path: string; error: string }[],
 	): Promise<AppResult<void>> {
 		const reportFilename = CommandManager.SCAN_REPORT_FILENAME;
 		const reportFolderPath = this.plugin.settings.highlightsFolder;
@@ -549,6 +614,7 @@ export class CommandManager {
 		const reportContent = this.generateReportContent(
 			filesWithHighlights,
 			filesWithoutHighlights,
+			scanErrors,
 			mountPoint ?? "",
 		);
 
@@ -570,6 +636,7 @@ export class CommandManager {
 	private generateReportContent(
 		filesWithHighlights: string[],
 		filesWithoutHighlights: string[],
+		scanErrors: { path: string; error: string }[],
 		usedMountPoint: string,
 	): string {
 		const usedMount = usedMountPoint || this.plugin.settings.koreaderScanPath;
@@ -577,23 +644,32 @@ export class CommandManager {
 		content += `Scan path: ${usedMount || "<unknown>"}\n\n`;
 		content += `Scan time: ${new Date().toLocaleString()}\n\n`;
 
-		if (filesWithHighlights.length === 0 && filesWithoutHighlights.length === 0) {
+		const totalCount =
+			filesWithHighlights.length +
+			filesWithoutHighlights.length +
+			scanErrors.length;
+		if (totalCount === 0) {
 			content += `No KOReader highlight metadata files (SDR) were found.\n`;
 			return content;
 		}
 
 		// Helper to format list
-		const formatList = (paths: string[]) => {
+		const formatList = (
+			paths: (string | { path: string; error: string })[],
+			isError = false,
+		) => {
 			if (paths.length === 0) return "_None_\n";
 			return (
 				paths
-					.map((metadataFilePath) => {
+					.map((item) => {
+						const path = typeof item === "string" ? item : item.path;
 						const relativePath = usedMount
-							? Pathing.systemRelative(usedMount, metadataFilePath).replace(
-								/\\/g,
-								"/",
-							)
-							: metadataFilePath;
+							? Pathing.systemRelative(usedMount, path).replace(/\\/g, "/")
+							: path;
+
+						if (isError && typeof item !== "string") {
+							return `- \`${relativePath}\` (Error: ${item.error})`;
+						}
 						return `- \`${relativePath}\``;
 					})
 					.join("\n") + "\n"
@@ -605,6 +681,13 @@ export class CommandManager {
 
 		content += `\n## Books without Highlights (${filesWithoutHighlights.length})\n\n`;
 		content += formatList(filesWithoutHighlights);
+
+		if (scanErrors.length > 0) {
+			content += `\n## Scan Errors (${scanErrors.length})\n\n`;
+			content += formatList(scanErrors, true);
+		}
+
+		content += CommandManager.SCAN_REPORT_FOOTER;
 
 		return content;
 	}

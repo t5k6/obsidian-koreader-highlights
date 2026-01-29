@@ -4,6 +4,7 @@ import { isAbortError, runPool } from "src/lib/concurrency";
 import { err, isErr, ok } from "src/lib/core/result";
 import type { AppFailure, AppResult } from "src/lib/errors/types";
 import { convertKohlMarkers } from "src/lib/kohlMarkers";
+import { parse as parseMetadata } from "src/lib/parsing/luaParser";
 import { Pathing } from "src/lib/pathing";
 import type KoreaderImporterPlugin from "src/main";
 import type { ImportService } from "src/services/import/ImportService";
@@ -442,7 +443,7 @@ export class CommandManager {
 				const sdrFilePaths = await this.device.findSdrDirectoriesWithMetadata({
 					signal,
 				});
-				count = sdrFilePaths?.length ?? 0;
+
 				if (!sdrFilePaths || sdrFilePaths.length === 0) {
 					this.log.info("Scan complete. No SDR files found.");
 					const r = await this.createOrUpdateScanNote([]);
@@ -450,11 +451,48 @@ export class CommandManager {
 					return ok(undefined);
 				}
 
-				this.log.info(`Scan found ${sdrFilePaths.length} metadata files.`);
+				// Filter out books with no annotations
 				tick.setStatus(
-					`Found ${sdrFilePaths.length} files. Generating report...`,
+					`Checking ${sdrFilePaths.length} files for annotations...`,
 				);
-				const r = await this.createOrUpdateScanNote(sdrFilePaths);
+				tick.setTotal(sdrFilePaths.length);
+
+				const validatedPaths: string[] = [];
+				let processed = 0;
+
+				const pool = runPool(
+					sdrFilePaths,
+					async (path) => {
+						const readRes = await this.fs.readNodeFileText(path);
+						if (!isErr(readRes)) {
+							const parseRes = parseMetadata(readRes.value);
+							if (!isErr(parseRes)) {
+								// Only include if we have annotations
+								if (parseRes.value.meta.annotations.length > 0) {
+									validatedPaths.push(path);
+								}
+							}
+						}
+						processed++;
+						tick();
+					},
+					{ concurrency: 10, signal },
+				);
+
+				for await (const _ of pool) {
+					// Consume the stream to drive execution
+				}
+
+				count = validatedPaths.length;
+				validatedPaths.sort(); // Consistent output order
+
+				this.log.info(
+					`Scan found ${count} files with annotations (out of ${sdrFilePaths.length} total SDRs).`,
+				);
+				tick.setStatus(
+					`Found ${count} files with content. Generating report...`,
+				);
+				const r = await this.createOrUpdateScanNote(validatedPaths);
 				if (isErr(r)) return r; // Return the error Result
 				return ok(undefined);
 			},

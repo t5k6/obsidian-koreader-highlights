@@ -2,8 +2,13 @@ import { type App, type Command, Notice, type TFile } from "obsidian";
 import type { CacheManager } from "src/lib/cache/CacheManager";
 import { isAbortError, runPool } from "src/lib/concurrency";
 import { err, isErr, ok } from "src/lib/core/result";
-import type { AppFailure, AppResult } from "src/lib/errors/types";
+import {
+	type AppFailure,
+	type AppResult,
+	formatAppFailure,
+} from "src/lib/errors/types";
 import { convertKohlMarkers } from "src/lib/kohlMarkers";
+import { parse as parseMetadata } from "src/lib/parsing/luaParser";
 import { Pathing } from "src/lib/pathing";
 import type KoreaderImporterPlugin from "src/main";
 import type { ImportService } from "src/services/import/ImportService";
@@ -29,6 +34,13 @@ type ConversionSummary = {
 export class CommandManager {
 	private readonly log;
 	private static readonly SCAN_REPORT_FILENAME = "KOReader SDR Scan Report.md";
+
+	private static readonly SCAN_REPORT_FOOTER = `
+> [!NOTE]
+> - **Books with Highlights**: Books that contain actual annotations.
+> - **Books without Highlights**: Books that have been opened (metadata exists) but have no highlights.
+> - **Scan Errors**: Files that could not be read or parsed.
+`;
 
 	constructor(
 		private readonly app: App,
@@ -442,20 +454,127 @@ export class CommandManager {
 				const sdrFilePaths = await this.device.findSdrDirectoriesWithMetadata({
 					signal,
 				});
-				count = sdrFilePaths?.length ?? 0;
+
 				if (!sdrFilePaths || sdrFilePaths.length === 0) {
 					this.log.info("Scan complete. No SDR files found.");
-					const r = await this.createOrUpdateScanNote([]);
-					if (isErr(r)) return r; // Return the error Result
+					const r = await this.createOrUpdateScanNote([], [], []);
+					if (isErr(r)) return r;
 					return ok(undefined);
 				}
 
-				this.log.info(`Scan found ${sdrFilePaths.length} metadata files.`);
-				tick.setStatus(
-					`Found ${sdrFilePaths.length} files. Generating report...`,
+				this.log.info(
+					`Scan found ${sdrFilePaths.length} metadata files. Analyzing contents...`,
 				);
-				const r = await this.createOrUpdateScanNote(sdrFilePaths);
-				if (isErr(r)) return r; // Return the error Result
+				tick.setStatus(
+					`Found ${sdrFilePaths.length} files. Analyzing contents for highlights...`,
+				);
+				tick.setTotal(sdrFilePaths.length);
+
+				const filesWithHighlights: string[] = [];
+				const filesWithoutHighlights: string[] = [];
+				const scanErrors: { path: string; error: string }[] = [];
+
+				type ScanResult =
+					| { type: "found"; path: string }
+					| { type: "empty"; path: string }
+					| { type: "error"; path: string; error: string };
+
+				const scanStream = runPool(
+					sdrFilePaths,
+					async (path): Promise<AppResult<ScanResult>> => {
+						// Read file content
+						const contentRes = await this.fs.readNodeFileText(path);
+						if (isErr(contentRes)) {
+							// Return as a successful worker execution, but with an error result payload
+							return ok({
+								type: "error",
+								path,
+								error: `Read failed: ${contentRes.error.kind}`,
+							});
+						}
+
+						// Parse Lua
+						const parseRes = parseMetadata(contentRes.value);
+						if (isErr(parseRes)) {
+							return ok({
+								type: "error",
+								path,
+								error: `Parse failed: ${formatAppFailure(parseRes.error)}`,
+							});
+						}
+
+						// Check for annotations
+						const { meta } = parseRes.value;
+						if (meta.annotations && meta.annotations.length > 0) {
+							return ok({ type: "found", path });
+						}
+						return ok({ type: "empty", path });
+					},
+					{ concurrency: 16, signal },
+				);
+
+				for await (const res of scanStream) {
+					// Check for worker execution errors (unexpected throws or pool errors)
+					if (!res.ok) {
+						if (!isAbortError(res.error)) {
+							this.log.warn("Error during scan analysis worker", res.error);
+							scanErrors.push({
+								path: "<unknown>",
+								error: "Internal worker error",
+							});
+						}
+						continue;
+					}
+
+					// Unwrap the worker's result (AppResult<ScanResult>)
+					const workerResult = res.value;
+					if (isErr(workerResult)) {
+						// Should not happen as we catch known errors and return ok({type: 'error'})
+						// But handle it for safety
+						this.log.warn("Worker returned error result", workerResult.error);
+						scanErrors.push({
+							path: "<unknown>",
+							error: formatAppFailure(workerResult.error),
+						});
+						continue;
+					}
+
+					// Handle the validated ScanResult
+					const scanItem = workerResult.value;
+					switch (scanItem.type) {
+						case "found":
+							filesWithHighlights.push(scanItem.path);
+							break;
+						case "empty":
+							filesWithoutHighlights.push(scanItem.path);
+							break;
+						case "error":
+							this.log.warn(
+								`Scan failure for ${scanItem.path}: ${scanItem.error}`,
+							);
+							scanErrors.push({
+								path: scanItem.path,
+								error: scanItem.error,
+							});
+							break;
+					}
+					tick();
+				}
+
+				count = filesWithHighlights.length;
+				this.log.info(
+					`Scan analysis complete. Found ${count} files with annotations (out of ${sdrFilePaths.length} total SDRs).`,
+				);
+
+				tick.setStatus(
+					`Found ${count} books with highlights (${filesWithoutHighlights.length} empty, ${scanErrors.length} errors). Generating report...`,
+				);
+				const r = await this.createOrUpdateScanNote(
+					filesWithHighlights,
+					filesWithoutHighlights,
+					scanErrors,
+				);
+				if (isErr(r)) return r;
 				return ok(undefined);
 			},
 			{
@@ -478,10 +597,14 @@ export class CommandManager {
 
 	/**
 	 * Creates or updates the scan report file in the vault.
-	 * @param sdrFilePaths - Array of metadata file paths found
+	 * @param filesWithHighlights - Array of metadata file paths with highlights
+	 * @param filesWithoutHighlights - Array of metadata file paths without highlights
+	 * @param scanErrors - Array of files that failed to read or parse
 	 */
 	private async createOrUpdateScanNote(
-		sdrFilePaths: string[],
+		filesWithHighlights: string[],
+		filesWithoutHighlights: string[],
+		scanErrors: { path: string; error: string }[],
 	): Promise<AppResult<void>> {
 		const reportFilename = CommandManager.SCAN_REPORT_FILENAME;
 		const reportFolderPath = this.plugin.settings.highlightsFolder;
@@ -489,7 +612,9 @@ export class CommandManager {
 
 		const mountPoint = await this.device.getActiveScanPath();
 		const reportContent = this.generateReportContent(
-			sdrFilePaths,
+			filesWithHighlights,
+			filesWithoutHighlights,
+			scanErrors,
 			mountPoint ?? "",
 		);
 
@@ -509,30 +634,61 @@ export class CommandManager {
 	 * Generates the markdown content for the scan report note.
 	 */
 	private generateReportContent(
-		sdrFilePaths: string[],
+		filesWithHighlights: string[],
+		filesWithoutHighlights: string[],
+		scanErrors: { path: string; error: string }[],
 		usedMountPoint: string,
 	): string {
 		const usedMount = usedMountPoint || this.plugin.settings.koreaderScanPath;
 		let content = `# KOReader SDR Scan Report\n\n`;
 		content += `Scan path: ${usedMount || "<unknown>"}\n\n`;
-		if (!sdrFilePaths.length) {
+		content += `Scan time: ${new Date().toLocaleString()}\n\n`;
+
+		const totalCount =
+			filesWithHighlights.length +
+			filesWithoutHighlights.length +
+			scanErrors.length;
+		if (totalCount === 0) {
 			content += `No KOReader highlight metadata files (SDR) were found.\n`;
 			return content;
 		}
 
-		content += `Found ${sdrFilePaths.length} KOReader metadata files:\n`;
-		content += sdrFilePaths
-			.map((metadataFilePath) => {
-				const relativePath = usedMount
-					? Pathing.systemRelative(usedMount, metadataFilePath).replace(
-							/\\/g,
-							"/",
-						)
-					: metadataFilePath;
-				return `- \`${relativePath}\``;
-			})
-			.join("\n");
-		content += "\n";
+		// Helper to format list
+		const formatList = (
+			paths: (string | { path: string; error: string })[],
+			isError = false,
+		) => {
+			if (paths.length === 0) return "_None_\n";
+			return (
+				paths
+					.map((item) => {
+						const path = typeof item === "string" ? item : item.path;
+						const relativePath = usedMount
+							? Pathing.systemRelative(usedMount, path).replace(/\\/g, "/")
+							: path;
+
+						if (isError && typeof item !== "string") {
+							return `- \`${relativePath}\` (Error: ${item.error})`;
+						}
+						return `- \`${relativePath}\``;
+					})
+					.join("\n") + "\n"
+			);
+		};
+
+		content += `## Books with Highlights (${filesWithHighlights.length})\n\n`;
+		content += formatList(filesWithHighlights);
+
+		content += `\n## Books without Highlights (${filesWithoutHighlights.length})\n\n`;
+		content += formatList(filesWithoutHighlights);
+
+		if (scanErrors.length > 0) {
+			content += `\n## Scan Errors (${scanErrors.length})\n\n`;
+			content += formatList(scanErrors, true);
+		}
+
+		content += CommandManager.SCAN_REPORT_FOOTER;
+
 		return content;
 	}
 

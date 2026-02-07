@@ -2,8 +2,16 @@ import { type App, type Command, Notice, type TFile } from "obsidian";
 import type { CacheManager } from "src/lib/cache/CacheManager";
 import { isAbortError, runPool } from "src/lib/concurrency";
 import { err, isErr, ok } from "src/lib/core/result";
-import type { AppFailure, AppResult } from "src/lib/errors/types";
+import {
+	type AppFailure,
+	type AppResult,
+	formatAppFailure,
+} from "src/lib/errors/types";
 import { convertKohlMarkers } from "src/lib/kohlMarkers";
+import {
+	hasAnnotations,
+	parse as parseMetadata,
+} from "src/lib/parsing/luaParser";
 import { Pathing } from "src/lib/pathing";
 import type KoreaderImporterPlugin from "src/main";
 import type { ImportService } from "src/services/import/ImportService";
@@ -452,10 +460,122 @@ export class CommandManager {
 
 				this.log.info(`Scan found ${sdrFilePaths.length} metadata files.`);
 				tick.setStatus(
-					`Found ${sdrFilePaths.length} files. Generating report...`,
+					`Found ${sdrFilePaths.length} files. Analyzing contents for highlights...`,
 				);
-				const r = await this.createOrUpdateScanNote(sdrFilePaths);
-				if (isErr(r)) return r; // Return the error Result
+				tick.setTotal(sdrFilePaths.length);
+
+				const filesWithHighlights: string[] = [];
+				const filesWithoutHighlights: string[] = [];
+				const scanErrors: { path: string; error: string }[] = [];
+
+				type ScanResult =
+					| { type: "found"; path: string }
+					| { type: "empty"; path: string }
+					| { type: "error"; path: string; error: string };
+
+				const scanStream = runPool(
+					sdrFilePaths,
+					async (path): Promise<AppResult<ScanResult>> => {
+						// Read file content
+						const contentRes = await this.fs.readNodeFileText(path);
+						if (isErr(contentRes)) {
+							// Return as a successful worker execution, but with an error result payload
+							return ok({
+								type: "error",
+								path,
+								error: `Read failed: ${contentRes.error.kind}`,
+							});
+						}
+
+						// Fast check for annotations before full parse
+						const content = contentRes.value;
+						if (!hasAnnotations(content)) {
+							// No annotations detected, skip expensive parsing
+							return ok({ type: "empty", path });
+						}
+
+						// Has annotations, do full parse to verify
+						const parseRes = parseMetadata(content);
+						if (isErr(parseRes)) {
+							return ok({
+								type: "error",
+								path,
+								error: `Parse failed: ${formatAppFailure(parseRes.error)}`,
+							});
+						}
+
+						// Double-check annotations exist (should always be true due to fast check)
+						const { meta } = parseRes.value;
+						if (meta.annotations && meta.annotations.length > 0) {
+							return ok({ type: "found", path });
+						}
+						return ok({ type: "empty", path });
+					},
+					{ concurrency: 16, signal },
+				);
+
+				for await (const res of scanStream) {
+					// Check for worker execution errors (unexpected throws or pool errors)
+					if (!res.ok) {
+						if (!isAbortError(res.error)) {
+							this.log.warn("Error during scan analysis worker", res.error);
+							scanErrors.push({
+								path: "<unknown>",
+								error: "Internal worker error",
+							});
+						}
+						continue;
+					}
+
+					// Unwrap the worker's result (AppResult<ScanResult>)
+					const workerResult = res.value;
+					if (isErr(workerResult)) {
+						// Should not happen as we catch known errors and return ok({type: 'error'})
+						// But handle it for safety
+						this.log.warn("Worker returned error result", workerResult.error);
+						scanErrors.push({
+							path: "<unknown>",
+							error: formatAppFailure(workerResult.error),
+						});
+						continue;
+					}
+
+					// Handle the validated ScanResult
+					const scanItem = workerResult.value;
+					switch (scanItem.type) {
+						case "found":
+							filesWithHighlights.push(scanItem.path);
+							break;
+						case "empty":
+							filesWithoutHighlights.push(scanItem.path);
+							break;
+						case "error":
+							this.log.warn(
+								`Scan failure for ${scanItem.path}: ${scanItem.error}`,
+							);
+							scanErrors.push({
+								path: scanItem.path,
+								error: scanItem.error,
+							});
+							break;
+					}
+					tick();
+				}
+
+				count = filesWithHighlights.length;
+				this.log.info(
+					`Scan analysis complete. Found ${count} files with annotations (out of ${sdrFilePaths.length} total SDRs).`,
+				);
+
+				tick.setStatus(
+					`Found ${count} books with highlights (${filesWithoutHighlights.length} empty, ${scanErrors.length} errors). Generating report...`,
+				);
+				const r = await this.createOrUpdateScanNote(
+					filesWithHighlights,
+					filesWithoutHighlights,
+					scanErrors,
+				);
+				if (isErr(r)) return r;
 				return ok(undefined);
 			},
 			{
@@ -482,6 +602,8 @@ export class CommandManager {
 	 */
 	private async createOrUpdateScanNote(
 		sdrFilePaths: string[],
+		filesWithoutHighlights?: string[],
+		scanErrors?: { path: string; error: string }[],
 	): Promise<AppResult<void>> {
 		const reportFilename = CommandManager.SCAN_REPORT_FILENAME;
 		const reportFolderPath = this.plugin.settings.highlightsFolder;
@@ -491,6 +613,8 @@ export class CommandManager {
 		const reportContent = this.generateReportContent(
 			sdrFilePaths,
 			mountPoint ?? "",
+			filesWithoutHighlights ?? [],
+			scanErrors ?? [],
 		);
 
 		this.log.info(`Creating or updating scan report: ${fullReportPath}`);
@@ -511,27 +635,77 @@ export class CommandManager {
 	private generateReportContent(
 		sdrFilePaths: string[],
 		usedMountPoint: string,
+		filesWithoutHighlights: string[],
+		scanErrors: { path: string; error: string }[],
 	): string {
 		const usedMount = usedMountPoint || this.plugin.settings.koreaderScanPath;
 		let content = `# KOReader SDR Scan Report\n\n`;
 		content += `Scan path: ${usedMount || "<unknown>"}\n\n`;
-		if (!sdrFilePaths.length) {
+		const totalFiles =
+			sdrFilePaths.length + filesWithoutHighlights.length + scanErrors.length;
+		if (!totalFiles) {
 			content += `No KOReader highlight metadata files (SDR) were found.\n`;
 			return content;
 		}
 
-		content += `Found ${sdrFilePaths.length} KOReader metadata files:\n`;
-		content += sdrFilePaths
-			.map((metadataFilePath) => {
-				const relativePath = usedMount
-					? Pathing.systemRelative(usedMount, metadataFilePath).replace(
-							/\\/g,
-							"/",
-						)
-					: metadataFilePath;
-				return `- \`${relativePath}\``;
-			})
-			.join("\n");
+		const withHighlightsCount = sdrFilePaths.length;
+		const withoutHighlightsCount = filesWithoutHighlights.length;
+		const errorCount = scanErrors.length;
+
+		content += `Summary:\n`;
+		content += `- With highlights: ${withHighlightsCount}\n`;
+		content += `- Without highlights: ${withoutHighlightsCount}\n`;
+		content += `- Errors: ${errorCount}\n\n`;
+
+		content += `Files with highlights:\n`;
+		if (sdrFilePaths.length) {
+			content += sdrFilePaths
+				.map((metadataFilePath) => {
+					const relativePath = usedMount
+						? Pathing.systemRelative(usedMount, metadataFilePath).replace(
+								/\\/g,
+								"/",
+							)
+						: metadataFilePath;
+					return `- \`${relativePath}\``;
+				})
+				.join("\n");
+		} else {
+			content += "- (none)";
+		}
+		content += "\n\n";
+
+		content += `Files without highlights:\n`;
+		if (filesWithoutHighlights.length) {
+			content += filesWithoutHighlights
+				.map((metadataFilePath) => {
+					const relativePath = usedMount
+						? Pathing.systemRelative(usedMount, metadataFilePath).replace(
+								/\\/g,
+								"/",
+							)
+						: metadataFilePath;
+					return `- \`${relativePath}\``;
+				})
+				.join("\n");
+		} else {
+			content += "- (none)";
+		}
+		content += "\n\n";
+
+		content += `Errors:\n`;
+		if (scanErrors.length) {
+			content += scanErrors
+				.map((entry) => {
+					const relativePath = usedMount
+						? Pathing.systemRelative(usedMount, entry.path).replace(/\\/g, "/")
+						: entry.path;
+					return `- \`${relativePath}\`: ${entry.error}`;
+				})
+				.join("\n");
+		} else {
+			content += "- (none)";
+		}
 		content += "\n";
 		return content;
 	}

@@ -6,7 +6,8 @@ import { attachBrowseIconButton, pickDirectory, pickFile } from "../utils";
 
 export class CoreSettingsSection extends SettingsSection {
 	protected renderContent(container: HTMLElement): void {
-		const settings = this.plugin.settings;
+		// Always access plugin.settings directly to avoid stale references
+		// when plugin.settings is reassigned after saves
 
 		// --- Scan Path ---
 		const scanPathSetting = new Setting(container)
@@ -17,9 +18,9 @@ export class CoreSettingsSection extends SettingsSection {
 			.addText((text) => {
 				text
 					.setPlaceholder("Example: /mnt/KOReader")
-					.setValue(settings.koreaderScanPath)
+					.setValue(this.plugin.settings.koreaderScanPath)
 					.onChange(async (v) => {
-						settings.koreaderScanPath = v;
+						this.plugin.settings.koreaderScanPath = v;
 						this.debouncedSave();
 						// Debounced validation to avoid excessive async calls during typing
 						debouncedValidatePath(v);
@@ -86,7 +87,7 @@ export class CoreSettingsSection extends SettingsSection {
 			tooltip: "Browse…",
 			onPick: async () => pickDirectory("Select KOReader root folder"),
 			onSave: async (v) => {
-				settings.koreaderScanPath = v;
+				this.plugin.settings.koreaderScanPath = v;
 				this.debouncedSave();
 				// Immediate validation for browse actions
 				validatePath(v);
@@ -94,7 +95,7 @@ export class CoreSettingsSection extends SettingsSection {
 		});
 
 		// Initial validation
-		validatePath(settings.koreaderScanPath);
+		validatePath(this.plugin.settings.koreaderScanPath);
 
 		// --- Statistics Database Override ---
 		const statsSetting = new Setting(container)
@@ -105,9 +106,9 @@ export class CoreSettingsSection extends SettingsSection {
 			.addText((text) => {
 				text
 					.setPlaceholder("Example: /mnt/KOReader/.../statistics.sqlite3")
-					.setValue(settings.statsDbPathOverride)
+					.setValue(this.plugin.settings.statsDbPathOverride)
 					.onChange(async (v) => {
-						settings.statsDbPathOverride = v;
+						this.plugin.settings.statsDbPathOverride = v;
 						this.debouncedSave();
 					});
 			});
@@ -126,7 +127,7 @@ export class CoreSettingsSection extends SettingsSection {
 					],
 				}),
 			onSave: async (v) => {
-				settings.statsDbPathOverride = v;
+				this.plugin.settings.statsDbPathOverride = v;
 				this.debouncedSave();
 			},
 		});
@@ -139,7 +140,7 @@ export class CoreSettingsSection extends SettingsSection {
 			.addSearch((search) => {
 				search
 					.setPlaceholder(`Default: ${DEFAULT_HIGHLIGHTS_FOLDER}`)
-					.setValue(settings.highlightsFolder);
+					.setValue(this.plugin.settings.highlightsFolder);
 
 				// Dynamic import to avoid circular dependencies if any
 				import("../suggesters/FolderSuggester").then(({ FolderSuggest }) => {
@@ -149,9 +150,11 @@ export class CoreSettingsSection extends SettingsSection {
 				search.inputEl.addEventListener("blur", async () => {
 					// Normalize on blur
 					const { Pathing } = await import("src/lib/pathing");
-					const normalized = Pathing.toVaultPath(search.getValue());
+					// Get value directly from the input element to ensure we have the latest
+					const rawValue = search.inputEl.value || search.getValue();
+					const normalized = Pathing.toVaultPath(rawValue);
 					search.setValue(normalized);
-					settings.highlightsFolder = normalized;
+					this.plugin.settings.highlightsFolder = normalized;
 					this.debouncedSave();
 				});
 			});
@@ -165,11 +168,11 @@ export class CoreSettingsSection extends SettingsSection {
 			.addText((text) => {
 				text.inputEl.type = "number";
 				text
-					.setValue(String(settings.scanTimeoutSeconds ?? 8))
+					.setValue(String(this.plugin.settings.scanTimeoutSeconds ?? 8))
 					.onChange(async (v) => {
 						const val = parseInt(v, 10);
-						if (!isNaN(val) && val > 0) {
-							settings.scanTimeoutSeconds = val;
+						if (!Number.isNaN(val) && val > 0) {
+							this.plugin.settings.scanTimeoutSeconds = val;
 							this.debouncedSave();
 						}
 					});

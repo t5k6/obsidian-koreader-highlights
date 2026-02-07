@@ -167,6 +167,26 @@ export class TemplateSettingsSection extends SettingsSection {
 					),
 				);
 		}
+
+		// Note quoting mode setting (applies to both built-in and custom templates)
+		new Setting(containerEl)
+			.setName("Note quoting mode")
+			.setDesc(
+				"Control how notes are formatted in templates. " +
+					'"Auto" adds blockquotes if the template doesn\'t. ' +
+					'"Manual" respects template formatting only. ' +
+					'"Never" never adds blockquotes to notes.',
+			)
+			.addDropdown((dd) => {
+				dd.addOption("auto", "Auto (smart detection)")
+					.addOption("manual", "Manual (respect template)")
+					.addOption("never", "Never add blockquotes")
+					.setValue(template.noteQuotingMode || "auto")
+					.onChange(async (value) => {
+						template.noteQuotingMode = value as "auto" | "manual" | "never";
+						this.debouncedSave();
+					});
+			});
 	}
 
 	private ensureTemplateCache(): void {

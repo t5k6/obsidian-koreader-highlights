@@ -1,4 +1,4 @@
-# KOReader Highlights Importer — Architecture (v1.4.2)
+# KOReader Highlights Importer — Architecture (v1.4.4)
 
 This document explains how the plugin is structured, why it is structured that way, and how to work within this architecture safely.
 
@@ -39,8 +39,10 @@ Every architectural decision is weighed against these non‑negotiable principle
 3. **Performance at Scale**
    Large libraries must remain fast and responsive. This justifies:
    - A dedicated SQLite index
-   - Parallel processing
-   - Centralized, careful caching.
+   - Parallel processing with bounded concurrency
+   - Centralized, careful caching
+   - Fast pre-parsing checks to avoid expensive operations
+   - Strategic optimization at performance bottlenecks
 
 4. **Clarity Over Cleverness**
    Maintainability is a first‑class goal.
@@ -214,6 +216,11 @@ When implementing a new feature:
    - Use `KeyedQueue` for per‑resource mutations.
    - Use `runPool` for scalable parallelism.
    - Avoid ad‑hoc concurrency patterns unless justified.
+
+7. **Optimize strategically, not prematurely**
+   - Profile before optimizing.
+   - Add fast-path checks for expensive operations (e.g., `hasAnnotations()` before full Lua parse).
+   - Document performance-critical code paths.
 
 ### 4.2 Changing Existing Behavior
 
@@ -447,7 +454,35 @@ Note file paths are volatile. Safe merging requires a stable identity and a know
 - `src/lib/snapshotCore.ts`
 - `src/core/uidRules.ts`
 
-### 8.2 IndexCoordinator & the Resilient Index
+### 8.2 Lua Parser & Performance Optimization
+
+**Problem**
+- Full Lua parsing is expensive (hundreds of milliseconds per file).
+- Scanning large libraries with thousands of books becomes prohibitively slow.
+- Many scanned files contain no annotations at all.
+
+**Solution**
+Two-phase parsing strategy in `src/lib/parsing/luaParser.ts`:
+
+1. **Fast Pre-Check: `hasAnnotations()`**
+   - Regex-based detection of annotation tables
+   - 10-50x faster than full parsing
+   - Handles both bracket notation `["annotations"]` and dot notation `annotations`
+   - Detects empty annotation tables to avoid false positives
+
+2. **Full Parse: `parse()`**
+   - Only invoked when annotations are likely present
+   - Complete Lua AST parsing and validation
+   - Structured error reporting
+
+**Performance Impact**
+- Particularly beneficial for large libraries where most books have no highlights
+
+**Key Files**
+- `src/lib/parsing/luaParser.ts` - Parsing and fast checks
+- `src/services/command/CommandManager.ts` - Integration in scan command
+
+### 8.3 IndexCoordinator & the Resilient Index
 
 **Problem**
 

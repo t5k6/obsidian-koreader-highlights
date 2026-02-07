@@ -32,6 +32,10 @@ export const TemplateSchema = z
 			.min(1)
 			.catch(DEFAULT_TEMPLATES_FOLDER)
 			.default(DEFAULT_TEMPLATES_FOLDER),
+		noteQuotingMode: z
+			.enum(["auto", "manual", "never"])
+			.catch("auto")
+			.default("auto"),
 	})
 	.passthrough();
 
@@ -172,6 +176,7 @@ export const BASE_DEFAULTS: KoreaderHighlightImporterSettings = {
 		source: "vault",
 		selectedTemplate: "default",
 		templateDir: DEFAULT_TEMPLATES_FOLDER,
+		noteQuotingMode: "auto",
 	},
 	frontmatter: {
 		disabledFields: [],

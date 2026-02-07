@@ -23,7 +23,7 @@ export interface BaseMetadata {
 	identifiers?: string;
 }
 
-export interface DocProps extends BaseMetadata { }
+export interface DocProps extends BaseMetadata {}
 
 export interface PositionObject {
 	x: number;
@@ -164,6 +164,14 @@ export interface KoreaderTemplateSettings {
 	source: "vault" | "external" | string;
 	selectedTemplate: string;
 	templateDir: string;
+	/**
+	 * Controls how notes are formatted in templates.
+	 * - "auto": Smart detection - adds blockquote if template doesn't handle it
+	 * - "manual": Respect template formatting only, no auto-quoting
+	 * - "never": Never add blockquotes to notes (explicit opt-out)
+	 * @default "auto"
+	 */
+	noteQuotingMode: "auto" | "manual" | "never";
 }
 
 // Comment style for tracking imported highlights
@@ -261,6 +269,19 @@ export interface IDuplicateHandlingModal {
 export interface RenderContext {
 	isFirstInChapter: boolean;
 	separators?: (" " | " [...] ")[];
+}
+
+/**
+ * Result structure for the scan command.
+ * Categorizes scanned files by whether they contain annotations.
+ */
+export interface ScanCommandResult {
+	/** Files with highlights/annotations */
+	withAnnotations: string[];
+	/** Files without highlights (metadata exists but no annotations) */
+	withoutAnnotations: string[];
+	/** Files that could not be read or parsed */
+	errors: Array<{ file: string; error: string }>;
 }
 
 /**
@@ -388,10 +409,10 @@ export interface FileMetadataExtractor {
 export type FileOperationResult =
 	| { success: true; file: TFile }
 	| {
-		success: false;
-		reason: "user_skipped" | "collision" | "error";
-		error?: Error;
-	};
+			success: false;
+			reason: "user_skipped" | "collision" | "error";
+			error?: Error;
+	  };
 
 // --- Persisted Plugin Data Shape ---
 

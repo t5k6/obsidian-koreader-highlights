@@ -68,6 +68,9 @@ export class FolderSuggest extends TextInputSuggest<ScoredFolder> {
 	protected selectSuggestion(item: ScoredFolder): void {
 		this.inputEl.value = item.folder.path;
 		this.inputEl.trigger("input");
+		// Trigger blur to ensure the setting is saved
+		// Ensure the input value has been fully processed
+		setTimeout(() => this.inputEl.blur(), 0);
 		// close handled by SuggestionList onSelect
 	}
 }

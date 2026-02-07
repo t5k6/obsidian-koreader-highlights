@@ -102,7 +102,9 @@ export class TemplateManager implements SettingsObserver {
 				newSettings.template.useCustomTemplate ||
 			oldSettings.template.selectedTemplate !==
 				newSettings.template.selectedTemplate ||
-			oldSettings.template.templateDir !== newSettings.template.templateDir;
+			oldSettings.template.templateDir !== newSettings.template.templateDir ||
+			oldSettings.template.noteQuotingMode !==
+				newSettings.template.noteQuotingMode;
 
 		if (templateChanged) {
 			this.cacheManager.clear("template.*");
@@ -242,6 +244,7 @@ export class TemplateManager implements SettingsObserver {
 
 		const compiledFn = compileTemplate(rawResult.value, {
 			cache: this.filterPipelineCache,
+			noteQuotingMode: this.plugin.settings.template.noteQuotingMode,
 		});
 		this.compiledTemplateCache.set(cacheKey, compiledFn);
 		return ok(compiledFn);

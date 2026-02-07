@@ -80,6 +80,14 @@ export const TEMPLATE_FILTERS = {
 		requiresArg: true,
 		apply: (s: string, mask?: string): string => formatDate(s, mask),
 	},
+	stripNewlines: {
+		description: "Replace newlines with spaces",
+		apply: (s: string): string => s.replace(/\r?\n/g, " "),
+	},
+	singleLine: {
+		description: "Collapse all whitespace to single spaces and trim",
+		apply: (s: string): string => s.replace(/\s+/g, " ").trim(),
+	},
 } as const;
 
 export type FilterName = keyof typeof TEMPLATE_FILTERS;
@@ -192,6 +200,26 @@ function mergeNotes(group: Annotation[]): string {
 	return notes.join("\n---\n");
 }
 
+/**
+ * Renders a group of annotations using the provided compiled template function.
+ *
+ * @param compiledFn - The compiled template function
+ * @param group - Array of annotations to render
+ * @param ctx - Render context with separators and chapter info
+ * @returns Rendered markdown string
+ *
+ * @remarks
+ * **Non-deterministic Variables:**
+ * - `{{time}}`: Current timestamp at render time (format: YYYY/MM/DD HH:mm:ss)
+ * - `{{randomHex}}`: Random 4-character hex string, regenerated on each render
+ *
+ * These variables are useful for:
+ * - Generating unique file names
+ * - Creating unique IDs for notes
+ * - Timestamping imports
+ *
+ * **Note:** Template previews will show different values on each render.
+ */
 export function renderGroup(
 	compiledFn: (data: TemplateData) => string,
 	group: Annotation[],
@@ -206,7 +234,17 @@ export function renderGroup(
 		time: formatDate(head.datetime, "{YYYY}/{MM}/{DD} {HH}:{mm}:{ss}"),
 		randomHex: (() => {
 			const arr = new Uint8Array(2);
-			window.crypto.getRandomValues(arr);
+			// Use crypto.getRandomValues from either browser or Node.js
+			if (typeof window !== "undefined" && window.crypto) {
+				window.crypto.getRandomValues(arr);
+			} else if (typeof globalThis !== "undefined" && globalThis.crypto) {
+				globalThis.crypto.getRandomValues(arr);
+			} else {
+				// Fallback for older Node.js without globalThis.crypto
+				const crypto = require("crypto");
+				const bytes = crypto.randomBytes(2);
+				arr.set(bytes);
+			}
 			return Array.from(arr)
 				.map((b) => b.toString(16).padStart(2, "0"))
 				.join("");
@@ -363,7 +401,11 @@ export function tokenize(
 			const top = stack[stack.length - 1];
 			if (top && top.key === key) {
 				const frame = stack.pop()!;
-				const cond: TemplateToken = { type: "cond", key: frame.condKey ?? frame.key, body: frame.tokens };
+				const cond: TemplateToken = {
+					type: "cond",
+					key: frame.condKey ?? frame.key,
+					body: frame.tokens,
+				};
 				current = frame.parentTokens;
 				current.push(cond);
 			} else {
@@ -436,23 +478,32 @@ export function detectNoteQuotingStyle(template: string): "auto" | "manual" {
 
 export function renderNote(
 	value: unknown,
-	quotingStyle: "auto" | "manual",
+	quotingStyle: "auto" | "manual" | "never",
 ): string {
 	const s =
 		typeof value === "string" ? value : value == null ? "" : String(value);
 	if (!s) return "";
 	const lines = s.split("\n");
-	return quotingStyle === "manual"
-		? lines.join("\n")
-		: lines.map((l) => `> ${l}`).join("\n");
+	if (quotingStyle === "never" || quotingStyle === "manual") {
+		return lines.join("\n");
+	}
+	return lines.map((l) => `> ${l}`).join("\n");
+}
+
+export interface CompileOptions {
+	cache?: IterableCache<string, (s: string) => string>;
+	noteQuotingMode?: "auto" | "manual" | "never";
 }
 
 export function compile(
 	templateString: string,
-	options?: { cache?: IterableCache<string, (s: string) => string> },
+	options?: CompileOptions,
 ): (data: TemplateData) => string {
 	const tokens = tokenize(templateString);
-	const quotingStyle = detectNoteQuotingStyle(templateString);
+	const quotingStyle =
+		options?.noteQuotingMode && options.noteQuotingMode !== "auto"
+			? options.noteQuotingMode
+			: detectNoteQuotingStyle(templateString);
 	const cache = options?.cache;
 
 	const renderTokens = (ts: TemplateToken[], data: TemplateData): string => {

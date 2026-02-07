@@ -1,7 +1,7 @@
 {
 	"id": "koreader-highlights-importer",
 	"name": "KOReader Highlight Importer",
-	"version": "1.4.3",
+	"version": "1.4.4",
 	"minAppVersion": "1.7.0",
 	"description": "Imports KOReader highlights.",
 	"author": "Tahsin Kocaman",

@@ -1,7 +1,7 @@
 ---
 description: Shows all available metadata variables for advanced customization.
 ---
-{{#isFirstIn-chapter}}## Chapter: {{chapter}}{{/isFirstIn-chapter}}
+{{#isFirstInChapter}}## Chapter: {{chapter}}{{/isFirstInChapter}}
 
 **Highlight:** {{highlight}}
 

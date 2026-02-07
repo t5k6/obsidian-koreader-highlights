@@ -39,6 +39,10 @@ export class TemplatePreviewModal extends BaseModal<boolean> {
 	private previewEl!: HTMLElement;
 	private debouncedRefresh: () => void;
 
+	// Cache compiled template to avoid recompilation on every preview refresh
+	private lastCompiledContent: string = "";
+	private compiledTemplateFn?: (data: any) => string;
+
 	constructor(
 		app: App,
 		private templateManager: TemplateManager,
@@ -146,6 +150,9 @@ export class TemplatePreviewModal extends BaseModal<boolean> {
 		if (!this.isCustomTemplate) return;
 		this.editableContent = this.originalContent;
 		this.editorComponent.setValue(this.originalContent);
+		// Clear cache to force recompilation on revert
+		this.lastCompiledContent = "";
+		this.compiledTemplateFn = undefined;
 		this.refreshPreview();
 		new Notice("Changes have been reverted.");
 	}
@@ -157,10 +164,32 @@ export class TemplatePreviewModal extends BaseModal<boolean> {
 		this.previewEl.setText("Rendering…");
 		await new Promise((resolve) => setTimeout(resolve, 10));
 
+		// Only recompile if template content has changed
+		if (this.editableContent !== this.lastCompiledContent) {
+			try {
+				this.compiledTemplateFn = compile(this.editableContent, {
+					noteQuotingMode:
+						this.templateManager.plugin.settings.template.noteQuotingMode,
+				});
+				this.lastCompiledContent = this.editableContent;
+			} catch (e) {
+				// Show compilation errors immediately
+				this.previewEl.empty();
+				this.previewEl.addClass("template-error");
+				this.previewEl.setText(`Template Error:\n\n${(e as Error).message}`);
+				return;
+			}
+		}
+
+		// Fast path: render with cached compiled template
+		if (!this.compiledTemplateFn) {
+			this.previewEl.setText("Error: Template not compiled");
+			return;
+		}
+
 		try {
-			const compiledTemplateFn = compile(this.editableContent);
 			const renderedOutput = renderGroup(
-				compiledTemplateFn,
+				this.compiledTemplateFn,
 				EXAMPLE_ANNOTATION_GROUP,
 				EXAMPLE_RENDER_CONTEXT,
 			);
@@ -175,7 +204,7 @@ export class TemplatePreviewModal extends BaseModal<boolean> {
 				this.templateManager.plugin,
 			);
 		} catch (e) {
-			this.previewEl.setText(`Template Error:\n\n${(e as Error).message}`);
+			this.previewEl.setText(`Render Error:\n\n${(e as Error).message}`);
 			this.previewEl.addClass("template-error");
 		}
 	}

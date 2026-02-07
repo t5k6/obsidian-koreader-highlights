@@ -450,11 +450,11 @@ export class CommandManager {
 				const sdrFilePaths = await this.device.findSdrDirectoriesWithMetadata({
 					signal,
 				});
-				count = sdrFilePaths?.length ?? 0;
+
 				if (!sdrFilePaths || sdrFilePaths.length === 0) {
 					this.log.info("Scan complete. No SDR files found.");
-					const r = await this.createOrUpdateScanNote([]);
-					if (isErr(r)) return r; // Return the error Result
+					const r = await this.createOrUpdateScanNote([], [], []);
+					if (isErr(r)) return r;
 					return ok(undefined);
 				}
 
@@ -598,7 +598,9 @@ export class CommandManager {
 
 	/**
 	 * Creates or updates the scan report file in the vault.
-	 * @param sdrFilePaths - Array of metadata file paths found
+	 * @param filesWithHighlights - Array of metadata file paths with highlights
+	 * @param filesWithoutHighlights - Array of metadata file paths without highlights
+	 * @param scanErrors - Array of files that failed to read or parse
 	 */
 	private async createOrUpdateScanNote(
 		sdrFilePaths: string[],

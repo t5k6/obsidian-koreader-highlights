@@ -1,6 +1,7 @@
 import { sha1Hex, sha256Hex } from "src/lib/core/crypto";
 import { err, ok, type Result } from "src/lib/core/result";
 import { formatDateForTimestamp } from "src/lib/formatting";
+import { getBackupPathHash } from "./backupCore";
 import type { AppFailure, SnapshotError } from "./errors/types";
 import { composeFrontmatter, parseFrontmatter } from "./frontmatter";
 import { Pathing } from "./pathing";
@@ -14,9 +15,9 @@ const SNAPSHOT_HASH_CANONICALIZE_OPTS = { normalizeEol: true };
 export type Uid = string;
 
 export interface SnapshotPaths {
-	dir: string;
-	fileName: string; // e.g., `${uid}.md`
-	fullPath: string; // `${dir}/${fileName}`
+  dir: string;
+  fileName: string; // e.g., `${uid}.md`
+  fullPath: string; // `${dir}/${fileName}`
 }
 
 // ================================================================
@@ -24,60 +25,60 @@ export interface SnapshotPaths {
 // ================================================================
 
 export const snapshotErrors = {
-	notFound: (message: string): SnapshotError => ({
-		kind: "NOT_FOUND",
-		message,
-	}),
-	readFailed: (message: string, cause?: unknown): SnapshotError => ({
-		kind: "READ_FAILED",
-		message,
-		cause,
-	}),
-	writeFailed: (message: string, cause?: unknown): SnapshotError => ({
-		kind: "WRITE_FAILED",
-		message,
-		cause,
-	}),
-	integrityFailed: (message: string, cause?: unknown): SnapshotError => ({
-		kind: "INTEGRITY_FAILED",
-		message,
-		cause,
-	}),
-	capabilityUnavailable: (message: string): SnapshotError => ({
-		kind: "CAPABILITY_UNAVAILABLE",
-		message,
-	}),
-	targetFileMissing: (message: string): SnapshotError => ({
-		kind: "TARGET_FILE_MISSING",
-		message,
-	}),
-	snapshotMissing: (message: string): SnapshotError => ({
-		kind: "SNAPSHOT_MISSING",
-		message,
-	}),
-	writeForbidden: (message: string, cause?: unknown): SnapshotError => ({
-		kind: "WRITE_FORBIDDEN",
-		message,
-		cause,
-	}),
-	readForbidden: (message: string, cause?: unknown): SnapshotError => ({
-		kind: "READ_FORBIDDEN",
-		message,
-		cause,
-	}),
-	uidMissing: (message: string): SnapshotError => ({
-		kind: "UID_MISSING",
-		message,
-	}),
-	uidMismatch: (message: string): SnapshotError => ({
-		kind: "UID_MISMATCH",
-		message,
-	}),
-	migrationFailed: (message: string, cause?: unknown): SnapshotError => ({
-		kind: "MIGRATION_FAILED",
-		message,
-		cause,
-	}),
+  notFound: (message: string): SnapshotError => ({
+    kind: "NOT_FOUND",
+    message,
+  }),
+  readFailed: (message: string, cause?: unknown): SnapshotError => ({
+    kind: "READ_FAILED",
+    message,
+    cause,
+  }),
+  writeFailed: (message: string, cause?: unknown): SnapshotError => ({
+    kind: "WRITE_FAILED",
+    message,
+    cause,
+  }),
+  integrityFailed: (message: string, cause?: unknown): SnapshotError => ({
+    kind: "INTEGRITY_FAILED",
+    message,
+    cause,
+  }),
+  capabilityUnavailable: (message: string): SnapshotError => ({
+    kind: "CAPABILITY_UNAVAILABLE",
+    message,
+  }),
+  targetFileMissing: (message: string): SnapshotError => ({
+    kind: "TARGET_FILE_MISSING",
+    message,
+  }),
+  snapshotMissing: (message: string): SnapshotError => ({
+    kind: "SNAPSHOT_MISSING",
+    message,
+  }),
+  writeForbidden: (message: string, cause?: unknown): SnapshotError => ({
+    kind: "WRITE_FORBIDDEN",
+    message,
+    cause,
+  }),
+  readForbidden: (message: string, cause?: unknown): SnapshotError => ({
+    kind: "READ_FORBIDDEN",
+    message,
+    cause,
+  }),
+  uidMissing: (message: string): SnapshotError => ({
+    kind: "UID_MISSING",
+    message,
+  }),
+  uidMismatch: (message: string): SnapshotError => ({
+    kind: "UID_MISMATCH",
+    message,
+  }),
+  migrationFailed: (message: string, cause?: unknown): SnapshotError => ({
+    kind: "MIGRATION_FAILED",
+    message,
+    cause,
+  }),
 };
 
 // ================================================================
@@ -89,7 +90,7 @@ export const snapshotErrors = {
  * Maintains compatibility with existing naming convention.
  */
 export function snapshotFileNameForUid(uid: Uid): string {
-	return `${uid}.md`;
+  return `${uid}.md`;
 }
 
 /**
@@ -97,29 +98,33 @@ export function snapshotFileNameForUid(uid: Uid): string {
  * This is a pure function that takes the base directory as an argument.
  */
 export function snapshotPathForUid(baseDir: string, uid: Uid): SnapshotPaths {
-	const fileName = snapshotFileNameForUid(uid);
-	return {
-		dir: baseDir,
-		fileName,
-		fullPath: `${baseDir}/${fileName}`, // vault paths use forward slashes
-	};
+  const fileName = snapshotFileNameForUid(uid);
+  return {
+    dir: baseDir,
+    fileName,
+    fullPath: `${baseDir}/${fileName}`, // vault paths use forward slashes
+  };
 }
 
 /**
- * Generates a backup filename based on the original file's properties.
- * Pure function that takes all necessary inputs as parameters.
+ * Generates a backup filename based on the original file's properties and optional UID.
+ * New format embeds UID for stable grouping across folder moves.
  */
 export function generateBackupFileName(
-	baseName: string,
-	filePath: string,
+  baseName: string,
+  filePath: string,
+  uid?: string | null,
 ): string {
-	const safeBase = Pathing.toFileSafe(baseName, {
-		lower: false,
-		fallback: "note",
-	}).slice(0, 50);
-	const pathHash = sha1Hex(filePath).slice(0, 8);
-	const ts = formatDateForTimestamp();
-	return `${safeBase}-${pathHash}-${ts}.md`;
+  const safeBase = Pathing.toFileSafe(baseName, {
+    lower: false,
+    fallback: "note",
+  }).slice(0, 50);
+  const pathHash = getBackupPathHash(filePath);
+  const ts = formatDateForTimestamp();
+  if (uid) {
+    return `${safeBase}-${uid}-${pathHash}-${ts}.md`;
+  }
+  return `${safeBase}-${pathHash}-${ts}.md`;
 }
 
 // ================================================================
@@ -132,8 +137,8 @@ export function generateBackupFileName(
  * Mirrors existing behavior: canonicalizes line endings prior to hashing.
  */
 export function computeSnapshotHash(body: string): string {
-	// This line will now be type-safe
-	return sha256Hex(body, SNAPSHOT_HASH_CANONICALIZE_OPTS);
+  // This line will now be type-safe
+  return sha256Hex(body, SNAPSHOT_HASH_CANONICALIZE_OPTS);
 }
 
 /**
@@ -143,23 +148,23 @@ export function computeSnapshotHash(body: string): string {
  * preserving any additional leading whitespace from manually edited snapshots.
  */
 export function parseSnapshotContent(content: string): {
-	hash: string | null;
-	body: string;
+  hash: string | null;
+  body: string;
 } {
-	const parseResult = parseFrontmatter(content);
+  const parseResult = parseFrontmatter(content);
 
-	if (!parseResult.ok) {
-		// If YAML parsing fails, treat as content without frontmatter
-		return { hash: null, body: content };
-	}
+  if (!parseResult.ok) {
+    // If YAML parsing fails, treat as content without frontmatter
+    return { hash: null, body: content };
+  }
 
-	const body = parseResult.value.body;
-	// Remove the canonical frontmatter separator if it exists at the very beginning.
-	const trimmedBody = body.startsWith("\n\n") ? body.slice(2) : body;
-	return {
-		hash: parseResult.value.hash,
-		body: trimmedBody,
-	};
+  const body = parseResult.value.body;
+  // Remove the canonical frontmatter separator if it exists at the very beginning.
+  const trimmedBody = body.startsWith("\n\n") ? body.slice(2) : body;
+  return {
+    hash: parseResult.value.hash,
+    body: trimmedBody,
+  };
 }
 
 /**
@@ -167,53 +172,53 @@ export function parseSnapshotContent(content: string): {
  * Only responsible for comparing expected vs computed hashes.
  */
 export function verifySnapshotHash(
-	body: string,
-	expectedHash: string | null,
+  body: string,
+  expectedHash: string | null,
 ): Result<string, SnapshotError> {
-	if (!expectedHash) return ok(body);
-	const computed = computeSnapshotHash(body);
-	if (computed !== expectedHash) {
-		// Return a generic error, caller adds context
-		return err(snapshotErrors.integrityFailed("Snapshot hash mismatch."));
-	}
-	return ok(body);
+  if (!expectedHash) return ok(body);
+  const computed = computeSnapshotHash(body);
+  if (computed !== expectedHash) {
+    // Return a generic error, caller adds context
+    return err(snapshotErrors.integrityFailed("Snapshot hash mismatch."));
+  }
+  return ok(body);
 }
 
 /**
  * Verify snapshot integrity with enhanced diagnostics.
  */
 export function verifySnapshotIntegrity(
-	content: string,
-	context?: { path?: string },
+  content: string,
+  context?: { path?: string },
 ): Result<string, AppFailure> {
-	const parseResult = parseFrontmatter(content);
-	if (!parseResult.ok) {
-		// Return the original parse error, enriched with context.
-		const error = parseResult.error;
-		Object.assign(error, { path: context?.path });
-		return err(error);
-	}
+  const parseResult = parseFrontmatter(content);
+  if (!parseResult.ok) {
+    // Return the original parse error, enriched with context.
+    const error = parseResult.error;
+    Object.assign(error, { path: context?.path });
+    return err(error);
+  }
 
-	const body = parseResult.value.body;
-	// Remove the canonical frontmatter separator if it exists at the very beginning.
-	const trimmedBody = body.startsWith("\n\n") ? body.slice(2) : body;
+  const body = parseResult.value.body;
+  // Remove the canonical frontmatter separator if it exists at the very beginning.
+  const trimmedBody = body.startsWith("\n\n") ? body.slice(2) : body;
 
-	const verification = verifySnapshotHash(trimmedBody, parseResult.value.hash);
-	if (!verification.ok) {
-		// Augment the error with contextual info in the cause
-		const diagnosticInfo = {
-			bodyLength: trimmedBody.length,
-			expected: parseResult.value.hash,
-			actual: computeSnapshotHash(trimmedBody),
-		};
-		return err(
-			snapshotErrors.integrityFailed("Snapshot hash mismatch.", {
-				path: context?.path,
-				diagnostics: diagnosticInfo,
-			}),
-		);
-	}
-	return ok(verification.value);
+  const verification = verifySnapshotHash(trimmedBody, parseResult.value.hash);
+  if (!verification.ok) {
+    // Augment the error with contextual info in the cause
+    const diagnosticInfo = {
+      bodyLength: trimmedBody.length,
+      expected: parseResult.value.hash,
+      actual: computeSnapshotHash(trimmedBody),
+    };
+    return err(
+      snapshotErrors.integrityFailed("Snapshot hash mismatch.", {
+        path: context?.path,
+        diagnostics: diagnosticInfo,
+      }),
+    );
+  }
+  return ok(verification.value);
 }
 
 /**
@@ -225,46 +230,46 @@ export function verifySnapshotIntegrity(
  * @param metadata - Optional metadata for debugging and tracking
  */
 export function composeSnapshotContent(
-	hash: string,
-	body: string,
-	metadata?: {
-		uid?: string;
-		vaultPath?: string;
-		createdAt?: number;
-	},
+  hash: string,
+  body: string,
+  metadata?: {
+    uid?: string;
+    vaultPath?: string;
+    createdAt?: number;
+  },
 ): string {
-	// Build the frontmatter with hash and optional metadata
-	const frontmatter: Record<string, unknown> = { sha256: hash };
+  // Build the frontmatter with hash and optional metadata
+  const frontmatter: Record<string, unknown> = { sha256: hash };
 
-	// Add metadata comments after frontmatter for debugging
-	// These are HTML comments, so they won't appear in reading mode
-	let metadataComment = "";
-	if (metadata) {
-		const lines = ["<!-- KOHL SNAPSHOT METADATA"];
-		if (metadata.uid) lines.push(`  uid: ${metadata.uid}`);
-		if (metadata.vaultPath) lines.push(`  source: ${metadata.vaultPath}`);
-		if (metadata.createdAt) {
-			const date = new Date(metadata.createdAt).toISOString();
-			lines.push(`  created: ${date}`);
-		}
-		lines.push("-->");
-		metadataComment = lines.join("\n") + "\n\n";
-	}
+  // Add metadata comments after frontmatter for debugging
+  // These are HTML comments, so they won't appear in reading mode
+  let metadataComment = "";
+  if (metadata) {
+    const lines = ["<!-- KOHL SNAPSHOT METADATA"];
+    if (metadata.uid) lines.push(`  uid: ${metadata.uid}`);
+    if (metadata.vaultPath) lines.push(`  source: ${metadata.vaultPath}`);
+    if (metadata.createdAt) {
+      const date = new Date(metadata.createdAt).toISOString();
+      lines.push(`  created: ${date}`);
+    }
+    lines.push("-->");
+    metadataComment = lines.join("\n") + "\n\n";
+  }
 
-	const contentWithFrontmatter = composeFrontmatter(frontmatter, body);
+  const contentWithFrontmatter = composeFrontmatter(frontmatter, body);
 
-	// Insert metadata comment after frontmatter but before body
-	// Frontmatter ends with "---\n\n", so insert after that
-	const frontmatterEnd = contentWithFrontmatter.indexOf("---\n\n") + 5; // "---\n\n".length
-	if (frontmatterEnd > 4 && metadata) {
-		return (
-			contentWithFrontmatter.slice(0, frontmatterEnd) +
-			metadataComment +
-			contentWithFrontmatter.slice(frontmatterEnd)
-		);
-	}
+  // Insert metadata comment after frontmatter but before body
+  // Frontmatter ends with "---\n\n", so insert after that
+  const frontmatterEnd = contentWithFrontmatter.indexOf("---\n\n") + 5; // "---\n\n".length
+  if (frontmatterEnd > 4 && metadata) {
+    return (
+      contentWithFrontmatter.slice(0, frontmatterEnd) +
+      metadataComment +
+      contentWithFrontmatter.slice(frontmatterEnd)
+    );
+  }
 
-	return contentWithFrontmatter;
+  return contentWithFrontmatter;
 }
 
 /**
@@ -273,10 +278,7 @@ export function composeSnapshotContent(
  * @param targetFilePath The vault-relative path of the original note.
  * @returns The full vault-relative path to the legacy snapshot file.
  */
-export function legacySnapshotPathFor(
-	baseDir: string,
-	targetFilePath: string,
-): string {
-	const legacyHash = sha1Hex(targetFilePath, { normalizeEol: true });
-	return `${baseDir}/${legacyHash}.md`;
+export function legacySnapshotPathFor(baseDir: string, targetFilePath: string): string {
+  const legacyHash = sha1Hex(targetFilePath, { normalizeEol: true });
+  return `${baseDir}/${legacyHash}.md`;
 }

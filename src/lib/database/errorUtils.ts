@@ -6,106 +6,96 @@ import type { AppFailure } from "../errors/types";
  * Creates a standardized database operation error
  */
 export function createDbError(operation: string, cause: unknown): AppFailure {
-	const message = `Database operation failed: ${operation}`;
-	const error = cause instanceof Error ? cause : new Error(String(cause));
+  const error = cause instanceof Error ? cause : new Error(String(cause));
 
-	return {
-		kind: "DbOperationFailed",
-		operation,
-		cause: error,
-	};
+  return {
+    kind: "DbOperationFailed",
+    operation,
+    cause: error,
+  };
 }
 
 /**
  * Wraps a database operation with standardized error handling
  */
-export function withDbErrorHandling<T>(
-	operation: string,
-	fn: () => T,
-): Result<T, AppFailure> {
-	try {
-		return ok(fn());
-	} catch (e) {
-		return err(DatabaseErrors.fromRaw(operation, e));
-	}
+export function withDbErrorHandling<T>(operation: string, fn: () => T): Result<T, AppFailure> {
+  try {
+    return ok(fn());
+  } catch (e) {
+    return err(DatabaseErrors.fromRaw(operation, e));
+  }
 }
 
 /**
  * Wraps an async database operation with standardized error handling
  */
 export async function withDbErrorHandlingAsync<T>(
-	operation: string,
-	fn: () => Promise<T>,
+  operation: string,
+  fn: () => Promise<T>,
 ): Promise<Result<T, AppFailure>> {
-	try {
-		const result = await fn();
-		return ok(result);
-	} catch (e) {
-		return err(DatabaseErrors.fromRaw(operation, e));
-	}
+  try {
+    const result = await fn();
+    return ok(result);
+  } catch (e) {
+    return err(DatabaseErrors.fromRaw(operation, e));
+  }
 }
 
 /**
  * Creates a database constraint violation error
  */
 export function createConstraintError(
-	operation: string,
-	constraint: string,
-	cause?: unknown,
+  operation: string,
+  constraint: string,
+  cause?: unknown,
 ): AppFailure {
-	const message = `Database constraint violation: ${constraint}`;
-	const error = cause instanceof Error ? cause : new Error(message);
+  const message = `Database constraint violation: ${constraint}`;
+  const error = cause instanceof Error ? cause : new Error(message);
 
-	return {
-		kind: "DbPersistFailed",
-		path: operation,
-		cause: error,
-	};
+  return {
+    kind: "DbPersistFailed",
+    path: operation,
+    cause: error,
+  };
 }
 
 /**
  * Creates a database connection error
  */
-export function createConnectionError(
-	operation: string,
-	cause?: unknown,
-): AppFailure {
-	const message = "Database connection failed";
-	const error = cause instanceof Error ? cause : new Error(message);
+export function createConnectionError(operation: string, cause?: unknown): AppFailure {
+  const message = "Database connection failed";
+  const error = cause instanceof Error ? cause : new Error(message);
 
-	return {
-		kind: "DbOpenFailed",
-		path: operation,
-		cause: error,
-	};
+  return {
+    kind: "DbOpenFailed",
+    path: operation,
+    cause: error,
+  };
 }
 
 /**
  * Creates a database validation error
  */
-export function createValidationError(
-	operation: string,
-	cause?: unknown,
-): AppFailure {
-	const message = "Database validation failed";
-	const error = cause instanceof Error ? cause : new Error(message);
+export function createValidationError(operation: string, cause?: unknown): AppFailure {
+  const message = "Database validation failed";
+  const error = cause instanceof Error ? cause : new Error(message);
 
-	return {
-		kind: "DbValidateFailed",
-		path: operation,
-		cause: error,
-	};
+  return {
+    kind: "DbValidateFailed",
+    path: operation,
+    cause: error,
+  };
 }
 
 /**
  * Centralized error mapping for database operations
  */
 export const DatabaseErrors = {
-	fromRaw(operation: string, cause: unknown): AppFailure {
-		// Delegate filesystem error interpretation to the canonical mapper
-		if (getFsCode(cause)) {
-			return toFailure(cause, operation, "ReadFailed");
-		}
-		return createDbError(operation, cause);
-	},
+  fromRaw(operation: string, cause: unknown): AppFailure {
+    // Delegate filesystem error interpretation to the canonical mapper
+    if (getFsCode(cause)) {
+      return toFailure(cause, operation, "ReadFailed");
+    }
+    return createDbError(operation, cause);
+  },
 };

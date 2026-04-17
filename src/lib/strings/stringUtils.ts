@@ -10,17 +10,17 @@
  * HTML entity mappings for escaping.
  */
 export const htmlEntities: Record<string, string> = {
-	"&": "&amp;",
-	"<": "&lt;",
-	">": "&gt;",
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
 };
 
 const UNESCAPE_MAP: Record<string, string> = {
-	"&amp;": "&",
-	"&lt;": "<",
-	"&gt;": ">",
-	"&quot;": '"',
-	"&#39;": "'",
+  "&amp;": "&",
+  "&lt;": "<",
+  "&gt;": ">",
+  "&quot;": '"',
+  "&#39;": "'",
 };
 
 /**
@@ -31,7 +31,7 @@ const UNESCAPE_MAP: Record<string, string> = {
  * @returns The HTML-escaped string
  */
 export function escapeHtml(s: string): string {
-	return s.replace(/[&<>]/g, (c) => htmlEntities[c]!);
+  return s.replace(/[&<>]/g, (c) => htmlEntities[c]!);
 }
 
 /**
@@ -42,10 +42,7 @@ export function escapeHtml(s: string): string {
  * @returns The HTML-unescaped string
  */
 export function unescapeHtml(s: string): string {
-	return s.replace(
-		/&(?:amp|lt|gt|quot|#39);/g,
-		(match) => UNESCAPE_MAP[match] ?? match,
-	);
+  return s.replace(/&(?:amp|lt|gt|quot|#39);/g, (match) => UNESCAPE_MAP[match] ?? match);
 }
 
 /**
@@ -57,10 +54,10 @@ export function unescapeHtml(s: string): string {
  * @returns The Markdown-escaped string
  */
 export function escapeMarkdown(s: string): string {
-	// 1. Escape backslashes first to prevent double-escaping subsequent chars
-	// 2. Escape formatting chars that cause issues in normal text: ` * _ [ ]
-	// HTML tags are allowed, as highlight text is HTML-escaped.
-	return s.replace(/\\/g, "\\\\").replace(/([`*_[\]])/g, "\\$1");
+  // 1. Escape backslashes first to prevent double-escaping subsequent chars
+  // 2. Escape formatting chars that cause issues in normal text: ` * _ [ ]
+  // HTML tags are allowed, as highlight text is HTML-escaped.
+  return s.replace(/\\/g, "\\\\").replace(/([`*_[\]])/g, "\\$1");
 }
 
 /**
@@ -72,8 +69,8 @@ export function escapeMarkdown(s: string): string {
  * @returns The string with HTML tags removed
  */
 export function stripHtml(s: string): string {
-	const decoded = unescapeHtml(s);
-	return decoded.replace(/<[^>]*>/g, "");
+  const decoded = unescapeHtml(s);
+  return decoded.replace(/<[^>]*>/g, "");
 }
 
 /**
@@ -84,7 +81,7 @@ export function stripHtml(s: string): string {
  * @returns The string with normalized whitespace
  */
 export function normalizeWhitespace(s: string): string {
-	return String(s).trim().replace(/\s+/g, " ");
+  return String(s).trim().replace(/\s+/g, " ");
 }
 
 /**
@@ -95,7 +92,7 @@ export function normalizeWhitespace(s: string): string {
  * @returns The string with diacritical marks removed
  */
 export function stripDiacritics(s: string): string {
-	return s.normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
+  return s.normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
 }
 
 /**
@@ -107,10 +104,10 @@ export function stripDiacritics(s: string): string {
  * @returns Array of trimmed, non-empty parts
  */
 export function splitAndTrim(s: string, separator: string | RegExp): string[] {
-	return s
-		.split(separator)
-		.map((x) => x.trim())
-		.filter(Boolean);
+  return s
+    .split(separator)
+    .map((x) => x.trim())
+    .filter(Boolean);
 }
 
 /**
@@ -120,29 +117,26 @@ export function splitAndTrim(s: string, separator: string | RegExp): string[] {
  * @param space Indentation for pretty-printing.
  * @returns A JSON string representation of the object.
  */
-export function safeStringify(
-	obj: unknown,
-	space: number | string = 2,
-): string {
-	const seen = new WeakSet();
-	const replacer = (key: string, value: unknown) => {
-		if (typeof value === "object" && value !== null) {
-			if (seen.has(value)) {
-				return "[Circular Reference]";
-			}
-			seen.add(value);
-		}
+export function safeStringify(obj: unknown, space: number | string = 2): string {
+  const seen = new WeakSet();
+  const replacer = (key: string, value: unknown) => {
+    if (typeof value === "object" && value !== null) {
+      if (seen.has(value)) {
+        return "[Circular Reference]";
+      }
+      seen.add(value);
+    }
 
-		if (typeof value === "bigint") {
-			return `${value.toString()}n`;
-		}
+    if (typeof value === "bigint") {
+      return `${value.toString()}n`;
+    }
 
-		return value;
-	};
+    return value;
+  };
 
-	try {
-		return JSON.stringify(obj, replacer, space);
-	} catch (e) {
-		return `[Unserializable Object: ${e instanceof Error ? e.message : String(e)}]`;
-	}
+  try {
+    return JSON.stringify(obj, replacer, space);
+  } catch (e) {
+    return `[Unserializable Object: ${e instanceof Error ? e.message : String(e)}]`;
+  }
 }

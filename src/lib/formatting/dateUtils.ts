@@ -5,46 +5,46 @@ import type { ParseFailure } from "../errors/types";
 const MASK_CACHE = new SimpleCache<string, (d: Date) => string>(64);
 
 function compileMask(mask: string): (date: Date) => string {
-	const useLoose = !mask.includes("{");
-	return (date) => {
-		let output = mask
-			.replace(/\{YYYY\}/g, String(date.getFullYear()))
-			.replace(/\{MM\}/g, String(date.getMonth() + 1).padStart(2, "0"))
-			.replace(/\{DD\}/g, String(date.getDate()).padStart(2, "0"))
-			.replace(/\{HH\}/g, String(date.getHours()).padStart(2, "0"))
-			.replace(/\{mm\}/g, String(date.getMinutes()).padStart(2, "0"))
-			.replace(/\{ss\}/g, String(date.getSeconds()).padStart(2, "0"));
+  const useLoose = !mask.includes("{");
+  return (date) => {
+    let output = mask
+      .replace(/\{YYYY\}/g, String(date.getFullYear()))
+      .replace(/\{MM\}/g, String(date.getMonth() + 1).padStart(2, "0"))
+      .replace(/\{DD\}/g, String(date.getDate()).padStart(2, "0"))
+      .replace(/\{HH\}/g, String(date.getHours()).padStart(2, "0"))
+      .replace(/\{mm\}/g, String(date.getMinutes()).padStart(2, "0"))
+      .replace(/\{ss\}/g, String(date.getSeconds()).padStart(2, "0"));
 
-		if (useLoose) {
-			output = output
-				.replace(/YYYY/g, String(date.getFullYear()))
-				.replace(/MM/g, String(date.getMonth() + 1).padStart(2, "0"))
-				.replace(/DD/g, String(date.getDate()).padStart(2, "0"))
-				.replace(/HH/g, String(date.getHours()).padStart(2, "0"))
-				.replace(/mm/g, String(date.getMinutes()).padStart(2, "0"))
-				.replace(/ss/g, String(date.getSeconds()).padStart(2, "0"));
-		}
-		return output;
-	};
+    if (useLoose) {
+      output = output
+        .replace(/YYYY/g, String(date.getFullYear()))
+        .replace(/MM/g, String(date.getMonth() + 1).padStart(2, "0"))
+        .replace(/DD/g, String(date.getDate()).padStart(2, "0"))
+        .replace(/HH/g, String(date.getHours()).padStart(2, "0"))
+        .replace(/mm/g, String(date.getMinutes()).padStart(2, "0"))
+        .replace(/ss/g, String(date.getSeconds()).padStart(2, "0"));
+    }
+    return output;
+  };
 }
 
 function isValidCustomFormat(format: string): boolean {
-	const tokenRegex = /\{([^}]+)\}/g;
-	let match = tokenRegex.exec(format);
-	while (match !== null) {
-		const token = match[1];
-		if (
-			token !== "YYYY" &&
-			token !== "MM" &&
-			token !== "DD" &&
-			token !== "HH" &&
-			token !== "mm" &&
-			token !== "ss"
-		)
-			return false;
-		match = tokenRegex.exec(format);
-	}
-	return true;
+  const tokenRegex = /\{([^}]+)\}/g;
+  let match = tokenRegex.exec(format);
+  while (match !== null) {
+    const token = match[1];
+    if (
+      token !== "YYYY" &&
+      token !== "MM" &&
+      token !== "DD" &&
+      token !== "HH" &&
+      token !== "mm" &&
+      token !== "ss"
+    )
+      return false;
+    match = tokenRegex.exec(format);
+  }
+  return true;
 }
 
 /**
@@ -53,29 +53,26 @@ function isValidCustomFormat(format: string): boolean {
  * @param locale The locale string (e.g., "en-US") or undefined for system locale.
  * @returns Result with formatted date string, or a DateParseError on error.
  */
-function toLocaleDateSafe(
-	date: Date,
-	locale: string | undefined,
-): Result<string, ParseFailure> {
-	try {
-		if (Number.isNaN(date.getTime())) {
-			return err({ kind: "DateParseError", input: String(date) });
-		}
-		const s = date.toLocaleDateString(locale, {
-			year: "numeric",
-			month: "short",
-			day: "numeric",
-		});
-		return ok(s);
-	} catch {
-		return err({ kind: "DateParseError", input: String(date) });
-	}
+function toLocaleDateSafe(date: Date, locale: string | undefined): Result<string, ParseFailure> {
+  try {
+    if (Number.isNaN(date.getTime())) {
+      return err({ kind: "DateParseError", input: String(date) });
+    }
+    const s = date.toLocaleDateString(locale, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+    return ok(s);
+  } catch {
+    return err({ kind: "DateParseError", input: String(date) });
+  }
 }
 
 function _coerceToDate(input: string | number | Date): Date {
-	if (input instanceof Date) return input;
-	if (typeof input === "number") return new Date(input);
-	return new Date(input);
+  if (input instanceof Date) return input;
+  if (typeof input === "number") return new Date(input);
+  return new Date(input);
 }
 
 /**
@@ -86,80 +83,80 @@ function _coerceToDate(input: string | number | Date): Date {
  * - format = custom mask supporting tokens YYYY, MM, DD
  */
 export function formatDate(
-	dateInput: string | number | Date,
-	format?: "locale" | "daily-note" | string,
+  dateInput: string | number | Date,
+  format?: "locale" | "daily-note" | string,
 ): string {
-	const date = _coerceToDate(dateInput);
-	if (Number.isNaN(date.getTime())) {
-		return "";
-	}
+  const date = _coerceToDate(dateInput);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
 
-	if (!format) {
-		// Backward-compatible default: en-US
-		const r = toLocaleDateSafe(date, "en-US");
-		return r.ok ? r.value : "";
-	}
+  if (!format) {
+    // Backward-compatible default: en-US
+    const r = toLocaleDateSafe(date, "en-US");
+    return r.ok ? r.value : "";
+  }
 
-	if (format === "locale") {
-		const r = toLocaleDateSafe(date, undefined);
-		return r.ok ? r.value : "";
-	}
+  if (format === "locale") {
+    const r = toLocaleDateSafe(date, undefined);
+    return r.ok ? r.value : "";
+  }
 
-	if (format === "daily-note") {
-		const y = String(date.getFullYear());
-		const m = String(date.getMonth() + 1).padStart(2, "0");
-		const d = String(date.getDate()).padStart(2, "0");
-		return `[[${y}-${m}-${d}]]`;
-	}
+  if (format === "daily-note") {
+    const y = String(date.getFullYear());
+    const m = String(date.getMonth() + 1).padStart(2, "0");
+    const d = String(date.getDate()).padStart(2, "0");
+    return `[[${y}-${m}-${d}]]`;
+  }
 
-	// Custom mask
-	if (!isValidCustomFormat(format)) {
-		return "";
-	}
-	let fn = MASK_CACHE.get(format);
-	if (!fn) {
-		fn = compileMask(format);
-		MASK_CACHE.set(format, fn);
-	}
-	return fn(date);
+  // Custom mask
+  if (!isValidCustomFormat(format)) {
+    return "";
+  }
+  let fn = MASK_CACHE.get(format);
+  if (!fn) {
+    fn = compileMask(format);
+    MASK_CACHE.set(format, fn);
+  }
+  return fn(date);
 }
 
 /**
  * Pure variant that returns a Result for callers that want structured errors.
  */
 export function formatDateResult(
-	dateInput: string | number | Date,
-	format?: "locale" | "daily-note" | string,
+  dateInput: string | number | Date,
+  format?: "locale" | "daily-note" | string,
 ): Result<string, ParseFailure> {
-	const date = _coerceToDate(dateInput);
-	if (Number.isNaN(date.getTime())) {
-		return err({ kind: "DateParseError", input: String(dateInput) });
-	}
+  const date = _coerceToDate(dateInput);
+  if (Number.isNaN(date.getTime())) {
+    return err({ kind: "DateParseError", input: String(dateInput) });
+  }
 
-	if (!format) {
-		return toLocaleDateSafe(date, "en-US");
-	}
-	if (format === "locale") {
-		return toLocaleDateSafe(date, undefined);
-	}
-	if (format === "daily-note") {
-		const y = String(date.getFullYear());
-		const m = String(date.getMonth() + 1).padStart(2, "0");
-		const d = String(date.getDate()).padStart(2, "0");
-		return ok(`[[${y}-${m}-${d}]]`);
-	}
-	if (format !== "locale" && format !== "daily-note") {
-		if (!isValidCustomFormat(format)) {
-			return err({ kind: "DateParseError", input: format });
-		}
-		let fn = MASK_CACHE.get(format);
-		if (!fn) {
-			fn = compileMask(format);
-			MASK_CACHE.set(format, fn);
-		}
-		return ok(fn(date));
-	}
-	return err({ kind: "DateParseError", input: format });
+  if (!format) {
+    return toLocaleDateSafe(date, "en-US");
+  }
+  if (format === "locale") {
+    return toLocaleDateSafe(date, undefined);
+  }
+  if (format === "daily-note") {
+    const y = String(date.getFullYear());
+    const m = String(date.getMonth() + 1).padStart(2, "0");
+    const d = String(date.getDate()).padStart(2, "0");
+    return ok(`[[${y}-${m}-${d}]]`);
+  }
+  if (format !== "locale" && format !== "daily-note") {
+    if (!isValidCustomFormat(format)) {
+      return err({ kind: "DateParseError", input: format });
+    }
+    let fn = MASK_CACHE.get(format);
+    if (!fn) {
+      fn = compileMask(format);
+      MASK_CACHE.set(format, fn);
+    }
+    return ok(fn(date));
+  }
+  return err({ kind: "DateParseError", input: format });
 }
 
 /**
@@ -167,8 +164,8 @@ export function formatDateResult(
  * @param date Optional Date (defaults to now)
  */
 export function formatDateForDailyNote(date: Date = new Date()): string {
-	// ISO 8601 date prefix, stable and timezone-safe for filenames
-	return date.toISOString().slice(0, 10);
+  // ISO 8601 date prefix, stable and timezone-safe for filenames
+  return date.toISOString().slice(0, 10);
 }
 
 /**
@@ -177,9 +174,9 @@ export function formatDateForDailyNote(date: Date = new Date()): string {
  * @param date Optional Date (defaults to now)
  */
 export function formatDateForTimestamp(date: Date = new Date()): string {
-	// Format: YYYY-MM-DDTHH-mm-ss-sssZ (filesystem-safe, derived from ISO 8601)
-	// We replace colon and dot which are problematic on some filesystems.
-	return date.toISOString().replace(/[:.]/g, "-");
+  // Format: YYYY-MM-DDTHH-mm-ss-sssZ (filesystem-safe, derived from ISO 8601)
+  // We replace colon and dot which are problematic on some filesystems.
+  return date.toISOString().replace(/[:.]/g, "-");
 }
 
 /**
@@ -188,8 +185,8 @@ export function formatDateForTimestamp(date: Date = new Date()): string {
  * @returns Formatted date like "Jan 1, 2025"
  */
 export function formatUnixTimestamp(timestamp: number): string {
-	const r = toLocaleDateSafe(new Date(timestamp * 1000), "en-US");
-	return r.ok ? r.value : "";
+  const r = toLocaleDateSafe(new Date(timestamp * 1000), "en-US");
+  return r.ok ? r.value : "";
 }
 
 /**
@@ -201,26 +198,26 @@ export function formatUnixTimestamp(timestamp: number): string {
  * - If everything is zero, show "0s".
  */
 export function formatDurationHms(totalSeconds: number): string {
-	if (totalSeconds < 0) totalSeconds = 0;
+  if (totalSeconds < 0) totalSeconds = 0;
 
-	const hours = Math.floor(totalSeconds / 3600);
-	const minutes = Math.floor((totalSeconds % 3600) / 60);
-	const seconds = Math.floor(totalSeconds % 60);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = Math.floor(totalSeconds % 60);
 
-	const parts: string[] = [];
+  const parts: string[] = [];
 
-	if (hours > 0) {
-		parts.push(`${hours}h`);
-	}
-	if (minutes > 0) {
-		parts.push(`${minutes}m`);
-	}
-	if (seconds > 0 || parts.length === 0) {
-		// Include seconds if non-zero, or if there are no hours/minutes (pure seconds/zero case)
-		parts.push(`${seconds}s`);
-	}
+  if (hours > 0) {
+    parts.push(`${hours}h`);
+  }
+  if (minutes > 0) {
+    parts.push(`${minutes}m`);
+  }
+  if (seconds > 0 || parts.length === 0) {
+    // Include seconds if non-zero, or if there are no hours/minutes (pure seconds/zero case)
+    parts.push(`${seconds}s`);
+  }
 
-	return parts.join(" ");
+  return parts.join(" ");
 }
 
 /**
@@ -229,19 +226,19 @@ export function formatDurationHms(totalSeconds: number): string {
  * - "Xm Ys" if ≥ 60 seconds
  */
 export function formatShortDuration(totalSeconds: number): string {
-	if (totalSeconds < 0) totalSeconds = 0;
+  if (totalSeconds < 0) totalSeconds = 0;
 
-	const sec = Math.floor(totalSeconds);
-	if (sec < 60) {
-		return `${sec}s`;
-	}
+  const sec = Math.floor(totalSeconds);
+  if (sec < 60) {
+    return `${sec}s`;
+  }
 
-	const minutes = Math.floor(sec / 60);
-	const seconds = sec % 60;
+  const minutes = Math.floor(sec / 60);
+  const seconds = sec % 60;
 
-	if (seconds === 0) {
-		return `${minutes}m`;
-	}
+  if (seconds === 0) {
+    return `${minutes}m`;
+  }
 
-	return `${minutes}m ${seconds}s`;
+  return `${minutes}m ${seconds}s`;
 }

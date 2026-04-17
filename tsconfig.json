@@ -1,26 +1,22 @@
 {
 	"compilerOptions": {
-		"baseUrl": ".",
+		"paths": {
+			"src/*": ["./src/*"],
+			"tests/*": ["./tests/*"]
+		},
 		"inlineSourceMap": true,
 		"inlineSources": true,
 		"module": "ESNext",
 		"target": "ES2022",
 		"allowJs": false,
-		"noImplicitAny": true,
 		"strict": true,
 		"moduleResolution": "bundler",
 		"importHelpers": true,
 		"isolatedModules": true,
-		"strictNullChecks": true,
 		"lib": ["DOM", "ES2022"],
 		"esModuleInterop": true,
 		"skipLibCheck": true,
 		"types": ["node", "vitest/globals"]
 	},
-	"include": [
-		"src/**/*.ts",
-		"tests/**/*.ts",
-		"vitest.config.ts",
-		"tests/global.d.ts"
-	]
+	"include": ["src/**/*.ts", "tests/**/*.ts", "vitest.config.ts", "tests/global.d.ts"]
 }

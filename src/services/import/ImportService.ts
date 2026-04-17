@@ -12,23 +12,23 @@ import type { DeviceService } from "src/services/device/DeviceService";
 import { executeImportPlan } from "src/services/import/importExecutor";
 import type { EnrichedImportContext } from "src/services/import/importPlanner";
 import {
-	enrichWithStatistics,
-	parseLuaMetadata,
-	planImport,
+  enrichWithStatistics,
+  parseLuaMetadata,
+  planImport,
 } from "src/services/import/importPlanner";
 import type {
-	ExecResult,
-	ExecutorIO,
-	ImportContext,
-	ImportPlan,
-	PlannerIO,
+  ExecResult,
+  ExecutorIO,
+  ImportContext,
+  ImportPlan,
+  PlannerIO,
 } from "src/services/import/types";
 import type { IndexCoordinator } from "src/services/vault/index/IndexCoordinator";
 import {
-	type DuplicateHandlingSession,
-	type LuaMetadata,
-	type StaleLocationSession,
-	Summary,
+  type DuplicateHandlingSession,
+  type LuaMetadata,
+  type StaleLocationSession,
+  Summary,
 } from "src/types";
 import { InteractionModal } from "src/ui/InteractionModal";
 import { withProgress } from "src/ui/utils/progress";
@@ -42,521 +42,476 @@ import type { MergeHandler } from "../vault/MergeHandler";
 import type { NotePersistenceService } from "../vault/NotePersistenceService";
 
 export class ImportService {
-	private readonly log;
-	private readonly bookPipelineQueue = new KeyedQueue();
+  private readonly log;
+  private readonly bookPipelineQueue = new KeyedQueue();
 
-	constructor(
-		private readonly app: App,
-		private readonly plugin: KoreaderImporterPlugin,
-		private readonly device: DeviceService,
-		private readonly localIndexService: IndexCoordinator,
-		private readonly persistence: NotePersistenceService,
-		private readonly loggingService: LoggingService,
-		private readonly fs: FileSystemService,
-		private readonly dupFinder: DuplicateFinder,
-		private readonly noteEditorService: NoteEditorService,
-		private readonly templateManager: TemplateManager,
-		private readonly mergeHandler: MergeHandler,
-	) {
-		this.log = this.loggingService.scoped("ImportService");
-	}
+  constructor(
+    private readonly app: App,
+    private readonly plugin: KoreaderImporterPlugin,
+    private readonly device: DeviceService,
+    private readonly localIndexService: IndexCoordinator,
+    private readonly persistence: NotePersistenceService,
+    private readonly loggingService: LoggingService,
+    private readonly fs: FileSystemService,
+    private readonly dupFinder: DuplicateFinder,
+    _noteEditorService: NoteEditorService,
+    private readonly templateManager: TemplateManager,
+    private readonly mergeHandler: MergeHandler,
+  ) {
+    this.log = this.loggingService.scoped("ImportService");
+  }
 
-	private async _cleanupStaleIndexEntries(
-		paths: string[],
-		signal?: AbortSignal,
-	): Promise<void> {
-		if (paths.length === 0) return;
+  private async _cleanupStaleIndexEntries(paths: string[], signal?: AbortSignal): Promise<void> {
+    if (paths.length === 0) return;
 
-		this.log.info(`Cleaning ${paths.length} stale index entries...`);
+    this.log.info(`Cleaning ${paths.length} stale index entries...`);
 
-		const cleanupStream = runPool(
-			paths,
-			async (p: string) => {
-				try {
-					throwIfAborted(signal);
-					await this.localIndexService.deleteBookInstanceByPath(p);
-				} catch (e) {
-					if (!isAbortError(e)) {
-						this.log.warn(
-							`Failed to clean stale index entry for path: ${p}`,
-							e,
-						);
-					}
-				}
-			},
-			{ concurrency: 4, signal },
-		);
+    const cleanupStream = runPool(
+      paths,
+      async (p: string) => {
+        try {
+          throwIfAborted(signal);
+          await this.localIndexService.deleteBookInstanceByPath(p);
+        } catch (e) {
+          if (!isAbortError(e)) {
+            this.log.warn(`Failed to clean stale index entry for path: ${p}`, e);
+          }
+        }
+      },
+      { concurrency: 4, signal },
+    );
 
-		for await (const result of cleanupStream) {
-			if (!result.ok && !isAbortError(result.error)) {
-				this.log.error(
-					"Unexpected error during index cleanup stream",
-					result.error,
-				);
-			}
-		}
-	}
+    for await (const result of cleanupStream) {
+      if (!result.ok && !isAbortError(result.error)) {
+        this.log.error("Unexpected error during index cleanup stream", result.error);
+      }
+    }
+  }
 
-	// --- Core Logic ---
+  // --- Core Logic ---
 
-	private buildPlannerIO(): PlannerIO {
-		return {
-			fs: this.fs,
-			index: this.localIndexService,
-			parser: (lua: string) => parseMetadata(lua),
-			device: this.device,
-			dupFinder: this.dupFinder,
-			log: this.loggingService,
-			settings: this.plugin.settings,
-			app: this.app,
-		};
-	}
+  private buildPlannerIO(): PlannerIO {
+    return {
+      fs: this.fs,
+      index: this.localIndexService,
+      parser: (lua: string) => parseMetadata(lua),
+      device: this.device,
+      dupFinder: this.dupFinder,
+      log: this.loggingService,
+      settings: this.plugin.settings,
+      app: this.app,
+    };
+  }
 
-	private buildExecutorIO(): ExecutorIO {
-		return {
-			app: this.app,
-			fs: this.fs,
-			templateManager: this.templateManager,
-			mergeHandler: this.mergeHandler,
-			persistence: this.persistence,
-			settings: this.plugin.settings,
-			log: this.loggingService,
-		};
-	}
-	public plan(
-		initial: ImportContext & {
-			luaMetadata: LuaMetadata;
-			latestTs: string | null;
-		},
-		degradedScanCache: Map<string, TFile[]> | null,
-		opts?: { signal?: AbortSignal },
-	): Promise<{
-		plan: ImportPlan;
-		ctx: ImportContext;
-		diagnostics: import("../../lib/parsing/luaParser").Diagnostic[];
-	}> {
-		return planImport(initial, this.buildPlannerIO(), degradedScanCache, opts);
-	}
+  private buildExecutorIO(): ExecutorIO {
+    return {
+      app: this.app,
+      fs: this.fs,
+      templateManager: this.templateManager,
+      mergeHandler: this.mergeHandler,
+      persistence: this.persistence,
+      settings: this.plugin.settings,
+      log: this.loggingService,
+    };
+  }
+  public plan(
+    initial: ImportContext & {
+      luaMetadata: LuaMetadata;
+      latestTs: string | null;
+    },
+    degradedScanCache: Map<string, TFile[]> | null,
+    opts?: { signal?: AbortSignal },
+  ): Promise<{
+    plan: ImportPlan;
+    ctx: ImportContext;
+    diagnostics: import("../../lib/parsing/luaParser").Diagnostic[];
+  }> {
+    return planImport(initial, this.buildPlannerIO(), degradedScanCache, opts);
+  }
 
-	public execute(
-		plan: ImportPlan,
-		ctx: ImportContext,
-		session: DuplicateHandlingSession,
-		opts?: { signal?: AbortSignal },
-	): Promise<ExecResult> {
-		return executeImportPlan(plan, ctx, session, this.buildExecutorIO(), opts);
-	}
+  public execute(
+    plan: ImportPlan,
+    ctx: ImportContext,
+    session: DuplicateHandlingSession,
+    opts?: { signal?: AbortSignal },
+  ): Promise<ExecResult> {
+    return executeImportPlan(plan, ctx, session, this.buildExecutorIO(), opts);
+  }
 
-	// --- Orchestration Logic ---
+  // --- Orchestration Logic ---
 
-	private async recordOutcome(ctx: ImportContext, exec: ExecResult) {
-		try {
-			await this.localIndexService.recordImportSuccess({
-				path: ctx.metadataPath,
-				mtime: ctx.stats?.mtimeMs ?? 0,
-				size: ctx.stats?.size ?? 0,
-				newestAnnotationTs: ctx.latestTs,
-				bookKey: ctx.luaMetadata
-					? buildBookKey(ctx.luaMetadata.docProps)
-					: null,
-				md5: ctx.luaMetadata?.md5 ?? null,
-				vaultPath: exec.file?.path ?? null,
-				title: ctx.luaMetadata?.docProps.title ?? undefined,
-				authors: ctx.luaMetadata?.docProps.authors ?? undefined,
-			});
-		} catch (e) {
-			this.log.warn("Failed to record import success", e);
-		}
-	}
+  private async recordOutcome(ctx: ImportContext, exec: ExecResult) {
+    try {
+      await this.localIndexService.recordImportSuccess({
+        path: ctx.metadataPath,
+        mtime: ctx.stats?.mtimeMs ?? 0,
+        size: ctx.stats?.size ?? 0,
+        newestAnnotationTs: ctx.latestTs,
+        bookKey: ctx.luaMetadata ? buildBookKey(ctx.luaMetadata.docProps) : null,
+        md5: ctx.luaMetadata?.md5 ?? null,
+        vaultPath: exec.file?.path ?? null,
+        title: ctx.luaMetadata?.docProps.title ?? undefined,
+        authors: ctx.luaMetadata?.docProps.authors ?? undefined,
+      });
+    } catch (e) {
+      this.log.warn("Failed to record import success", e);
+    }
+  }
 
-	public async importHighlights(options?: {
-		forceReimportAll?: boolean;
-		signal?: AbortSignal;
-	}): Promise<void> {
-		this.log.info("Starting KOReader highlight import process…");
+  public async importHighlights(options?: {
+    forceReimportAll?: boolean;
+    signal?: AbortSignal;
+  }): Promise<void> {
+    this.log.info("Starting KOReader highlight import process…");
 
-		if (this.localIndexService.isRebuildingIndex?.()) {
-			this.log.warn("Index is rebuilding; duplicate checks may be slower.");
-			new Notice(
-				"KOReader: index is rebuilding — duplicate checks may be slower.",
-				6000,
-			);
-		}
+    if (this.localIndexService.isRebuildingIndex?.()) {
+      this.log.warn("Index is rebuilding; duplicate checks may be slower.");
+      new Notice("KOReader: index is rebuilding — duplicate checks may be slower.", 6000);
+    }
 
-		const metadataPaths = await withProgress(
-			this.app,
-			0,
-			(tick, signal) => this.device.findSdrDirectoriesWithMetadata({ signal }),
-			{
-				title: "Scanning KOReader device…",
-				showWhenTotalIsZero: true,
-				signal: options?.signal,
-			},
-		);
+    const metadataPaths = await withProgress(
+      this.app,
+      0,
+      (tick, signal) => this.device.findSdrDirectoriesWithMetadata({ signal }),
+      {
+        title: "Scanning KOReader device…",
+        showWhenTotalIsZero: true,
+        signal: options?.signal,
+      },
+    );
 
-		if (!metadataPaths?.length) {
-			new Notice("No KOReader highlight files found (.sdr with metadata.lua).");
-			return;
-		}
+    if (!metadataPaths?.length) {
+      new Notice("No KOReader highlight files found (.sdr with metadata.lua).");
+      return;
+    }
 
-		await this.localIndexService.whenReady();
+    await this.localIndexService.whenReady();
 
-		let degradedScanCache: Map<string, TFile[]> | null = null;
-		if (
-			this.localIndexService.isRebuildingIndex() ||
-			!this.localIndexService.isIndexPersistent()
-		) {
-			this.log.info(
-				"Index is in degraded mode. Building a pre-scan cache for duplicates.",
-			);
-			degradedScanCache = await this.dupFinder.buildDegradedScanCache();
-		}
+    let degradedScanCache: Map<string, TFile[]> | null = null;
+    if (this.localIndexService.isRebuildingIndex() || !this.localIndexService.isIndexPersistent()) {
+      this.log.info("Index is in degraded mode. Building a pre-scan cache for duplicates.");
+      degradedScanCache = await this.dupFinder.buildDegradedScanCache();
+    }
 
-		const sessions = {
-			duplicates: { applyToAll: false, choice: null },
-			staleLocations: { applyToAll: false, choice: null },
-		};
+    const sessions = {
+      duplicates: { applyToAll: false, choice: null },
+      staleLocations: { applyToAll: false, choice: null },
+    };
 
-		let summary = Summary.empty();
-		const timedOutTitles: string[] = [];
+    let summary = Summary.empty();
+    const timedOutTitles: string[] = [];
 
-		try {
-			await withProgress(
-				this.app,
-				metadataPaths.length,
-				async (tick, signal) => {
-					const concurrency = getOptimalConcurrency();
+    try {
+      await withProgress(
+        this.app,
+        metadataPaths.length,
+        async (tick, signal) => {
+          const concurrency = getOptimalConcurrency();
 
-					const resultsStream = runPool(
-						metadataPaths,
-						// Worker function with explicit type annotation
-						async (metadataPath: string) => {
-							const initialCtx: ImportContext = {
-								metadataPath,
-								sdrPath: Pathing.systemDirname(metadataPath),
-								forceNote: null,
-								forceReimport: !!options?.forceReimportAll,
-								stats: null,
-								latestTs: null,
-								luaMetadata: null,
-								warnings: [],
-							};
+          const resultsStream = runPool(
+            metadataPaths,
+            // Worker function with explicit type annotation
+            async (metadataPath: string) => {
+              const initialCtx: ImportContext = {
+                metadataPath,
+                sdrPath: Pathing.systemDirname(metadataPath),
+                forceNote: null,
+                forceReimport: !!options?.forceReimportAll,
+                stats: null,
+                latestTs: null,
+                luaMetadata: null,
+                warnings: [],
+              };
 
-							const execResult = await this._runPipelineForItem(
-								initialCtx,
-								sessions,
-								degradedScanCache, // Pass the pre-scanned results
-								signal,
-							);
+              const execResult = await this._runPipelineForItem(
+                initialCtx,
+                sessions,
+                degradedScanCache, // Pass the pre-scanned results
+                signal,
+              );
 
-							// Track titles instead of a boolean flag
-							if (
-								initialCtx.warnings.includes("duplicate-timeout") &&
-								initialCtx.luaMetadata?.docProps.title
-							) {
-								timedOutTitles.push(initialCtx.luaMetadata.docProps.title);
-							}
+              // Track titles instead of a boolean flag
+              if (
+                initialCtx.warnings.includes("duplicate-timeout") &&
+                initialCtx.luaMetadata?.docProps.title
+              ) {
+                timedOutTitles.push(initialCtx.luaMetadata.docProps.title);
+              }
 
-							return execResult;
-						},
-						{ concurrency, signal },
-					);
+              return execResult;
+            },
+            { concurrency, signal },
+          );
 
-					for await (const result of resultsStream) {
-						if (result.ok) {
-							summary = Summary.addResult(summary, result.value);
-						} else {
-							this.log.error(
-								`Pipeline item failed for ${result.error.item}`,
-								result.error.error,
-							);
-							summary = Summary.add(summary, { skipped: 1, errors: 1 });
-						}
-						tick(); // Advance progress bar for each completed item
-					}
-				},
-				{ signal: options?.signal },
-			);
+          for await (const result of resultsStream) {
+            if (result.ok) {
+              summary = Summary.addResult(summary, result.value);
+            } else {
+              this.log.error(`Pipeline item failed for ${result.error.item}`, result.error.error);
+              summary = Summary.add(summary, { skipped: 1, errors: 1 });
+            }
+            tick(); // Advance progress bar for each completed item
+          }
+        },
+        { signal: options?.signal },
+      );
 
-			let summaryMessage = `KOReader Import finished\n${summary.created} new • ${summary.merged} merged • ${summary.automerged} auto-merged • ${summary.skipped} skipped`;
+      let summaryMessage = `KOReader Import finished\n${summary.created} new • ${summary.merged} merged • ${summary.automerged} auto-merged • ${summary.skipped} skipped`;
 
-			if (timedOutTitles.length > 0) {
-				const listForNotice =
-					timedOutTitles.length > 3
-						? `${timedOutTitles.slice(0, 3).join(", ")}...`
-						: timedOutTitles.join(", ");
+      if (summary.merged > 0 || summary.automerged > 0) {
+        summaryMessage +=
+          "\n\nBackups were saved for notes changed during import. Right-click a highlight note to restore one.";
+      }
 
-				summaryMessage += `\n\nNote: Scan was slow for some books (e.g., ${listForNotice}). A partial match was used.`;
-				this.log.warn(
-					"Full list of books with slow duplicate scans:",
-					timedOutTitles,
-				);
-			}
+      if (timedOutTitles.length > 0) {
+        const listForNotice =
+          timedOutTitles.length > 3
+            ? `${timedOutTitles.slice(0, 3).join(", ")}...`
+            : timedOutTitles.join(", ");
 
-			new Notice(summaryMessage, 10_000);
-			this.log.info("Import process finished", {
-				...summary,
-				timedOutCount: timedOutTitles.length,
-			});
-		} catch (err: unknown) {
-			if (isAbortError(err)) {
-				new Notice("Import cancelled by user.");
-			} else {
-				this.log.error("Critical error during highlight import process:", err);
-				new Notice("KOReader Importer: critical error. Check console.");
-			}
-		} finally {
-			this.log.info("Flushing database index …");
-			await this.localIndexService.flushIndex();
-			try {
-				await this.persistence.cleanupOldBackups(
-					this.plugin.settings.backupRetentionDays,
-					this.plugin.settings.maxBackupsPerNote,
-				);
-			} catch (cleanupError) {
-				this.log.error(
-					"An error occurred during backup cleanup.",
-					cleanupError,
-				);
-			}
+        summaryMessage += `\n\nNote: Scan was slow for some books (e.g., ${listForNotice}). A partial match was used.`;
+        this.log.warn("Full list of books with slow duplicate scans:", timedOutTitles);
+      }
 
-			// Rate-limited automatic snapshot GC (fire-and-forget)
-			void (async () => {
-				try {
-					const now = Date.now();
-					const data = await this.plugin.pluginDataStore.load();
-					const lastRun = data.lastSnapshotGCRunAt ?? 0;
-					const rateLimitMs = 6 * 60 * 60 * 1000; // 6 hours (reduced from 24h)
-					const deletionThreshold = 20; // Bypass rate limit if 20+ deletions
-					const deletionsSinceLastGC =
-						this.persistence.getDeletionsSinceLastGC();
+      new Notice(summaryMessage, 10_000);
+      this.log.info("Import process finished", {
+        ...summary,
+        timedOutCount: timedOutTitles.length,
+      });
+    } catch (err: unknown) {
+      if (isAbortError(err)) {
+        new Notice("Import cancelled by user.");
+      } else {
+        this.log.error("Critical error during highlight import process:", err);
+        new Notice("KOReader Importer: critical error. Check console.");
+      }
+    } finally {
+      this.log.info("Flushing database index …");
+      await this.localIndexService.flushIndex();
+      try {
+        await this.persistence.cleanupOldBackups(
+          this.plugin.settings.backupRetentionDays,
+          this.plugin.settings.maxBackupsPerNote,
+        );
+      } catch (cleanupError) {
+        this.log.error("An error occurred during backup cleanup.", cleanupError);
+      }
 
-					// Run GC if: 6 hours passed OR many deletions occurred
-					const shouldRunGC =
-						now - lastRun >= rateLimitMs ||
-						deletionsSinceLastGC >= deletionThreshold;
+      // Rate-limited automatic snapshot GC (fire-and-forget)
+      void (async () => {
+        try {
+          const now = Date.now();
+          const data = await this.plugin.pluginDataStore.load();
+          const lastRun = data.lastSnapshotGCRunAt ?? 0;
+          const rateLimitMs = 6 * 60 * 60 * 1000; // 6 hours (reduced from 24h)
+          const deletionThreshold = 20; // Bypass rate limit if 20+ deletions
+          const deletionsSinceLastGC = this.persistence.getDeletionsSinceLastGC();
 
-					if (shouldRunGC) {
-						const reason =
-							deletionsSinceLastGC >= deletionThreshold
-								? `${deletionsSinceLastGC} deletions threshold reached`
-								: "6-hour interval elapsed";
-						this.log.info(
-							`Automatic snapshot garbage collection triggered (${reason}). Starting...`,
-						);
-						const gcResult = await this.persistence.collectOrphanedSnapshots(
-							this.plugin.settings.highlightsFolder,
-						);
+          // Run GC if: 6 hours passed OR many deletions occurred
+          const shouldRunGC =
+            now - lastRun >= rateLimitMs || deletionsSinceLastGC >= deletionThreshold;
 
-						// Only update the timestamp if GC ran and did work or failed, to avoid resetting the timer on no-op runs.
-						if (gcResult.scanned > 0) {
-							const updatedData = { ...data, lastSnapshotGCRunAt: now };
-							await this.plugin.pluginDataStore.save(updatedData);
+          if (shouldRunGC) {
+            const reason =
+              deletionsSinceLastGC >= deletionThreshold
+                ? `${deletionsSinceLastGC} deletions threshold reached`
+                : "6-hour interval elapsed";
+            this.log.info(
+              `Automatic snapshot garbage collection triggered (${reason}). Starting...`,
+            );
+            const gcResult = await this.persistence.collectOrphanedSnapshots(
+              this.plugin.settings.highlightsFolder,
+            );
 
-							this.log.info(
-								`Automatic snapshot GC finished (${reason}). Scanned: ${gcResult.scanned}, Deleted: ${gcResult.deleted}, Failed: ${gcResult.failed}`,
-							);
-						}
-					}
-				} catch (gcError) {
-					this.log.error(
-						"An error occurred during automatic snapshot garbage collection.",
-						gcError,
-					);
-				}
-			})();
-		}
-	}
+            // Only update the timestamp if GC ran and did work or failed, to avoid resetting the timer on no-op runs.
+            if (gcResult.scanned > 0) {
+              const updatedData = { ...data, lastSnapshotGCRunAt: now };
+              await this.plugin.pluginDataStore.save(updatedData);
 
-	public async runSingleFilePipeline(params: {
-		metadataPath: string;
-		existingNoteOverride?: TFile;
-	}): Promise<{ changed: boolean; fileSummary: Summary }> {
-		const sessions = {
-			duplicates: { applyToAll: false, choice: null },
-			staleLocations: { applyToAll: false, choice: null },
-		};
+              this.log.info(
+                `Automatic snapshot GC finished (${reason}). Scanned: ${gcResult.scanned}, Deleted: ${gcResult.deleted}, Failed: ${gcResult.failed}`,
+              );
+            }
+          }
+        } catch (gcError) {
+          this.log.error(
+            "An error occurred during automatic snapshot garbage collection.",
+            gcError,
+          );
+        }
+      })();
+    }
+  }
 
-		const initialCtx: ImportContext = {
-			metadataPath: params.metadataPath,
-			sdrPath: Pathing.systemDirname(params.metadataPath),
-			forceNote: params.existingNoteOverride ?? null,
-			forceReimport: true, // A single-file run implies we want to process it
-			stats: null,
-			latestTs: null,
-			luaMetadata: null,
-			warnings: [],
-		};
+  public async runSingleFilePipeline(params: {
+    metadataPath: string;
+    existingNoteOverride?: TFile;
+  }): Promise<{ changed: boolean; fileSummary: Summary }> {
+    const sessions = {
+      duplicates: { applyToAll: false, choice: null },
+      staleLocations: { applyToAll: false, choice: null },
+    };
 
-		const execResult = await this._runPipelineForItem(
-			initialCtx,
-			sessions,
-			null,
-		);
+    const initialCtx: ImportContext = {
+      metadataPath: params.metadataPath,
+      sdrPath: Pathing.systemDirname(params.metadataPath),
+      forceNote: params.existingNoteOverride ?? null,
+      forceReimport: true, // A single-file run implies we want to process it
+      stats: null,
+      latestTs: null,
+      luaMetadata: null,
+      warnings: [],
+    };
 
-		const fileSummary = Summary.addResult(Summary.empty(), execResult);
+    const execResult = await this._runPipelineForItem(initialCtx, sessions, null);
 
-		const changed =
-			fileSummary.created + fileSummary.merged + fileSummary.automerged > 0;
-		return { changed, fileSummary };
-	}
+    const fileSummary = Summary.addResult(Summary.empty(), execResult);
 
-	private async _runPipelineForItem(
-		initialCtx: ImportContext,
-		sessions: {
-			duplicates: DuplicateHandlingSession;
-			staleLocations: StaleLocationSession;
-		},
-		degradedScanCache: Map<string, TFile[]> | null,
-		signal?: AbortSignal,
-	): Promise<ExecResult> {
-		throwIfAborted(signal);
+    const changed = fileSummary.created + fileSummary.merged + fileSummary.automerged > 0;
+    return { changed, fileSummary };
+  }
 
-		const luaContent = await this.device.readMetadataFileContent(
-			initialCtx.sdrPath,
-		);
-		if (!luaContent) return { status: "skipped", file: null, warnings: [] };
+  private async _runPipelineForItem(
+    initialCtx: ImportContext,
+    sessions: {
+      duplicates: DuplicateHandlingSession;
+      staleLocations: StaleLocationSession;
+    },
+    degradedScanCache: Map<string, TFile[]> | null,
+    signal?: AbortSignal,
+  ): Promise<ExecResult> {
+    throwIfAborted(signal);
 
-		const parseResult = parseLuaMetadata(luaContent, initialCtx.sdrPath);
-		if (isErr(parseResult)) {
-			this.log.warn(
-				`Parsing failed for ${initialCtx.metadataPath}: ${formatAppFailure(parseResult.error)}`,
-			);
-			return { status: "skipped", file: null, warnings: [] };
-		}
+    const luaContent = await this.device.readMetadataFileContent(initialCtx.sdrPath);
+    if (!luaContent) return { status: "skipped", file: null, warnings: [] };
 
-		const { meta, diagnostics: parseDiagnostics } = parseResult.value;
+    const parseResult = parseLuaMetadata(luaContent, initialCtx.sdrPath);
+    if (isErr(parseResult)) {
+      this.log.warn(
+        `Parsing failed for ${initialCtx.metadataPath}: ${formatAppFailure(parseResult.error)}`,
+      );
+      return { status: "skipped", file: null, warnings: [] };
+    }
 
-		const stats = await this.device.findBookStatistics(
-			meta.docProps.title,
-			meta.docProps.authors,
-			meta.md5,
-			signal,
-		);
+    const { meta, diagnostics: parseDiagnostics } = parseResult.value;
 
-		const enrichedMeta = enrichWithStatistics(meta, stats);
-		const enrichedCtx: EnrichedImportContext = {
-			...initialCtx,
-			luaMetadata: enrichedMeta,
-			latestTs:
-				meta.annotations?.reduce<string | null>(
-					(acc: string | null, a: { datetime: string }) =>
-						!acc || a.datetime > acc ? a.datetime : acc,
-					null,
-				) ?? null,
-		};
+    const stats = await this.device.findBookStatistics(
+      meta.docProps.title,
+      meta.docProps.authors,
+      meta.md5,
+      signal,
+    );
 
-		const bookKey = buildBookKey(enrichedMeta.docProps);
+    const enrichedMeta = enrichWithStatistics(meta, stats);
+    const enrichedCtx: EnrichedImportContext = {
+      ...initialCtx,
+      luaMetadata: enrichedMeta,
+      latestTs:
+        meta.annotations?.reduce<string | null>(
+          (acc: string | null, a: { datetime: string }) =>
+            !acc || a.datetime > acc ? a.datetime : acc,
+          null,
+        ) ?? null,
+    };
 
-		// Log diagnostics
-		parseDiagnostics.forEach(
-			(d: import("src/lib/parsing/luaParser").Diagnostic) => {
-				if (d.severity === "error") this.log.error(d.message);
-				else if (d.severity === "warn") this.log.warn(d.message);
-				else this.log.info(d.message);
-			},
-		);
+    const bookKey = buildBookKey(enrichedMeta.docProps);
 
-		return this.bookPipelineQueue.run(bookKey, async () => {
-			try {
-				throwIfAborted(signal);
+    // Log diagnostics
+    parseDiagnostics.forEach((d: import("src/lib/parsing/luaParser").Diagnostic) => {
+      if (d.severity === "error") this.log.error(d.message);
+      else if (d.severity === "warn") this.log.warn(d.message);
+      else this.log.info(d.message);
+    });
 
-				const { plan, ctx, diagnostics } = await this.plan(
-					enrichedCtx,
-					degradedScanCache, // Pass it down to the planner
-					{ signal },
-				);
+    return this.bookPipelineQueue.run(bookKey, async () => {
+      try {
+        throwIfAborted(signal);
 
-				// Log all diagnostics from the planning phase
-				diagnostics.forEach((d) => {
-					if (d.severity === "error") this.log.error(d.message);
-					else if (d.severity === "warn") this.log.warn(d.message);
-					else this.log.info(d.message);
-				});
+        const { plan, ctx, diagnostics } = await this.plan(
+          enrichedCtx,
+          degradedScanCache, // Pass it down to the planner
+          { signal },
+        );
 
-				// --- Perform index cleanup as a shell side-effect ---
-				if (ctx.indexCleanupPaths?.length) {
-					await this._cleanupStaleIndexEntries(ctx.indexCleanupPaths, signal);
-				}
+        // Log all diagnostics from the planning phase
+        diagnostics.forEach((d) => {
+          if (d.severity === "error") this.log.error(d.message);
+          else if (d.severity === "warn") this.log.warn(d.message);
+          else this.log.info(d.message);
+        });
 
-				throwIfAborted(signal);
+        // --- Perform index cleanup as a shell side-effect ---
+        if (ctx.indexCleanupPaths?.length) {
+          await this._cleanupStaleIndexEntries(ctx.indexCleanupPaths, signal);
+        }
 
-				let effectivePlan = plan;
+        throwIfAborted(signal);
 
-				if (effectivePlan.kind === "AWAIT_STALE_LOCATION_CONFIRM") {
-					const choice = await confirmStaleLocation(
-						this.app,
-						{
-							title: "Existing Note Found in Different Folder",
-							message: `A note for "${effectivePlan.match.luaMetadata.docProps.title}" exists at "${effectivePlan.match.file.path}", outside your current highlights folder. Merge into the existing note?`,
-							session: sessions.staleLocations,
-						},
-						signal,
-					);
+        let effectivePlan = plan;
 
-					if (choice === "merge-stale") {
-						effectivePlan = { kind: "MERGE", match: effectivePlan.match };
-					} else if (choice === "create-new") {
-						// User wants a new note in the correct folder
-						effectivePlan = { kind: "CREATE" };
-					} else {
-						// 'skip-stale' or closed modal
-						effectivePlan = { kind: "SKIP", reason: "USER_DECISION" };
-					}
-				}
+        if (effectivePlan.kind === "AWAIT_STALE_LOCATION_CONFIRM") {
+          const choice = await confirmStaleLocation(
+            this.app,
+            {
+              title: "Existing Note Found in Different Folder",
+              message: `A note for "${effectivePlan.match.luaMetadata.docProps.title}" exists at "${effectivePlan.match.file.path}", outside your current highlights folder. Merge into the existing note?`,
+              session: sessions.staleLocations,
+            },
+            signal,
+          );
 
-				if (effectivePlan.kind === "AWAIT_USER_CHOICE") {
-					const userConfirmed = await InteractionModal.confirm(this.app, {
-						title: "Duplicate Scan Incomplete",
-						message: `The duplicate scan for "${effectivePlan.title}" did not complete. A potential match was found at: ${effectivePlan.existingPath ?? "—"}. Create a new note anyway?`,
-						ctaText: "Proceed",
-					});
+          if (choice === "merge-stale") {
+            effectivePlan = { kind: "MERGE", match: effectivePlan.match };
+          } else if (choice === "create-new") {
+            // User wants a new note in the correct folder
+            effectivePlan = { kind: "CREATE" };
+          } else {
+            // 'skip-stale' or closed modal
+            effectivePlan = { kind: "SKIP", reason: "USER_DECISION" };
+          }
+        }
 
-					effectivePlan = userConfirmed
-						? { kind: "CREATE", withTimeoutWarning: true }
-						: { kind: "SKIP", reason: "USER_DECISION" };
-				}
+        if (effectivePlan.kind === "AWAIT_USER_CHOICE") {
+          const userConfirmed = await InteractionModal.confirm(this.app, {
+            title: "Duplicate Scan Incomplete",
+            message: `The duplicate scan for "${effectivePlan.title}" did not complete. A potential match was found at: ${effectivePlan.existingPath ?? "—"}. Create a new note anyway?`,
+            ctaText: "Proceed",
+          });
 
-				throwIfAborted(signal);
+          effectivePlan = userConfirmed
+            ? { kind: "CREATE", withTimeoutWarning: true }
+            : { kind: "SKIP", reason: "USER_DECISION" };
+        }
 
-				const execResult = await this.execute(
-					effectivePlan,
-					ctx,
-					sessions.duplicates,
-					{ signal },
-				);
+        throwIfAborted(signal);
 
-				if (
-					execResult.status === "created" ||
-					execResult.status === "merged" ||
-					execResult.status === "automerged"
-				) {
-					await this.recordOutcome(ctx, execResult);
-				} else if (ctx.stats) {
-					await this.localIndexService.recordImportFailure(
-						ctx.metadataPath,
-						"Skipped or failed during execution",
-					);
-				}
+        const execResult = await this.execute(effectivePlan, ctx, sessions.duplicates, { signal });
 
-				return execResult;
-			} catch (err) {
-				if (isAbortError(err)) {
-					this.log.info(`Import for ${initialCtx.metadataPath} cancelled.`);
-					return { status: "skipped", file: null, warnings: [] };
-				}
+        if (
+          execResult.status === "created" ||
+          execResult.status === "merged" ||
+          execResult.status === "automerged"
+        ) {
+          await this.recordOutcome(ctx, execResult);
+        } else if (ctx.stats) {
+          await this.localIndexService.recordImportFailure(
+            ctx.metadataPath,
+            "Skipped or failed during execution",
+          );
+        }
 
-				this.log.error(
-					`Critical failure in import pipeline for ${initialCtx.metadataPath}`,
-					err,
-				);
-				await this.localIndexService.recordImportFailure(
-					initialCtx.metadataPath,
-					err,
-				);
+        return execResult;
+      } catch (err) {
+        if (isAbortError(err)) {
+          this.log.info(`Import for ${initialCtx.metadataPath} cancelled.`);
+          return { status: "skipped", file: null, warnings: [] };
+        }
 
-				return { status: "skipped", file: null, warnings: [] };
-			}
-		});
-	}
+        this.log.error(`Critical failure in import pipeline for ${initialCtx.metadataPath}`, err);
+        await this.localIndexService.recordImportFailure(initialCtx.metadataPath, err);
+
+        return { status: "skipped", file: null, warnings: [] };
+      }
+    });
+  }
 }

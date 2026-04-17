@@ -4,14 +4,10 @@ import type { Annotation, CommentStyle } from "src/types";
 
 // Canonical KOHL marker pattern: matches HTML or MD markers and captures the JSON payload.
 // Use [\s\S]*? to match multiline JSON in a non-greedy way.
-export const ANY_KOHL_MARKER_PATTERN_SRC =
-	"(?:<!--|%%)\\s*KOHL\\s*({[\\s\\S]*?})\\s*(?:-->|%%)";
+export const ANY_KOHL_MARKER_PATTERN_SRC = "(?:<!--|%%)\\s*KOHL\\s*({[\\s\\S]*?})\\s*(?:-->|%%)";
 
 // Global version for replace/find-all. Beware: global regexes are stateful.
-export const ANY_KOHL_MARKER_REGEX = new RegExp(
-	ANY_KOHL_MARKER_PATTERN_SRC,
-	"g",
-);
+export const ANY_KOHL_MARKER_REGEX = new RegExp(ANY_KOHL_MARKER_PATTERN_SRC, "g");
 
 // Non-global tester for safe presence checks when needed.
 export const ANY_KOHL_MARKER_TEST = new RegExp(ANY_KOHL_MARKER_PATTERN_SRC);
@@ -22,11 +18,8 @@ export const ANY_KOHL_MARKER_TEST = new RegExp(ANY_KOHL_MARKER_PATTERN_SRC);
  * @param style - Comment style (html or md)
  * @returns Joined KOHL comment strings
  */
-export function createKohlMarkers(
-	annotations: Annotation[],
-	style: CommentStyle,
-): string {
-	return annotations.map((ann) => createKohlMarker(ann, style)).join("\n");
+export function createKohlMarkers(annotations: Annotation[], style: CommentStyle): string {
+  return annotations.map((ann) => createKohlMarker(ann, style)).join("\n");
 }
 
 /**
@@ -35,32 +28,25 @@ export function createKohlMarkers(
  * @param style - Comment style (html or md)
  * @returns KOHL comment string
  */
-export function createKohlMarker(
-	annotation: Annotation,
-	style: CommentStyle,
-): string {
-	const meta = {
-		v: 1,
-		id: annotation.id ?? computeAnnotationId(annotation),
-		p: annotation.pageno,
-		pr: annotation.pageref,
-		pos0: annotation.pos0,
+export function createKohlMarker(annotation: Annotation, style: CommentStyle): string {
+  const meta = {
+    v: 1,
+    id: annotation.id ?? computeAnnotationId(annotation),
+    p: annotation.pageno,
+    pr: annotation.pageref,
+    pos0: annotation.pos0,
 
-		pos1: annotation.pos1,
-		t: annotation.datetime,
-		c: annotation.color,
-		d: annotation.drawer,
-	};
+    pos1: annotation.pos1,
+    t: annotation.datetime,
+    c: annotation.color,
+    d: annotation.drawer,
+  };
 
-	// Filter out undefined keys to keep comments clean
-	const cleanMeta = Object.fromEntries(
-		Object.entries(meta).filter(([, v]) => v !== undefined),
-	);
+  // Filter out undefined keys to keep comments clean
+  const cleanMeta = Object.fromEntries(Object.entries(meta).filter(([, v]) => v !== undefined));
 
-	const jsonMeta = JSON.stringify(cleanMeta);
-	return style === "html"
-		? `<!-- KOHL ${jsonMeta} -->`
-		: `%% KOHL ${jsonMeta} %%`;
+  const jsonMeta = JSON.stringify(cleanMeta);
+  return style === "html" ? `<!-- KOHL ${jsonMeta} -->` : `%% KOHL ${jsonMeta} %%`;
 }
 
 /**
@@ -69,8 +55,8 @@ export function createKohlMarker(
  * @returns Content with all KOHL markers removed
  */
 export function removeKohlComments(content: string): string {
-	const cleaned = content.replace(ANY_KOHL_MARKER_REGEX, "");
-	return cleaned.replace(/\n\s*\n(\s*\n)+/g, "\n\n");
+  const cleaned = content.replace(ANY_KOHL_MARKER_REGEX, "");
+  return cleaned.replace(/\n\s*\n(\s*\n)+/g, "\n\n");
 }
 
 /**
@@ -82,39 +68,31 @@ export function removeKohlComments(content: string): string {
  * @param targetStyle The desired comment style: 'html', 'md', or 'none'.
  * @returns The transformed body content.
  */
-export function convertKohlMarkers(
-	content: string,
-	targetStyle: CommentStyle,
-): string {
-	if (targetStyle === "none") {
-		// Delegate to the dedicated removal function for clarity.
-		return removeKohlComments(content);
-	}
+export function convertKohlMarkers(content: string, targetStyle: CommentStyle): string {
+  if (targetStyle === "none") {
+    // Delegate to the dedicated removal function for clarity.
+    return removeKohlComments(content);
+  }
 
-	if (targetStyle !== "html" && targetStyle !== "md") {
-		return content; // Return original content if target is invalid.
-	}
+  if (targetStyle !== "html" && targetStyle !== "md") {
+    return content; // Return original content if target is invalid.
+  }
 
-	// Use a replacer function to process each match safely.
-	return content.replace(
-		ANY_KOHL_MARKER_REGEX,
-		(match, jsonPayload: string) => {
-			// Safely parse the captured JSON payload.
-			const meta = safeParse<Record<string, unknown>>(jsonPayload);
+  // Use a replacer function to process each match safely.
+  return content.replace(ANY_KOHL_MARKER_REGEX, (match, jsonPayload: string) => {
+    // Safely parse the captured JSON payload.
+    const meta = safeParse<Record<string, unknown>>(jsonPayload);
 
-			// If the JSON is malformed, return the original comment block verbatim.
-			// This is a critical data-preservation step.
-			if (!meta) {
-				return match;
-			}
+    // If the JSON is malformed, return the original comment block verbatim.
+    // This is a critical data-preservation step.
+    if (!meta) {
+      return match;
+    }
 
-			// Re-stringify the parsed metadata to ensure it's clean and canonical.
-			const newJson = JSON.stringify(meta);
+    // Re-stringify the parsed metadata to ensure it's clean and canonical.
+    const newJson = JSON.stringify(meta);
 
-			// Generate the new marker in the target style.
-			return targetStyle === "html"
-				? `<!-- KOHL ${newJson} -->`
-				: `%% KOHL ${newJson} %%`;
-		},
-	);
+    // Generate the new marker in the target style.
+    return targetStyle === "html" ? `<!-- KOHL ${newJson} -->` : `%% KOHL ${newJson} %%`;
+  });
 }

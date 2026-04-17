@@ -1,30 +1,30 @@
 import { type App, Component, Scope } from "obsidian";
 
 export interface SuggestionListConfig<T> {
-	/**
-	 * Container element where the list will be rendered
-	 */
-	containerEl: HTMLElement;
+  /**
+   * Container element where the list will be rendered
+   */
+  containerEl: HTMLElement;
 
-	/**
-	 * Function to render each item
-	 */
-	renderItem: (item: T, el: HTMLElement) => void;
+  /**
+   * Function to render each item
+   */
+  renderItem: (item: T, el: HTMLElement) => void;
 
-	/**
-	 * Called when an item is selected (via click or Enter)
-	 */
-	onSelect: (item: T, event: MouseEvent | KeyboardEvent) => void;
+  /**
+   * Called when an item is selected (via click or Enter)
+   */
+  onSelect: (item: T, event: MouseEvent | KeyboardEvent) => void;
 
-	/**
-	 * Optional: Custom class for the container
-	 */
-	containerClass?: string;
+  /**
+   * Optional: Custom class for the container
+   */
+  containerClass?: string;
 
-	/**
-	 * Optional: Maximum visible items before scrolling
-	 */
-	maxVisibleItems?: number;
+  /**
+   * Optional: Maximum visible items before scrolling
+   */
+  maxVisibleItems?: number;
 }
 
 /**
@@ -32,210 +32,202 @@ export interface SuggestionListConfig<T> {
  * Manages its own state, rendering, and event handling.
  */
 export class SuggestionList<T> extends Component {
-	private items: T[] = [];
-	private selectedIndex = -1;
-	private itemEls: HTMLElement[] = [];
-	private scope: Scope;
+  private items: T[] = [];
+  private selectedIndex = -1;
+  private itemEls: HTMLElement[] = [];
+  private scope: Scope;
 
-	constructor(
-		private app: App,
-		private config: SuggestionListConfig<T>,
-	) {
-		super();
-		this.scope = new Scope();
+  constructor(
+    private app: App,
+    private config: SuggestionListConfig<T>,
+  ) {
+    super();
+    this.scope = new Scope();
 
-		if (this.config.containerClass) {
-			this.config.containerEl.addClass(this.config.containerClass);
-		}
+    if (this.config.containerClass) {
+      this.config.containerEl.addClass(this.config.containerClass);
+    }
 
-		this.setupEventHandlers();
-	}
+    this.setupEventHandlers();
+  }
 
-	/**
-	 * Update the list with new items and re-render
-	 */
-	setItems(items: T[]): void {
-		this.items = items;
-		this.selectedIndex = items.length > 0 ? 0 : -1;
-		this.render();
-	}
+  /**
+   * Update the list with new items and re-render
+   */
+  setItems(items: T[]): void {
+    this.items = items;
+    this.selectedIndex = items.length > 0 ? 0 : -1;
+    this.render();
+  }
 
-	/**
-	 * Clear the list and reset state
-	 */
-	clear(): void {
-		this.items = [];
-		this.selectedIndex = -1;
-		this.itemEls = [];
-		this.config.containerEl.empty();
-	}
+  /**
+   * Clear the list and reset state
+   */
+  clear(): void {
+    this.items = [];
+    this.selectedIndex = -1;
+    this.itemEls = [];
+    this.config.containerEl.empty();
+  }
 
-	/**
-	 * Get the currently selected item, if any
-	 */
-	getSelected(): T | null {
-		return this.items[this.selectedIndex] ?? null;
-	}
+  /**
+   * Get the currently selected item, if any
+   */
+  getSelected(): T | null {
+    return this.items[this.selectedIndex] ?? null;
+  }
 
-	/**
-	 * Programmatically select an item by index
-	 */
-	selectIndex(index: number): void {
-		if (index >= 0 && index < this.items.length) {
-			this.updateSelection(index, true);
-		}
-	}
+  /**
+   * Programmatically select an item by index
+   */
+  selectIndex(index: number): void {
+    if (index >= 0 && index < this.items.length) {
+      this.updateSelection(index, true);
+    }
+  }
 
-	/**
-	 * Activate this list (push keyboard scope)
-	 */
-	activate(): void {
-		this.app.keymap.pushScope(this.scope);
-	}
+  /**
+   * Activate this list (push keyboard scope)
+   */
+  activate(): void {
+    this.app.keymap.pushScope(this.scope);
+  }
 
-	/**
-	 * Deactivate this list (pop keyboard scope)
-	 */
-	deactivate(): void {
-		this.app.keymap.popScope(this.scope);
-	}
+  /**
+   * Deactivate this list (pop keyboard scope)
+   */
+  deactivate(): void {
+    this.app.keymap.popScope(this.scope);
+  }
 
-	onunload(): void {
-		this.clear();
-		// Scope cleanup happens automatically via Component lifecycle
-	}
+  onunload(): void {
+    this.clear();
+    // Scope cleanup happens automatically via Component lifecycle
+  }
 
-	public showEmpty(message: string): void {
-		this.clear();
-		const itemEl = this.config.containerEl.createDiv({
-			cls: "suggestion-item is-disabled",
-		});
-		itemEl.setText(message);
-	}
+  public showEmpty(message: string): void {
+    this.clear();
+    const itemEl = this.config.containerEl.createDiv({
+      cls: "suggestion-item is-disabled",
+    });
+    itemEl.setText(message);
+  }
 
-	private setupEventHandlers(): void {
-		// Keyboard navigation
-		this.scope.register([], "ArrowUp", () => {
-			this.moveSelection(-1);
-			return false; // Prevent default
-		});
+  private setupEventHandlers(): void {
+    // Keyboard navigation
+    this.scope.register([], "ArrowUp", () => {
+      this.moveSelection(-1);
+      return false; // Prevent default
+    });
 
-		this.scope.register([], "ArrowDown", () => {
-			this.moveSelection(1);
-			return false;
-		});
+    this.scope.register([], "ArrowDown", () => {
+      this.moveSelection(1);
+      return false;
+    });
 
-		this.scope.register([], "Enter", (evt) => {
-			const selected = this.getSelected();
-			if (selected) {
-				this.config.onSelect(selected, evt);
-			}
-			return false;
-		});
+    this.scope.register([], "Enter", (evt) => {
+      const selected = this.getSelected();
+      if (selected) {
+        this.config.onSelect(selected, evt);
+      }
+      return false;
+    });
 
-		// Mouse events via delegation (more efficient than per-item listeners)
-		this.registerDomEvent(
-			this.config.containerEl,
-			"click",
-			this.handleClick.bind(this),
-		);
+    // Mouse events via delegation (more efficient than per-item listeners)
+    this.registerDomEvent(this.config.containerEl, "click", this.handleClick.bind(this));
 
-		this.registerDomEvent(
-			this.config.containerEl,
-			"mousemove",
-			this.handleMouseMove.bind(this),
-		);
-	}
+    this.registerDomEvent(this.config.containerEl, "mousemove", this.handleMouseMove.bind(this));
+  }
 
-	private handleClick(evt: MouseEvent): void {
-		const itemEl = (evt.target as HTMLElement).closest(".suggestion-item");
-		if (!itemEl) return;
+  private handleClick(evt: MouseEvent): void {
+    const itemEl = (evt.target as HTMLElement).closest(".suggestion-item");
+    if (!itemEl) return;
 
-		const index = this.itemEls.indexOf(itemEl as HTMLElement);
-		if (index >= 0) {
-			const item = this.items[index];
-			if (item) {
-				this.config.onSelect(item, evt);
-			}
-		}
-	}
+    const index = this.itemEls.indexOf(itemEl as HTMLElement);
+    if (index >= 0) {
+      const item = this.items[index];
+      if (item) {
+        this.config.onSelect(item, evt);
+      }
+    }
+  }
 
-	private handleMouseMove(evt: MouseEvent): void {
-		const itemEl = (evt.target as HTMLElement).closest(".suggestion-item");
-		if (!itemEl) return;
+  private handleMouseMove(evt: MouseEvent): void {
+    const itemEl = (evt.target as HTMLElement).closest(".suggestion-item");
+    if (!itemEl) return;
 
-		const index = this.itemEls.indexOf(itemEl as HTMLElement);
-		if (index >= 0 && index !== this.selectedIndex) {
-			this.updateSelection(index, false);
-		}
-	}
+    const index = this.itemEls.indexOf(itemEl as HTMLElement);
+    if (index >= 0 && index !== this.selectedIndex) {
+      this.updateSelection(index, false);
+    }
+  }
 
-	private render(): void {
-		this.config.containerEl.empty();
-		this.itemEls = [];
+  private render(): void {
+    this.config.containerEl.empty();
+    this.itemEls = [];
 
-		for (let i = 0; i < this.items.length; i++) {
-			const item = this.items[i];
-			const itemEl = this.config.containerEl.createDiv({
-				cls: "suggestion-item",
-			});
+    for (let i = 0; i < this.items.length; i++) {
+      const item = this.items[i];
+      const itemEl = this.config.containerEl.createDiv({
+        cls: "suggestion-item",
+      });
 
-			if (i === this.selectedIndex) {
-				itemEl.addClass("is-selected");
-			}
+      if (i === this.selectedIndex) {
+        itemEl.addClass("is-selected");
+      }
 
-			this.config.renderItem(item, itemEl);
-			this.itemEls.push(itemEl);
-		}
+      this.config.renderItem(item, itemEl);
+      this.itemEls.push(itemEl);
+    }
 
-		// Apply max height if configured - calculate based on multiple items for better accuracy
-		if (this.config.maxVisibleItems && this.itemEls.length > 0) {
-			// Sample first few items to estimate average height (more reliable than just first item)
-			const sampleSize = Math.min(5, this.itemEls.length);
-			let totalHeight = 0;
-			let validSamples = 0;
+    // Apply max height if configured - calculate based on multiple items for better accuracy
+    if (this.config.maxVisibleItems && this.itemEls.length > 0) {
+      // Sample first few items to estimate average height (more reliable than just first item)
+      const sampleSize = Math.min(5, this.itemEls.length);
+      let totalHeight = 0;
+      let validSamples = 0;
 
-			for (let i = 0; i < sampleSize; i++) {
-				const height = this.itemEls[i].offsetHeight;
-				if (height > 0) {
-					totalHeight += height;
-					validSamples++;
-				}
-			}
+      for (let i = 0; i < sampleSize; i++) {
+        const height = this.itemEls[i].offsetHeight;
+        if (height > 0) {
+          totalHeight += height;
+          validSamples++;
+        }
+      }
 
-			const avgHeight = validSamples > 0 ? totalHeight / validSamples : 32; // fallback height
-			const maxHeight = avgHeight * this.config.maxVisibleItems;
+      const avgHeight = validSamples > 0 ? totalHeight / validSamples : 32; // fallback height
+      const maxHeight = avgHeight * this.config.maxVisibleItems;
 
-			this.config.containerEl.style.maxHeight = `${maxHeight}px`;
-			this.config.containerEl.style.overflowY = "auto";
-			this.config.containerEl.style.overflowX = "hidden"; // Prevent horizontal scroll
-		}
-	}
+      this.config.containerEl.style.maxHeight = `${maxHeight}px`;
+      this.config.containerEl.style.overflowY = "auto";
+      this.config.containerEl.style.overflowX = "hidden"; // Prevent horizontal scroll
+    }
+  }
 
-	private moveSelection(delta: number): void {
-		if (this.items.length === 0) return;
+  private moveSelection(delta: number): void {
+    if (this.items.length === 0) return;
 
-		const newIndex = this.wrapIndex(this.selectedIndex + delta);
-		this.updateSelection(newIndex, true);
-	}
+    const newIndex = this.wrapIndex(this.selectedIndex + delta);
+    this.updateSelection(newIndex, true);
+  }
 
-	private updateSelection(newIndex: number, scrollIntoView: boolean): void {
-		const prevEl = this.itemEls[this.selectedIndex];
-		const nextEl = this.itemEls[newIndex];
+  private updateSelection(newIndex: number, scrollIntoView: boolean): void {
+    const prevEl = this.itemEls[this.selectedIndex];
+    const nextEl = this.itemEls[newIndex];
 
-		prevEl?.removeClass("is-selected");
-		nextEl?.addClass("is-selected");
+    prevEl?.removeClass("is-selected");
+    nextEl?.addClass("is-selected");
 
-		this.selectedIndex = newIndex;
+    this.selectedIndex = newIndex;
 
-		if (scrollIntoView && nextEl) {
-			nextEl.scrollIntoView({ block: "nearest" });
-		}
-	}
+    if (scrollIntoView && nextEl) {
+      nextEl.scrollIntoView({ block: "nearest" });
+    }
+  }
 
-	private wrapIndex(index: number): number {
-		const size = this.items.length;
-		if (size === 0) return -1;
-		return ((index % size) + size) % size;
-	}
+  private wrapIndex(index: number): number {
+    const size = this.items.length;
+    if (size === 0) return -1;
+    return ((index % size) + size) % size;
+  }
 }

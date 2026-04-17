@@ -3,54 +3,43 @@ import type { ExecResult } from "src/services/import/types";
 import type { AppResult } from "./lib/errors/types";
 
 // --- Lua Parser Related ---
-export type LuaValue =
-	| string
-	| number
-	| boolean
-	| Record<string, any>
-	| null
-	| undefined;
+export type LuaValue = string | number | boolean | Record<string, any> | null | undefined;
 
 // --- Core Data Structures ---
 
 export interface BaseMetadata {
-	title: string;
-	authors: string;
-	description?: string;
-	keywords?: string;
-	series?: string;
-	language?: string;
-	identifiers?: string;
+  title: string;
+  authors: string;
+  description?: string;
+  keywords?: string;
+  series?: string;
+  language?: string;
+  identifiers?: string;
 }
 
 export interface DocProps extends BaseMetadata {}
 
 export interface PositionObject {
-	x: number;
-	y: number;
+  x: number;
+  y: number;
 }
 
-export const DRAWER_TYPES = [
-	"lighten",
-	"underscore",
-	"strikeout",
-	"invert",
-] as const;
+export const DRAWER_TYPES = ["lighten", "underscore", "strikeout", "invert"] as const;
 export type DrawerType = (typeof DRAWER_TYPES)[number];
 
 export interface Annotation {
-	id?: string;
-	chapter?: string;
-	datetime: string;
-	datetime_updated?: string;
-	pageno: number;
-	pageref?: string;
-	text?: string;
-	note?: string;
-	color?: string;
-	drawer?: DrawerType;
-	pos0?: string | PositionObject;
-	pos1?: string | PositionObject;
+  id?: string;
+  chapter?: string;
+  datetime: string;
+  datetime_updated?: string;
+  pageno: number;
+  pageref?: string;
+  text?: string;
+  note?: string;
+  color?: string;
+  drawer?: DrawerType;
+  pos0?: string | PositionObject;
+  pos1?: string | PositionObject;
 }
 
 // --- Database Related ---
@@ -58,120 +47,120 @@ export interface Annotation {
 export type ReadingStatus = "ongoing" | "completed" | "unstarted";
 
 export interface ReadingProgress {
-	percentComplete: number;
-	averageTimePerPage: number;
-	firstReadDate: Date | null;
-	lastReadDate: Date | null;
-	readingStatus: ReadingStatus;
-	totalReadSeconds: number;
-	sessionCount: number;
-	readingStreak: number; // Consecutive days with reading activity
-	avgSessionDuration: number; // Average session duration in seconds
+  percentComplete: number;
+  averageTimePerPage: number;
+  firstReadDate: Date | null;
+  lastReadDate: Date | null;
+  readingStatus: ReadingStatus;
+  totalReadSeconds: number;
+  sessionCount: number;
+  readingStreak: number; // Consecutive days with reading activity
+  avgSessionDuration: number; // Average session duration in seconds
 }
 
 // Represents data directly from the 'book' table joined with base metadata needs
 export interface BookStatistics extends BaseMetadata {
-	id: number;
-	md5: string;
-	last_open: number;
-	pages: number;
-	total_read_time: number;
-	total_read_pages: number;
+  id: number;
+  md5: string;
+  last_open: number;
+  pages: number;
+  total_read_time: number;
+  total_read_pages: number;
 }
 
 // Represents data directly from the 'page_stat_data' table
 export interface PageStatData {
-	id_book: number;
-	page: number;
-	start_time: number;
-	duration: number;
-	total_pages: number;
+  id_book: number;
+  page: number;
+  start_time: number;
+  duration: number;
+  total_pages: number;
 }
 
 export interface BookStatisticsBundle {
-	book: BookStatistics;
-	readingSessions: PageStatData[];
-	derived: ReadingProgress;
+  book: BookStatistics;
+  readingSessions: PageStatData[];
+  derived: ReadingProgress;
 }
 
 // --- Combined Metadata Structure (Input for processing) ---
 
 export interface LuaMetadata {
-	docProps: DocProps;
-	pages?: number | null;
-	annotations: Annotation[];
-	statistics?: {
-		book: BookStatistics;
-		readingSessions: PageStatData[];
-		derived: ReadingProgress;
-	};
-	originalFilePath?: string;
-	md5?: string;
-	percentFinished?: number; // 0.0 to 1.0
-	luaSummary?: {
-		rating?: number;
-		status?: string;
-		modified?: string;
-	};
-	luaStats?: {
-		pages?: number;
-		language?: string;
-	};
+  docProps: DocProps;
+  pages?: number | null;
+  annotations: Annotation[];
+  statistics?: {
+    book: BookStatistics;
+    readingSessions: PageStatData[];
+    derived: ReadingProgress;
+  };
+  originalFilePath?: string;
+  md5?: string;
+  percentFinished?: number; // 0.0 to 1.0
+  luaSummary?: {
+    rating?: number;
+    status?: string;
+    modified?: string;
+  };
+  luaStats?: {
+    pages?: number;
+    language?: string;
+  };
 }
 
 // --- Frontmatter Data Structure ---
 
 export interface FrontmatterData {
-	title: string;
-	authors: string | string[];
-	description?: string;
-	keywords?: string | string[];
-	series?: string;
-	language?: string;
-	pages?: number;
-	highlightCount?: number;
-	noteCount?: number;
-	readingStatus?: ReadingStatus;
-	progress?: string; // Formatted as percentage
-	lastRead?: string;
-	firstRead?: string;
-	readTime?: string | number; // Output field, format depends on settings
-	averageTimePerPage?: string;
-	[key: string]: string | string[] | number | undefined;
+  title: string;
+  authors: string | string[];
+  description?: string;
+  keywords?: string | string[];
+  series?: string;
+  language?: string;
+  pages?: number;
+  highlightCount?: number;
+  noteCount?: number;
+  readingStatus?: ReadingStatus;
+  progress?: string; // Formatted as percentage
+  lastRead?: string;
+  firstRead?: string;
+  readTime?: string | number; // Output field, format depends on settings
+  averageTimePerPage?: string;
+  [key: string]: string | string[] | number | undefined;
 }
 
 export interface ParsedFrontmatter {
-	[key: string]: string | string[] | number | undefined;
+  [key: string]: string | string[] | number | undefined;
 }
 
 export interface FrontmatterContent {
-	content: string;
-	frontmatter: ParsedFrontmatter;
+  content: string;
+  frontmatter: ParsedFrontmatter;
 }
 
 // --- Settings Related Types ---
 
 export interface FrontmatterSettings {
-	disabledFields: string[];
-	customFields: string[];
-	useUnknownAuthor: boolean;
-	keywordsAsTags: "none" | "duplicate" | "replace";
-	durationFormat: "formatted" | "seconds";
+  disabledFields: string[];
+  customFields: string[];
+  useUnknownAuthor: boolean;
+  keywordsAsTags: "none" | "duplicate" | "replace";
+  durationFormat: "formatted" | "seconds";
 }
 
 export interface KoreaderTemplateSettings {
-	useCustomTemplate: boolean;
-	source: "vault" | "external" | string;
-	selectedTemplate: string;
-	templateDir: string;
-	/**
-	 * Controls how notes are formatted in templates.
-	 * - "auto": Smart detection - adds blockquote if template doesn't handle it
-	 * - "manual": Respect template formatting only, no auto-quoting
-	 * - "never": Never add blockquotes to notes (explicit opt-out)
-	 * @default "auto"
-	 */
-	noteQuotingMode: "auto" | "manual" | "never";
+  useCustomTemplate: boolean;
+  source: "vault" | "external" | string;
+  selectedTemplate: string;
+  templateDir: string;
+  /**
+   * Controls how notes are formatted in templates.
+   * - "auto": Smart detection - adds blockquote if template doesn't handle it
+   * - "manual": Respect template formatting only, no auto-quoting
+   * - "never": Never add blockquotes to notes (explicit opt-out)
+   * @default "auto"
+   */
+  noteQuotingMode: "auto" | "manual" | "never";
 }
 
 // Comment style for tracking imported highlights
@@ -179,96 +168,91 @@ export type CommentStyle = "html" | "md" | "none";
 
 // Main Plugin Settings Interface
 export interface KoreaderHighlightImporterSettings {
-	koreaderScanPath: string;
-	/** Optional absolute path override to KOReader statistics.sqlite3 file. Empty string disables override. */
-	statsDbPathOverride: string;
-	excludedFolders: string[];
-	allowedFileTypes: string[];
-	highlightsFolder: string;
-	logToFile: boolean;
-	logLevel: 0 | 1 | 2 | 3; // 0=None, 1=Info, 2=Warn, 3=Error
-	logsFolder: string;
-	enableFullDuplicateCheck: boolean;
-	fileNameTemplate: string;
-	useCustomFileNameTemplate: boolean;
-	autoMergeOnAddition: boolean;
-	silentImport: boolean;
-	defaultMergeStrategy: "merge" | "replace" | "skip";
-	frontmatter: FrontmatterSettings;
-	maxHighlightGap: number;
-	maxTimeGapMinutes: number;
-	mergeOverlappingHighlights: boolean;
-	template: KoreaderTemplateSettings;
-	commentStyle: CommentStyle;
-	backupRetentionDays: number;
-	maxBackupsPerNote: number;
-	lastDeviceTimestamp?: string;
-	scanTimeoutSeconds: number;
+  koreaderScanPath: string;
+  /** Optional absolute path override to KOReader statistics.sqlite3 file. Empty string disables override. */
+  statsDbPathOverride: string;
+  excludedFolders: string[];
+  allowedFileTypes: string[];
+  highlightsFolder: string;
+  logToFile: boolean;
+  logLevel: 0 | 1 | 2 | 3; // 0=None, 1=Info, 2=Warn, 3=Error
+  logsFolder: string;
+  enableFullDuplicateCheck: boolean;
+  fileNameTemplate: string;
+  useCustomFileNameTemplate: boolean;
+  autoMergeOnAddition: boolean;
+  silentImport: boolean;
+  defaultMergeStrategy: "merge" | "replace" | "skip";
+  frontmatter: FrontmatterSettings;
+  maxHighlightGap: number;
+  maxTimeGapMinutes: number;
+  mergeOverlappingHighlights: boolean;
+  template: KoreaderTemplateSettings;
+  commentStyle: CommentStyle;
+  backupRetentionDays: number;
+  maxBackupsPerNote: number;
+  lastDeviceTimestamp?: string;
+  scanTimeoutSeconds: number;
 }
 
 /** Import Indexing **/
 
 export interface ImportIndexEntry {
-	/** The file's modification time (in epoch milliseconds) when it was last processed. */
-	mtime: number;
-	/** The file's size (in bytes) when it was last processed. */
-	size: number;
-	/** The ISO datetime string of the newest annotation found in the entire file. */
-	newestAnnotationTimestamp: string | null;
+  /** The file's modification time (in epoch milliseconds) when it was last processed. */
+  mtime: number;
+  /** The file's size (in bytes) when it was last processed. */
+  size: number;
+  /** The ISO datetime string of the newest annotation found in the entire file. */
+  newestAnnotationTimestamp: string | null;
 }
 
 export type ImportIndex = Record<string, ImportIndexEntry>;
 
 // --- UI / Modal Related Types ---
 
-export type DuplicateChoice =
-	| "replace"
-	| "merge"
-	| "keep-both"
-	| "skip"
-	| "automerge";
+export type DuplicateChoice = "replace" | "merge" | "keep-both" | "skip" | "automerge";
 
 export interface DuplicateMatch {
-	file: TFile;
-	matchType: "exact" | "updated" | "divergent";
-	newHighlights: number;
-	modifiedHighlights: number;
-	luaMetadata: LuaMetadata;
-	/** UID currently assigned to the existing file (from cache), if present. */
-	expectedUid?: string;
-	canMergeSafely: boolean;
+  file: TFile;
+  matchType: "exact" | "updated" | "divergent";
+  newHighlights: number;
+  modifiedHighlights: number;
+  luaMetadata: LuaMetadata;
+  /** UID currently assigned to the existing file (from cache), if present. */
+  expectedUid?: string;
+  canMergeSafely: boolean;
 }
 
 // Duplicate scan confidence and standardized result used by the pipeline
 export type ScanConfidence = "full" | "partial";
 
 export interface DuplicateScanResult {
-	confidence: ScanConfidence;
-	match: DuplicateMatch | null;
+  confidence: ScanConfidence;
+  match: DuplicateMatch | null;
 }
 
 export interface DuplicateHandlingSession {
-	applyToAll: boolean;
-	choice: DuplicateChoice | null;
+  applyToAll: boolean;
+  choice: DuplicateChoice | null;
 }
 
 export type StaleLocationChoice = "merge-stale" | "create-new" | "skip-stale";
 
 export interface StaleLocationSession {
-	applyToAll: boolean;
-	choice: StaleLocationChoice | null;
+  applyToAll: boolean;
+  choice: StaleLocationChoice | null;
 }
 
 export interface IDuplicateHandlingModal {
-	openAndGetChoice(): Promise<{
-		choice: DuplicateChoice | null; // choice can be null if modal is closed
-		applyToAll: boolean;
-	}>;
+  openAndGetChoice(): Promise<{
+    choice: DuplicateChoice | null; // choice can be null if modal is closed
+    applyToAll: boolean;
+  }>;
 }
 
 export interface RenderContext {
-	isFirstInChapter: boolean;
-	separators?: (" " | " [...] ")[];
+  isFirstInChapter: boolean;
+  separators?: (" " | " [...] ")[];
 }
 
 /**
@@ -276,12 +260,12 @@ export interface RenderContext {
  * Categorizes scanned files by whether they contain annotations.
  */
 export interface ScanCommandResult {
-	/** Files with highlights/annotations */
-	withAnnotations: string[];
-	/** Files without highlights (metadata exists but no annotations) */
-	withoutAnnotations: string[];
-	/** Files that could not be read or parsed */
-	errors: Array<{ file: string; error: string }>;
+  /** Files with highlights/annotations */
+  withAnnotations: string[];
+  /** Files without highlights (metadata exists but no annotations) */
+  withoutAnnotations: string[];
+  /** Files that could not be read or parsed */
+  errors: Array<{ file: string; error: string }>;
 }
 
 /**
@@ -289,28 +273,28 @@ export interface ScanCommandResult {
  * Keys are derived to enable keyof-based validation elsewhere.
  */
 export interface TemplateData {
-	readonly highlight?: string;
-	readonly highlightPlain?: string;
-	readonly chapter?: string;
-	readonly pageno?: number | string; // "19" or "iv"
-	readonly pageref?: string;
-	readonly isFirstInChapter?: boolean;
+  readonly highlight?: string;
+  readonly highlightPlain?: string;
+  readonly chapter?: string;
+  readonly pageno?: number | string; // "19" or "iv"
+  readonly pageref?: string;
+  readonly isFirstInChapter?: boolean;
 
-	readonly note?: string;
-	readonly notes?: readonly string[];
-	readonly date?: string; // Stable "en-US" format
-	readonly time?: string; // Stable "{YYYY}/{MM}/{DD} {HH}:{mm}:{ss}" format
-	/** 4-char random hex string (e.g. "a1b2") for generating unique IDs */
-	readonly randomHex?: string;
-	readonly localeDate?: string; // system locale format
-	readonly dailyNoteLink?: string; // daily note link format
+  readonly note?: string;
+  readonly notes?: readonly string[];
+  readonly date?: string; // Stable "en-US" format
+  readonly time?: string; // Stable "{YYYY}/{MM}/{DD} {HH}:{mm}:{ss}" format
+  /** 4-char random hex string (e.g. "a1b2") for generating unique IDs */
+  readonly randomHex?: string;
+  readonly localeDate?: string; // system locale format
+  readonly dailyNoteLink?: string; // daily note link format
 
-	// Color-related variables derived from KOReader metadata
-	readonly color?: string; // normalized palette color (red, orange, yellow, green, olive, cyan, blue, purple, gray)
-	readonly drawer?: DrawerType; // KOReader drawer style
-	readonly khlBg?: string; // e.g., "var(--khl-yellow)"
-	readonly khlFg?: string; // e.g., "var(--on-khl-yellow)"
-	readonly callout?: string; // alias for color for templates preferring {{callout}}
+  // Color-related variables derived from KOReader metadata
+  readonly color?: string; // normalized palette color (red, orange, yellow, green, olive, cyan, blue, purple, gray)
+  readonly drawer?: DrawerType; // KOReader drawer style
+  readonly khlBg?: string; // e.g., "var(--khl-yellow)"
+  readonly khlFg?: string; // e.g., "var(--on-khl-yellow)"
+  readonly callout?: string; // alias for color for templates preferring {{callout}}
 }
 /**
  * Narrow set of allowed keys for variables/blocks in templates.
@@ -323,39 +307,37 @@ export type TemplateDataKey = keyof TemplateData;
 export type ReadonlyTemplateData = Readonly<TemplateData>;
 
 export interface TemplateDefinition {
-	id: string;
-	name: string;
-	description: string;
-	content: string;
+  id: string;
+  name: string;
+  description: string;
+  content: string;
 }
 
 export interface Summary {
-	created: number;
-	merged: number;
-	automerged: number;
-	skipped: number;
-	errors: number;
+  created: number;
+  merged: number;
+  automerged: number;
+  skipped: number;
+  errors: number;
 }
 
 export const Summary = {
-	empty: (): Summary => ({
-		created: 0,
-		merged: 0,
-		automerged: 0,
-		skipped: 0,
-		errors: 0,
-	}),
-	add: (a: Summary, b: Partial<Summary>): Summary => ({
-		created: a.created + (b.created ?? 0),
-		merged: a.merged + (b.merged ?? 0),
-		automerged: a.automerged + (b.automerged ?? 0),
-		skipped: a.skipped + (b.skipped ?? 0),
-		errors: a.errors + (b.errors ?? 0),
-	}),
-	addResult: (acc: Summary, res: ExecResult): Summary =>
-		Summary.add(acc, { [res.status]: 1 }),
-	summarize: (results: ExecResult[]): Summary =>
-		results.reduce(Summary.addResult, Summary.empty()),
+  empty: (): Summary => ({
+    created: 0,
+    merged: 0,
+    automerged: 0,
+    skipped: 0,
+    errors: 0,
+  }),
+  add: (a: Summary, b: Partial<Summary>): Summary => ({
+    created: a.created + (b.created ?? 0),
+    merged: a.merged + (b.merged ?? 0),
+    automerged: a.automerged + (b.automerged ?? 0),
+    skipped: a.skipped + (b.skipped ?? 0),
+    errors: a.errors + (b.errors ?? 0),
+  }),
+  addResult: (acc: Summary, res: ExecResult): Summary => Summary.add(acc, { [res.status]: 1 }),
+  summarize: (results: ExecResult[]): Summary => results.reduce(Summary.addResult, Summary.empty()),
 };
 
 /**
@@ -363,11 +345,11 @@ export const Summary = {
  * Implementations include the built-in `Map` and our consolidated `SimpleCache` (LRU-capable).
  */
 export interface Cache<K, V> {
-	get(key: K): V | undefined;
-	set(key: K, value: V): void;
-	delete(key: K): boolean;
-	clear(): void;
-	readonly size: number;
+  get(key: K): V | undefined;
+  set(key: K, value: V): void;
+  delete(key: K): boolean;
+  clear(): void;
+  readonly size: number;
 }
 
 /**
@@ -376,86 +358,86 @@ export interface Cache<K, V> {
 export type AsyncLoader<K, V> = (key: K) => Promise<AppResult<V>>;
 
 export interface Disposable {
-	dispose(): void | Promise<void>;
+  dispose(): void | Promise<void>;
 }
 
 export interface SettingsObserver {
-	onSettingsChanged(
-		newSettings: KoreaderHighlightImporterSettings,
-		oldSettings?: KoreaderHighlightImporterSettings,
-	): void;
+  onSettingsChanged(
+    newSettings: KoreaderHighlightImporterSettings,
+    oldSettings?: KoreaderHighlightImporterSettings,
+  ): void;
 }
 
 export interface DebouncedFn {
-	(): void;
-	cancel(): void;
+  (): void;
+  cancel(): void;
 }
 
 /** Book metadata extracted from a vault file for indexing */
 export interface BookMetadata {
-	key: string;
-	title: string;
-	authors: string;
-	vaultPath: string;
+  key: string;
+  title: string;
+  authors: string;
+  vaultPath: string;
 }
 
 /** Interface for metadata extractor used by indexing pipeline */
 export interface FileMetadataExtractor {
-	extractMetadata(file: TFile): Promise<BookMetadata | null>;
+  extractMetadata(file: TFile): Promise<BookMetadata | null>;
 }
 
 // --- File Operation Result Types ---
 
 export type FileOperationResult =
-	| { success: true; file: TFile }
-	| {
-			success: false;
-			reason: "user_skipped" | "collision" | "error";
-			error?: Error;
-	  };
+  | { success: true; file: TFile }
+  | {
+      success: false;
+      reason: "user_skipped" | "collision" | "error";
+      error?: Error;
+    };
 
 // --- Persisted Plugin Data Shape ---
 
 export interface PluginData {
-	/** Increment when the shape of `settings` changes. */
-	schemaVersion: number;
-	/** User settings (validated/canonicalized). */
-	settings: KoreaderHighlightImporterSettings;
-	/** Ledger of idempotent migrations applied. */
-	appliedMigrations: string[];
-	/** Last plugin version that successfully ran migrations (diagnostics). */
-	lastPluginMigratedTo?: string;
-	/** Timestamp of last successful snapshot GC run (epoch ms). */
-	lastSnapshotGCRunAt?: number;
+  /** Increment when the shape of `settings` changes. */
+  schemaVersion: number;
+  /** User settings (validated/canonicalized). */
+  settings: KoreaderHighlightImporterSettings;
+  /** Ledger of idempotent migrations applied. */
+  appliedMigrations: string[];
+  /** Last plugin version that successfully ran migrations (diagnostics). */
+  lastPluginMigratedTo?: string;
+  /** Timestamp of last successful snapshot GC run (epoch ms). */
+  lastSnapshotGCRunAt?: number;
 }
 
 export const CURRENT_SCHEMA_VERSION = 1;
 
 export type NoteDoc = {
-	frontmatter: Record<string, unknown>;
-	body: string;
+  frontmatter: Record<string, unknown>;
+  body: string;
 };
 
 export type NoteUpdater = (
-	doc: NoteDoc,
+  doc: NoteDoc,
 ) => NoteDoc | null | undefined | Promise<NoteDoc | null | undefined>;
 
 export type EditContext = {
-	file: TFile;
-	newContent: string;
-	currentDoc: NoteDoc;
-	nextDoc: NoteDoc;
+  file: TFile;
+  newContent: string;
+  currentDoc: NoteDoc;
+  nextDoc: NoteDoc;
 };
 
 export type EditFileResult = {
-	changed: boolean;
-	file: TFile;
+  changed: boolean;
+  file: TFile;
 };
 
 export type EditFileOptions = {
-	skipIfNoChange?: boolean;
-	detectConcurrentModification?: boolean;
-	beforeWrite?: (ctx: EditContext) => Promise<AppResult<void>>;
-	afterWrite?: (ctx: EditContext) => Promise<void>;
-	signal?: AbortSignal;
+  skipIfNoChange?: boolean;
+  detectConcurrentModification?: boolean;
+  beforeWrite?: (ctx: EditContext) => Promise<AppResult<void>>;
+  afterWrite?: (ctx: EditContext) => Promise<void>;
+  signal?: AbortSignal;
 };

@@ -2,5 +2,5 @@
 /// <reference types="vitest" />
 
 declare global {
-	var KOREADER_BUILTIN_TEMPLATES: string;
+  var KOREADER_BUILTIN_TEMPLATES: string;
 }
